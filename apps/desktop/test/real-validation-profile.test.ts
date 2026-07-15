@@ -14,8 +14,10 @@ import {
   createValidationProfile,
   resolveTetiProfile,
   TETI_ALLOW_REAL_PROVISIONING,
+  TETI_DESKTOP_NATIVE_PROVISIONING,
   TETI_PROFILE_DIR,
   TETI_PROVISIONING_MODE,
+  validateAuthorizedProvisioningProfile,
   validateRealProvisioningProfile
 } from "../lifecycle-sidecar/profile.ts";
 
@@ -71,6 +73,17 @@ test("real validation accepts an authorized isolated profile", async () => {
   }
 });
 
+test("native desktop authorization selects the production profile without a terminal-only flag", async () => {
+  const report = await validateAuthorizedProvisioningProfile({
+    [TETI_DESKTOP_NATIVE_PROVISIONING]: "1",
+    [TETI_PROVISIONING_MODE]: "real",
+    [TETI_CHATMAIL_RELAY_DOMAIN]: "mail.seep.im"
+  });
+
+  assert.equal(report.ok, true);
+  assert.equal(report.profile?.root, join(homedir(), ".teti"));
+});
+
 test("existing account blocks guarded real account creation", async () => {
   const profile = await createTempValidationProfile();
   const previousEnv = snapshotEnv();
@@ -87,7 +100,7 @@ test("existing account blocks guarded real account creation", async () => {
       version: 1,
       id: "create",
       method: "account.create",
-      params: { name: "Another Teti" }
+      params: { name: "Nova" }
     });
 
     assert.equal(response.ok, false);

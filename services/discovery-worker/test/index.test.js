@@ -43,6 +43,24 @@ test("register rejects private fields", async () => {
   assert.equal(body.success, false);
 });
 
+test("register is idempotent for the same relay identity and refreshes ttl", async () => {
+  const env = createEnv();
+  const payload = {
+    version: 1,
+    id: "teti_a83kd9",
+    address: "yxmtewmvc@mail.seep.im",
+    publicKey: "stable-public-key",
+    publicProfile: { platform: "macOS" }
+  };
+
+  assert.equal((await handleRequest(jsonRequest("https://registry.test/register", payload), env)).status, 201);
+  const retry = await handleRequest(jsonRequest("https://registry.test/register", payload), env);
+
+  assert.equal(retry.status, 200);
+  assert.equal((await retry.json()).data.id, payload.id);
+  assert.equal(env.putOptions.get("teti:teti_a83kd9").expirationTtl, 604800);
+});
+
 test("heartbeat updates only updatedAt and refreshes ttl", async () => {
   const env = createEnv();
   env.store.set("teti:teti_a83kd9", JSON.stringify({

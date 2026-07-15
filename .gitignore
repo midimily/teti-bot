@@ -3,4 +3,5 @@ node_modules/
 .wrangler/
 dist/
 coverage/
+apps/desktop/src-tauri/resources/
 .DS_Store

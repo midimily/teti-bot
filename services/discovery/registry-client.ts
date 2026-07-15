@@ -4,6 +4,7 @@ import type {
 } from "../../core/account/model.ts";
 
 export const DEFAULT_TETI_REGISTRY_URL = "https://teti-registry.seep2026.workers.dev";
+export const TETI_REGISTRY_URL_ENV = "TETI_REGISTRY_URL";
 
 export interface DiscoveryIdentity {
   version: 1;
@@ -34,17 +35,32 @@ interface RegistryResponse<TData> {
 export class RegistryDiscoveryClient implements DiscoveryClient {
   private readonly baseUrl: string;
 
-  constructor(baseUrl = DEFAULT_TETI_REGISTRY_URL) {
-    this.baseUrl = baseUrl.replace(/\/$/, "");
+  constructor(baseUrl = resolveTetiRegistryUrl()) {
+    this.baseUrl = normalizeRegistryUrl(baseUrl);
   }
 
   async registerIdentity(payload: DiscoveryRegistrationPayload): Promise<DiscoveryIdentity> {
-    const response = await this.request<DiscoveryIdentity>("/register", {
-      method: "POST",
-      body: JSON.stringify(payload)
-    });
+    try {
+      return await this.request<DiscoveryIdentity>("/register", {
+        method: "POST",
+        body: JSON.stringify(payload)
+      });
+    } catch (error) {
+      if (!(error instanceof RegistryClientError) || error.status !== 409 || error.code !== "IDENTITY_EXISTS") {
+        throw error;
+      }
 
-    return response;
+      const existing = await this.getIdentity(payload.id);
+      if (
+        !existing ||
+        existing.address !== payload.address ||
+        existing.publicKey !== payload.publicKey
+      ) {
+        throw error;
+      }
+
+      return existing;
+    }
   }
 
   async heartbeatIdentity(payload: DiscoveryHeartbeatPayload): Promise<DiscoveryIdentity> {
@@ -102,6 +118,36 @@ export class RegistryDiscoveryClient implements DiscoveryClient {
 
     return body.data as TData;
   }
+}
+
+export function resolveTetiRegistryUrl(
+  env: Record<string, string | undefined> = readProcessEnvironment()
+): string {
+  return normalizeRegistryUrl(env[TETI_REGISTRY_URL_ENV] ?? DEFAULT_TETI_REGISTRY_URL);
+}
+
+function normalizeRegistryUrl(value: string): string {
+  const raw = value.trim();
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new Error("TETI_REGISTRY_URL must be a valid absolute URL.");
+  }
+
+  const localHttp = url.protocol === "http:" && ["localhost", "127.0.0.1", "::1"].includes(url.hostname);
+  if (url.protocol !== "https:" && !localHttp) {
+    throw new Error("TETI_REGISTRY_URL must use HTTPS outside local development.");
+  }
+  if (url.username || url.password || url.search || url.hash || !["", "/"].includes(url.pathname)) {
+    throw new Error("TETI_REGISTRY_URL must contain only the registry origin.");
+  }
+
+  return url.origin;
+}
+
+function readProcessEnvironment(): Record<string, string | undefined> {
+  return typeof process === "undefined" ? {} : process.env;
 }
 
 export class RegistryClientError extends Error {

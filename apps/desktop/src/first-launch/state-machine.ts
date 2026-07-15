@@ -50,6 +50,7 @@ type FirstLaunchEvent =
   | { type: "start_check" }
   | { type: "no_account" }
   | { type: "account_loaded"; account: TetiAccount }
+  | { type: "account_registration_pending"; account: TetiAccount; error: FirstLaunchError }
   | { type: "load_failed"; error: FirstLaunchError }
   | { type: "show_naming" }
   | { type: "update_name"; value: string }
@@ -107,6 +108,16 @@ export class FirstLaunchStateMachine {
           nameInput: event.account.displayName ?? current.nameInput,
           submitting: false,
           account: event.account
+        };
+
+      case "account_registration_pending":
+        this.assertState(current, event.type, ["checking_existing_account"]);
+        return {
+          state: "recoverable_error",
+          nameInput: event.account.displayName ?? current.nameInput,
+          submitting: false,
+          account: event.account,
+          error: event.error
         };
 
       case "load_failed":

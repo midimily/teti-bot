@@ -13,8 +13,11 @@ export type MockProvisioningScenario =
   | "discovery_failure"
   | "persistence_failure";
 
-export function readProvisioningMode(env: Record<string, string | undefined>): ProvisioningModeConfig {
-  const requestedMode = env.TETI_PROVISIONING_MODE ?? env.VITE_TETI_PROVISIONING_MODE ?? "mock";
+export function readProvisioningMode(
+  env: Record<string, string | undefined>,
+  defaultMode: TetiProvisioningMode = "mock"
+): ProvisioningModeConfig {
+  const requestedMode = env.TETI_PROVISIONING_MODE ?? env.VITE_TETI_PROVISIONING_MODE ?? defaultMode;
   const mode: TetiProvisioningMode = requestedMode === "real" ? "real" : "mock";
   const scenario = normalizeMockScenario(
     env.TETI_MOCK_PROVISIONING_SCENARIO ?? env.VITE_TETI_MOCK_PROVISIONING_SCENARIO

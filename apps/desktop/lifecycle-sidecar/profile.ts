@@ -2,7 +2,7 @@ import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { basename, isAbsolute, join, resolve, sep } from "node:path";
 import { FileTetiAccountStorage } from "../../../core/account/storage.ts";
-import { TetiAccountManager } from "../../../core/account/manager.ts";
+import { TetiAccountManager, type TetiAccountManagerOptions } from "../../../core/account/manager.ts";
 import { RuntimeChatmailProvisioner } from "../../../integrations/chatmail/provisioner.ts";
 import {
   resolveChatmailRelayConfig,
@@ -14,6 +14,7 @@ import { createLifecycleError } from "./security.ts";
 export const TETI_PROFILE_DIR = "TETI_PROFILE_DIR";
 export const TETI_ALLOW_REAL_PROVISIONING = "TETI_ALLOW_REAL_PROVISIONING";
 export const TETI_PROVISIONING_MODE = "TETI_PROVISIONING_MODE";
+export const TETI_DESKTOP_NATIVE_PROVISIONING = "TETI_DESKTOP_NATIVE_PROVISIONING";
 
 export interface TetiProfile {
   root: string;
@@ -68,7 +69,10 @@ export async function ensureProfileDirectories(profile: TetiProfile): Promise<vo
   await mkdir(profile.diagnosticsDir, { recursive: true });
 }
 
-export function createProfiledAccountManager(profile: TetiProfile): TetiAccountManager {
+export function createProfiledAccountManager(
+  profile: TetiProfile,
+  options: Pick<TetiAccountManagerOptions, "onCreationStage"> = {}
+): TetiAccountManager {
   const relay = resolveChatmailRelayConfig();
   return new TetiAccountManager({
     storage: new FileTetiAccountStorage(profile.accountPath),
@@ -84,8 +88,40 @@ export function createProfiledAccountManager(profile: TetiProfile): TetiAccountM
     }, {
       accountQr: relay.accountQr
     }),
-    expectedAddressSuffix: relay.expectedAddressSuffix
+    expectedAddressSuffix: relay.expectedAddressSuffix,
+    onCreationStage: options.onCreationStage
   });
+}
+
+export async function validateAuthorizedProvisioningProfile(
+  env: NodeJS.ProcessEnv = process.env
+): Promise<ProfileValidationReport> {
+  if (env[TETI_DESKTOP_NATIVE_PROVISIONING] !== "1" || env[TETI_PROFILE_DIR]) {
+    return validateRealProvisioningProfile(env);
+  }
+
+  const errors: LifecycleErrorDto[] = [];
+  const warnings: string[] = [];
+  const profile = await resolveTetiProfile(env);
+
+  if (env[TETI_PROVISIONING_MODE] !== "real") {
+    errors.push(createLifecycleError("ACCOUNT_CREATE_FAILED", "Real provisioning mode is required.", { recoverable: false }));
+  }
+
+  const relay = validateRealValidationRelayConfig(env);
+  for (const error of relay.errors) {
+    errors.push(createLifecycleError("ACCOUNT_CREATE_FAILED", error, { recoverable: false }));
+  }
+
+  if (profile.root !== profile.productionRoot) {
+    errors.push(
+      createLifecycleError("ACCOUNT_CREATE_FAILED", "Native desktop provisioning must use the production Teti profile.", {
+        recoverable: false
+      })
+    );
+  }
+
+  return { ok: errors.length === 0, profile, errors, warnings };
 }
 
 export async function validateRealProvisioningProfile(

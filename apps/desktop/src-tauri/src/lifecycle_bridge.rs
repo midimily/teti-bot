@@ -188,15 +188,36 @@ impl Drop for LifecycleBridge {
 
 fn spawn_sidecar(app: &AppHandle) -> Result<ManagedSidecar, String> {
     let sidecar_path = resolve_sidecar_path(app)?;
-    let node_path = env::var("TETI_NODE_PATH").unwrap_or_else(|_| "node".to_string());
-    let mut child = Command::new(node_path)
+    let resource_dir = app
+        .path()
+        .resource_dir()
+        .map_err(|error| error.to_string())?;
+    let bundled_node = resource_dir.join("runtime").join("node");
+    let bundled_rpc = resource_dir.join("runtime").join("deltachat-rpc-server");
+    let node_path = env::var("TETI_NODE_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            if bundled_node.exists() {
+                bundled_node
+            } else {
+                PathBuf::from("node")
+            }
+        });
+    let mut command = Command::new(node_path);
+    command
         .arg("--experimental-strip-types")
         .arg(sidecar_path)
+        .env("TETI_DESKTOP_NATIVE_PROVISIONING", "1")
+        .env("TETI_PROVISIONING_MODE", "real")
+        .env("TETI_CHATMAIL_RELAY_DOMAIN", "mail.seep.im")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| error.to_string())?;
+        .stderr(Stdio::piped());
+    if env::var_os("TETI_DELTACHAT_RPC_PATH").is_none() && bundled_rpc.exists() {
+        command.env("TETI_DELTACHAT_RPC_PATH", bundled_rpc);
+    }
+    configure_node_proxy(&mut command);
+    let mut child = command.spawn().map_err(|error| error.to_string())?;
 
     let stdin = child
         .stdin
@@ -233,9 +254,74 @@ fn spawn_sidecar(app: &AppHandle) -> Result<ManagedSidecar, String> {
     })
 }
 
+fn configure_node_proxy(command: &mut Command) {
+    if ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"]
+        .iter()
+        .any(|name| env::var_os(name).is_some())
+    {
+        command.env("NODE_USE_ENV_PROXY", "1");
+        return;
+    }
+
+    #[cfg(target_os = "macos")]
+    if let Some(proxy) = macos_https_proxy() {
+        command
+            .env("NODE_USE_ENV_PROXY", "1")
+            .env("HTTPS_PROXY", &proxy)
+            .env("HTTP_PROXY", proxy);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_https_proxy() -> Option<String> {
+    let output = Command::new("/usr/sbin/scutil")
+        .arg("--proxy")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_macos_https_proxy(&String::from_utf8(output.stdout).ok()?)
+}
+
+#[cfg(target_os = "macos")]
+fn parse_macos_https_proxy(output: &str) -> Option<String> {
+    let value = |key: &str| {
+        output.lines().find_map(|line| {
+            let (candidate, value) = line.trim().split_once(" : ")?;
+            (candidate == key).then(|| value.trim())
+        })
+    };
+
+    if value("HTTPSEnable")? != "1" {
+        return None;
+    }
+    let host = value("HTTPSProxy")?;
+    if host.is_empty()
+        || !host
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || ".-_".contains(character))
+    {
+        return None;
+    }
+    let port = value("HTTPSPort")?.parse::<u16>().ok()?;
+    Some(format!("http://{host}:{port}"))
+}
+
 fn resolve_sidecar_path(app: &AppHandle) -> Result<PathBuf, String> {
     if let Ok(path) = env::var("TETI_LIFECYCLE_SIDECAR_PATH") {
         return Ok(PathBuf::from(path));
+    }
+
+    let resource_dir = app
+        .path()
+        .resource_dir()
+        .map_err(|error| error.to_string())?;
+    for file_name in ["main.mjs", "main.ts"] {
+        let resource_path = resource_dir.join("lifecycle-sidecar").join(file_name);
+        if resource_path.exists() {
+            return Ok(resource_path);
+        }
     }
 
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -247,17 +333,6 @@ fn resolve_sidecar_path(app: &AppHandle) -> Result<PathBuf, String> {
 
     if dev_path.exists() {
         return Ok(dev_path);
-    }
-
-    let resource_path = app
-        .path()
-        .resource_dir()
-        .map_err(|error| error.to_string())?
-        .join("lifecycle-sidecar")
-        .join("main.ts");
-
-    if resource_path.exists() {
-        return Ok(resource_path);
     }
 
     Err("lifecycle sidecar script was not found".to_string())
@@ -494,6 +569,36 @@ mod tests {
         assert_eq!(
             timeout_for_method("discovery.retry"),
             Duration::from_millis(15_000)
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn parses_enabled_macos_https_proxy() {
+        let output = r#"
+<dictionary> {
+  HTTPSEnable : 1
+  HTTPSPort : 12334
+  HTTPSProxy : 127.0.0.1
+}
+"#;
+
+        assert_eq!(
+            parse_macos_https_proxy(output),
+            Some("http://127.0.0.1:12334".to_string())
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn rejects_disabled_or_unsafe_macos_https_proxy() {
+        assert_eq!(
+            parse_macos_https_proxy("HTTPSEnable : 0\nHTTPSProxy : 127.0.0.1\nHTTPSPort : 12334"),
+            None
+        );
+        assert_eq!(
+            parse_macos_https_proxy("HTTPSEnable : 1\nHTTPSProxy : bad host\nHTTPSPort : 12334"),
+            None
         );
     }
 

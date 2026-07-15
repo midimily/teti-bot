@@ -1,8 +1,14 @@
 use serde::{Deserialize, Serialize};
 use tauri::{
-    App, AppHandle, LogicalPosition, LogicalSize, Manager, PhysicalPosition, PhysicalSize,
-    WebviewUrl, WebviewWindow, WebviewWindowBuilder,
+    App, AppHandle, LogicalPosition, Manager, PhysicalPosition, PhysicalSize, WebviewUrl,
+    WebviewWindow, WebviewWindowBuilder,
 };
+
+#[cfg(not(target_os = "macos"))]
+use tauri::LogicalSize;
+
+#[cfg(target_os = "macos")]
+use crate::macos_panel;
 
 const ISLAND_LABEL: &str = "island";
 
@@ -33,6 +39,11 @@ pub struct MonitorInfo {
     pub width: u32,
     pub height: u32,
     pub scale_factor: f64,
+    pub has_notch: bool,
+    pub notch_width: f64,
+    pub notch_height: f64,
+    pub safe_top_inset: f64,
+    pub menu_bar_height: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -55,18 +66,28 @@ pub fn create_island_window(app: &App) -> tauri::Result<WebviewWindow> {
     let window = WebviewWindowBuilder::new(app, ISLAND_LABEL, WebviewUrl::App("index.html".into()))
         .title("Teti")
         .inner_size(size.width, size.height)
-        .min_inner_size(132.0, 34.0)
+        .min_inner_size(32.0, 22.0)
         .resizable(false)
         .decorations(false)
         .transparent(true)
         .shadow(false)
         .always_on_top(true)
-        .skip_taskbar(false)
+        .skip_taskbar(true)
         .visible(false)
         .build()?;
 
-    position_window_top_center(&window, size, 8.0)
-        .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error))?;
+    #[cfg(target_os = "macos")]
+    {
+        macos_panel::configure(&window).map_err(std::io::Error::other)?;
+        macos_panel::resize_and_pin(app.handle(), IslandMode::Idle)
+            .map_err(std::io::Error::other)?;
+        macos_panel::install_screen_change_observers(app.handle())
+            .map_err(std::io::Error::other)?;
+    }
+    #[cfg(not(target_os = "macos"))]
+    position_window_top_center(&window, size, top_inset_for_mode(IslandMode::Idle))
+        .map_err(std::io::Error::other)?;
+    #[cfg(not(target_os = "macos"))]
     window.show()?;
     Ok(window)
 }
@@ -74,17 +95,25 @@ pub fn create_island_window(app: &App) -> tauri::Result<WebviewWindow> {
 #[tauri::command]
 pub fn set_island_mode(app: AppHandle, mode: IslandMode, reason: String) -> Result<(), String> {
     validate_reason(&reason)?;
+    eprintln!("[TetiPanel] mode={mode:?} reason={reason}");
     let window = island_window(&app)?;
-    let size = size_for_mode(mode);
+    #[cfg(target_os = "macos")]
+    macos_panel::resize_and_pin(&app, mode)?;
+    #[cfg(not(target_os = "macos"))]
+    {
+        let size = size_for_mode(mode);
+        window
+            .set_size(LogicalSize::new(size.width, size.height))
+            .map_err(|error| error.to_string())?;
+        position_window_top_center(&window, size, top_inset_for_mode(mode))?;
+    }
 
-    window
-        .set_size(LogicalSize::new(size.width, size.height))
-        .map_err(|error| error.to_string())?;
-    position_window_top_center(&window, size, top_inset_for_mode(mode))?;
-
-    match mode {
-        IslandMode::Hidden => window.hide().map_err(|error| error.to_string())?,
-        _ => window.show().map_err(|error| error.to_string())?,
+    if mode == IslandMode::Hidden {
+        window.hide().map_err(|error| error.to_string())?;
+    }
+    #[cfg(not(target_os = "macos"))]
+    if mode != IslandMode::Hidden {
+        window.show().map_err(|error| error.to_string())?;
     }
 
     Ok(())
@@ -109,6 +138,10 @@ pub fn position_island(app: AppHandle, geometry: GeometryInput) -> Result<(), St
 #[tauri::command]
 pub fn show_island(app: AppHandle, reason: String) -> Result<(), String> {
     validate_reason(&reason)?;
+    #[cfg(target_os = "macos")]
+    return macos_panel::show(&app);
+
+    #[cfg(not(target_os = "macos"))]
     island_window(&app)?
         .show()
         .map_err(|error| error.to_string())
@@ -124,36 +157,47 @@ pub fn hide_island(app: AppHandle, reason: String) -> Result<(), String> {
 
 #[tauri::command]
 pub fn current_monitor_info(app: AppHandle) -> Result<Option<MonitorInfo>, String> {
-    let window = island_window(&app)?;
-    let monitor = window
-        .current_monitor()
-        .map_err(|error| error.to_string())?;
-    Ok(monitor.map(|monitor| {
-        let position = monitor.position();
-        let size = monitor.size();
-        MonitorInfo {
-            x: position.x,
-            y: position.y,
-            width: size.width,
-            height: size.height,
-            scale_factor: monitor.scale_factor(),
-        }
-    }))
+    #[cfg(target_os = "macos")]
+    return macos_panel::current_screen_info(&app);
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let window = island_window(&app)?;
+        let monitor = window
+            .current_monitor()
+            .map_err(|error| error.to_string())?;
+        Ok(monitor.map(|monitor| {
+            let position = monitor.position();
+            let size = monitor.size();
+            MonitorInfo {
+                x: position.x,
+                y: position.y,
+                width: size.width,
+                height: size.height,
+                scale_factor: monitor.scale_factor(),
+                has_notch: false,
+                notch_width: 0.0,
+                notch_height: 0.0,
+                safe_top_inset: 0.0,
+                menu_bar_height: 0.0,
+            }
+        }))
+    }
 }
 
 pub fn size_for_mode(mode: IslandMode) -> IslandSize {
     match mode {
         IslandMode::Hidden | IslandMode::Idle => IslandSize {
-            width: 164.0,
-            height: 38.0,
+            width: 96.0,
+            height: 28.0,
         },
         IslandMode::Onboarding | IslandMode::Error => IslandSize {
-            width: 430.0,
-            height: 214.0,
+            width: 500.0,
+            height: 352.0,
         },
         IslandMode::Processing => IslandSize {
-            width: 390.0,
-            height: 172.0,
+            width: 430.0,
+            height: 300.0,
         },
         IslandMode::Ready => IslandSize {
             width: 360.0,
@@ -173,9 +217,10 @@ pub fn top_center_position(
     LogicalPosition::new(x.round(), y.round())
 }
 
+#[cfg(not(target_os = "macos"))]
 fn top_inset_for_mode(mode: IslandMode) -> f64 {
     match mode {
-        IslandMode::Hidden | IslandMode::Idle => 6.0,
+        IslandMode::Hidden | IslandMode::Idle => 0.0,
         _ => 10.0,
     }
 }
@@ -222,7 +267,7 @@ fn island_window(app: &AppHandle) -> Result<WebviewWindow, String> {
 }
 
 fn validate_size(width: f64, height: f64) -> Result<(), String> {
-    if !width.is_finite() || !height.is_finite() || width < 120.0 || height < 30.0 {
+    if !width.is_finite() || !height.is_finite() || width < 32.0 || height < 22.0 {
         return Err("Invalid island geometry.".to_string());
     }
     if width > 640.0 || height > 360.0 {
@@ -247,15 +292,15 @@ mod tests {
         assert_eq!(
             size_for_mode(IslandMode::Idle),
             IslandSize {
-                width: 164.0,
-                height: 38.0
+                width: 96.0,
+                height: 28.0
             }
         );
         assert_eq!(
             size_for_mode(IslandMode::Onboarding),
             IslandSize {
-                width: 430.0,
-                height: 214.0
+                width: 500.0,
+                height: 352.0
             }
         );
     }
@@ -271,19 +316,19 @@ mod tests {
                 scale_factor: 2.0,
             },
             IslandSize {
-                width: 430.0,
-                height: 214.0,
+                width: 500.0,
+                height: 352.0,
             },
             10.0,
         );
 
-        assert_eq!(position.x, 505.0);
+        assert_eq!(position.x, 470.0);
         assert_eq!(position.y, 10.0);
     }
 
     #[test]
     fn size_validation_rejects_large_windows() {
         assert!(validate_size(700.0, 200.0).is_err());
-        assert!(validate_size(430.0, 214.0).is_ok());
+        assert!(validate_size(500.0, 352.0).is_ok());
     }
 }

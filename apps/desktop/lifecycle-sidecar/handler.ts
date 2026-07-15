@@ -1,4 +1,5 @@
 import type { TetiAccount, TetiStatus } from "../../../core/account/model.ts";
+import { validateTetiDisplayName } from "../../../core/account/display-name.ts";
 import { TetiAccountManager, toDiscoveryRegistrationPayload } from "../../../core/account/manager.ts";
 import { RegistryDiscoveryClient } from "../../../services/discovery/registry-client.ts";
 import {
@@ -18,7 +19,7 @@ import {
   createProfiledAccountManager,
   ensureProfileDirectories,
   resolveTetiProfile,
-  validateRealProvisioningProfile
+  validateAuthorizedProvisioningProfile
 } from "./profile.ts";
 import { createLifecycleError, sanitizeUnknownError } from "./security.ts";
 
@@ -30,11 +31,16 @@ export interface LifecycleSidecarDependencies {
 }
 
 export const defaultLifecycleSidecarDependencies: LifecycleSidecarDependencies = {
-  loadTetiAccount: async () => (await getDefaultAccountManager()).loadTetiAccount(),
+  loadTetiAccount: async () => {
+    const account = await (await getDefaultAccountManager()).loadTetiAccount();
+    if (account) await backfillCreationMarkerIdentity(account);
+    return account;
+  },
   createTetiAccount: async (input) => createGuardedRealTetiAccount(input),
   getTetiStatus: async () => (await getDefaultAccountManager()).getTetiStatus(),
   registerDiscovery: async (account) => {
     await new RegistryDiscoveryClient().registerIdentity(toDiscoveryRegistrationPayload(account));
+    await markDiscoveryRegistrationComplete(account);
   }
 };
 
@@ -182,12 +188,9 @@ function validateName(value: unknown): string {
     throw new Error("Teti display name is required.");
   }
 
-  const name = value.trim();
-  if (name.length === 0 || name.length > 80) {
-    throw new Error("Teti display name is invalid.");
-  }
-
-  return name;
+  const validation = validateTetiDisplayName(value);
+  if (!validation.ok) throw new Error(validation.message);
+  return validation.value;
 }
 
 function statusToDto(status: TetiStatus, account: TetiAccount | null): LifecycleStatusResult {
@@ -264,17 +267,33 @@ function failure(id: string | null, error: ReturnType<typeof createLifecycleErro
 }
 
 async function createGuardedRealTetiAccount(input: { name: string }): Promise<TetiAccount> {
-  const report = await validateRealProvisioningProfile();
+  const report = await validateAuthorizedProvisioningProfile();
   if (!report.ok || !report.profile) {
     throw new Error(report.errors.map((error) => error.message).join(" "));
   }
 
   const profile = report.profile;
   await ensureProfileDirectories(profile);
-  const manager = createProfiledAccountManager(profile);
+  const startedAt = new Date().toISOString();
+  const transaction: {
+    stage: "provisioning" | "identity_created" | "persisting" | "persisted" | "registering_discovery" | "complete";
+    account?: TetiAccount;
+  } = { stage: "provisioning" };
+  const manager = createProfiledAccountManager(profile, {
+    onCreationStage: async (stage, account) => {
+      transaction.stage = stage;
+      transaction.account = account;
+      await writeCreationMarker(profile, {
+        stage,
+        startedAt,
+        publicTetiId: account?.id,
+        publicAddress: account?.address
+      });
+    }
+  });
   const existing = await manager.loadTetiAccount();
   if (existing) {
-    throw new Error("A Teti account already exists in this validation profile. Refusing duplicate creation.");
+    throw new Error("A Teti account already exists locally. Refusing duplicate creation.");
   }
 
   const marker = await readCreationMarker(profile);
@@ -282,7 +301,6 @@ async function createGuardedRealTetiAccount(input: { name: string }): Promise<Te
     throw new Error(`Unsafe incomplete creation marker found at stage ${marker?.stage}.`);
   }
 
-  const startedAt = new Date().toISOString();
   await writeCreationMarker(profile, {
     stage: "provisioning",
     startedAt
@@ -301,24 +319,50 @@ async function createGuardedRealTetiAccount(input: { name: string }): Promise<Te
     return account;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    const discoveryPending = ["persisted", "registering_discovery"].includes(transaction.stage);
     await writeCreationMarker(profile, {
-      stage: /storage|persist|write|rename|EACCES|EPERM|ENOSPC/i.test(message)
-        ? "failed_fatal"
-        : "failed_recoverable",
+      stage: /storage|persist|write|rename|EACCES|EPERM|ENOSPC/i.test(message) ? "failed_fatal" : "failed_recoverable",
       startedAt,
-      errorCode: "ACCOUNT_CREATE_FAILED",
+      publicTetiId: transaction.account?.id,
+      publicAddress: transaction.account?.address,
+      errorCode: discoveryPending ? "DISCOVERY_REGISTRATION_FAILED" : "ACCOUNT_CREATE_FAILED",
       errorMessage: message.slice(0, 180)
     });
     throw error;
   }
 }
 
-async function getDefaultAccountManager(): Promise<TetiAccountManager> {
-  const profileDir = process.env.TETI_PROFILE_DIR;
-  if (!profileDir) {
-    return new TetiAccountManager();
-  }
+async function markDiscoveryRegistrationComplete(account: TetiAccount): Promise<void> {
+  const profile = await resolveTetiProfile();
+  await ensureProfileDirectories(profile);
+  const marker = await readCreationMarker(profile);
+  await writeCreationMarker(profile, {
+    stage: "complete",
+    startedAt: marker?.startedAt,
+    completedAt: new Date().toISOString(),
+    publicTetiId: account.id,
+    publicAddress: account.address
+  });
+  await writeManifest(profile, manifestFromAccount(profile, publicAccount(account)));
+}
 
+async function backfillCreationMarkerIdentity(account: TetiAccount): Promise<void> {
+  const profile = await resolveTetiProfile();
+  const marker = await readCreationMarker(profile);
+  if (!marker || (marker.publicTetiId === account.id && marker.publicAddress === account.address)) return;
+
+  await writeCreationMarker(profile, {
+    stage: marker.stage,
+    startedAt: marker.startedAt,
+    completedAt: marker.completedAt,
+    publicTetiId: account.id,
+    publicAddress: account.address,
+    errorCode: marker.errorCode,
+    errorMessage: marker.errorMessage
+  });
+}
+
+async function getDefaultAccountManager(): Promise<TetiAccountManager> {
   const profile = await resolveTetiProfile();
   await ensureProfileDirectories(profile);
   return createProfiledAccountManager(profile);

@@ -1,4 +1,5 @@
 import type { FirstLaunchSnapshot } from "./state-machine.ts";
+import { TETI_DISPLAY_NAME_MAX_CHARACTERS } from "../../../../core/account/display-name.ts";
 
 export interface FirstLaunchViewModel {
   panel: "collapsed" | "expanded";
@@ -11,6 +12,7 @@ export interface FirstLaunchViewModel {
     placeholder: string;
     disabled: boolean;
     error?: string;
+    maxCharacters?: number;
   };
   progress?: {
     active: boolean;
@@ -34,22 +36,23 @@ export function toFirstLaunchViewModel(snapshot: FirstLaunchSnapshot): FirstLaun
       return {
         panel: "expanded",
         character: "wake",
-        title: "Teti is here",
-        message: "Give this Teti a name so it can settle into this Mac.",
-        primaryAction: "Continue"
+        title: "你好，主人。",
+        message: "第一次见面，给我取个名字吧。",
+        primaryAction: "下一步"
       };
 
     case "naming":
       return {
         panel: "expanded",
         character: "naming",
-        title: "Name your Teti",
-        message: "A short name works best in the island.",
-        primaryAction: "Create Teti",
+        title: "给我一个名字。",
+        message: "短一点会更适合留海屏。",
+        primaryAction: "创建",
         input: {
           value: snapshot.nameInput,
-          placeholder: "Name",
+          placeholder: "名字",
           disabled: false,
+          maxCharacters: TETI_DISPLAY_NAME_MAX_CHARACTERS,
           error: snapshot.error?.kind === "invalid_name" ? snapshot.error.message : undefined
         }
       };
@@ -59,7 +62,7 @@ export function toFirstLaunchViewModel(snapshot: FirstLaunchSnapshot): FirstLaun
       return {
         panel: "expanded",
         character: "thinking",
-        title: "Creating Teti",
+        title: "正在创建 Teti",
         message: phaseMessage(snapshot.phase),
         progress: {
           active: true,
@@ -67,8 +70,9 @@ export function toFirstLaunchViewModel(snapshot: FirstLaunchSnapshot): FirstLaun
         },
         input: {
           value: snapshot.nameInput,
-          placeholder: "Name",
-          disabled: true
+          placeholder: "名字",
+          disabled: true,
+          maxCharacters: TETI_DISPLAY_NAME_MAX_CHARACTERS
         }
       };
 
@@ -77,11 +81,11 @@ export function toFirstLaunchViewModel(snapshot: FirstLaunchSnapshot): FirstLaun
         panel: "expanded",
         character: "ready",
         title: (snapshot.account?.displayName ?? snapshot.nameInput) || "Teti",
-        message: "Ready to stay nearby on this Mac.",
-        primaryAction: "Done",
+        message: "我准备好了。",
+        primaryAction: "完成",
         progress: {
           active: false,
-          label: "Ready"
+          label: "就绪"
         }
       };
 
@@ -97,16 +101,17 @@ export function toFirstLaunchViewModel(snapshot: FirstLaunchSnapshot): FirstLaun
       return {
         panel: "expanded",
         character: "error",
-        title: "Teti needs a moment",
-        message: snapshot.error?.message ?? "Teti could not finish yet.",
+        title: "Teti 需要一点时间",
+        message: snapshot.error?.message ?? "Teti 暂时还没完成。",
         primaryAction:
-          snapshot.error?.kind === "discovery_registration_failure" ? "Try connecting again" : "Try again",
+          snapshot.error?.kind === "discovery_registration_failure" ? "再连接一次" : "再试一次",
         input:
           snapshot.error?.kind === "invalid_name"
             ? {
                 value: snapshot.nameInput,
-                placeholder: "Name",
+                placeholder: "名字",
                 disabled: false,
+                maxCharacters: TETI_DISPLAY_NAME_MAX_CHARACTERS,
                 error: snapshot.error.message
               }
             : undefined
@@ -116,8 +121,8 @@ export function toFirstLaunchViewModel(snapshot: FirstLaunchSnapshot): FirstLaun
       return {
         panel: "expanded",
         character: "error",
-        title: "Teti cannot continue safely",
-        message: snapshot.error?.message ?? "Teti hit an internal setup problem."
+        title: "Teti 暂时不能继续",
+        message: snapshot.error?.message ?? "Teti 遇到了内部设置问题。"
       };
   }
 }
@@ -125,37 +130,37 @@ export function toFirstLaunchViewModel(snapshot: FirstLaunchSnapshot): FirstLaun
 function phaseLabel(phase: FirstLaunchSnapshot["phase"]): string {
   switch (phase) {
     case "preparing":
-      return "Waking up";
+      return "正在醒来";
     case "provisioning_chatmail":
-      return "Creating my identity";
+      return "正在创建身份";
     case "persisting_account":
-      return "Securing my place";
+      return "正在保存";
     case "registering_identity":
-      return "Connecting";
+      return "正在连接";
     case "verifying_account":
-      return "Checking my place";
+      return "正在检查";
     case "finalizing":
-      return "Ready";
+      return "就绪";
     default:
-      return "Waking up";
+      return "正在醒来";
   }
 }
 
 function phaseMessage(phase: FirstLaunchSnapshot["phase"]): string {
   switch (phase) {
     case "preparing":
-      return "Waking up";
+      return "正在醒来";
     case "provisioning_chatmail":
-      return "Creating my identity";
+      return "正在创建身份";
     case "persisting_account":
-      return "Securing my place on this Mac";
+      return "正在这台 Mac 上保存";
     case "registering_identity":
-      return "Connecting";
+      return "正在连接";
     case "verifying_account":
-      return "Checking my place";
+      return "正在检查";
     case "finalizing":
-      return "Teti is ready.";
+      return "Teti 准备好了。";
     default:
-      return "Waking up";
+      return "正在醒来";
   }
 }

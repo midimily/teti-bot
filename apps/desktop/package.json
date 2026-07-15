@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "tauri:dev": "tauri dev",
-    "build": "vite build",
+    "build": "npm run runtime:bundle && vite build",
+    "runtime:bundle": "node --experimental-strip-types scripts/bundle-runtime.ts",
     "preview": "vite preview --host 127.0.0.1",
     "typecheck": "tsc --noEmit",
     "tauri:build": "tauri build",
@@ -17,17 +18,20 @@
     "icon:generate": "node --experimental-strip-types scripts/generate-icon.ts",
     "icon:verify": "node --experimental-strip-types scripts/verify-icon-assets.ts",
     "build:diagnostics": "node --experimental-strip-types scripts/build-diagnostics.ts",
+    "reset:first-launch": "node --experimental-strip-types scripts/reset-first-launch.ts",
     "rpc:path": "node --experimental-strip-types scripts/rpc.ts path",
     "rpc:install": "node --experimental-strip-types scripts/rpc.ts install",
     "rpc:verify": "node --experimental-strip-types scripts/rpc.ts verify",
     "bootstrap:mac": "node --experimental-strip-types scripts/bootstrap-mac.ts"
   },
   "dependencies": {
-    "@tauri-apps/api": "^2.0.0"
+    "@tauri-apps/api": "^2.0.0",
+    "lucide": "^1.24.0"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.0.0",
     "@types/node": "^26.1.1",
+    "esbuild": "^0.25.12",
     "typescript": "^5.6.0",
     "vite": "^6.0.0"
   }

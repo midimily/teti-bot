@@ -1,4 +1,5 @@
 import type { DiscoveryClient } from "../../../../services/discovery/registry-client.ts";
+import { validateTetiDisplayName } from "../../../../core/account/display-name.ts";
 import type {
   DiscoveryRegistrationPayload,
   TetiAccount,
@@ -48,7 +49,7 @@ export class FirstLaunchCoordinator {
     this.notchWindow = options.notchWindow;
     this.discoveryClient = options.discoveryClient;
     this.diagnostics = options.diagnostics ?? new NoopDiagnostics();
-    this.readyCollapseDelayMs = options.readyCollapseDelayMs ?? 1200;
+    this.readyCollapseDelayMs = options.readyCollapseDelayMs ?? 900;
     this.schedule = options.schedule ?? ((callback, delayMs) => setTimeout(callback, delayMs));
   }
 
@@ -62,6 +63,19 @@ export class FirstLaunchCoordinator {
     try {
       const account = await this.accountLifecycle.loadTetiAccount();
       if (account) {
+        const registered = await this.isExistingAccountRegistered();
+        if (!registered) {
+          const snapshot = this.stateMachine.transition({
+            type: "account_registration_pending",
+            account,
+            error: createFirstLaunchError(
+              "discovery_registration_failure",
+              "通讯账号已创建，正在等待完成公开身份同步。"
+            )
+          });
+          await this.notchWindow.expand("existing-account-registration-pending");
+          return snapshot;
+        }
         const snapshot = this.stateMachine.transition({ type: "account_loaded", account });
         await this.notchWindow.collapse("existing-account");
         return snapshot;
@@ -99,13 +113,14 @@ export class FirstLaunchCoordinator {
       return this.snapshot;
     }
 
-    const name = normalizeDisplayName(rawName ?? this.snapshot.nameInput);
-    if (!name) {
+    const validation = validateTetiDisplayName(rawName ?? this.snapshot.nameInput);
+    if (!validation.ok) {
       return this.stateMachine.transition({
         type: "creation_failed",
-        error: createFirstLaunchError("invalid_name", "Give Teti a name to continue.")
+        error: createFirstLaunchError("invalid_name", validation.message)
       });
     }
+    const name = validation.value;
 
     this.stateMachine.transition({ type: "submit_name", value: name });
     this.creationInFlight = (async () => {
@@ -185,6 +200,16 @@ export class FirstLaunchCoordinator {
     }
   }
 
+  private async isExistingAccountRegistered(): Promise<boolean> {
+    if (!this.accountLifecycle.getTetiStatus) return true;
+    try {
+      return (await this.accountLifecycle.getTetiStatus()).registered;
+    } catch (error) {
+      this.diagnostics.warn("first_launch_registry_status_failed", sanitizeError(error));
+      return false;
+    }
+  }
+
   private async retryDiscovery(): Promise<FirstLaunchSnapshot> {
     this.stateMachine.transition({ type: "registration_retry_started" });
 
@@ -256,7 +281,8 @@ export class FirstLaunchCoordinator {
 }
 
 export function normalizeDisplayName(input: string): string {
-  return input.trim();
+  const validation = validateTetiDisplayName(input);
+  return validation.ok ? validation.value : "";
 }
 
 export function sanitizeError(error: unknown): Record<string, unknown> {

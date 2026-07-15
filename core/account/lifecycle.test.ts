@@ -78,6 +78,42 @@ test("create account can auto provision chatmail identity from display name", as
   assert.equal(discoveryClient.registerCalls[0].id, "teti_abcdefghi");
 });
 
+test("account creation reports relay, persistence, and registry transaction stages in order", async () => {
+  const stages: string[] = [];
+  const manager = new TetiAccountManager({
+    storage: new MemoryTetiAccountStorage(),
+    chatmailProvisioner: new RecordingChatmailProvisioner(),
+    discoveryClient: new RecordingDiscoveryClient(),
+    onCreationStage: async (stage) => stages.push(stage)
+  });
+
+  await manager.createTetiAccount({ name: "Milo" });
+
+  assert.deepEqual(stages, [
+    "identity_created",
+    "persisting",
+    "persisted",
+    "registering_discovery",
+    "complete"
+  ]);
+});
+
+test("registry failure retains the relay identity locally for idempotent recovery", async () => {
+  const storage = new MemoryTetiAccountStorage();
+  const stages: string[] = [];
+  const manager = new TetiAccountManager({
+    storage,
+    chatmailProvisioner: new RecordingChatmailProvisioner(),
+    discoveryClient: new FailingDiscoveryClient(),
+    onCreationStage: async (stage) => stages.push(stage)
+  });
+
+  await assert.rejects(() => manager.createTetiAccount({ name: "Milo" }), /registry unavailable/);
+
+  assert.equal((await storage.load())?.address, "abcdefghi@mail.seep.im");
+  assert.equal(stages.at(-1), "registering_discovery");
+});
+
 test("wrong relay address blocks persistence and discovery registration", async () => {
   const storage = new MemoryTetiAccountStorage();
   const chatmailProvisioner = new RecordingChatmailProvisioner("abcdefghi@example.org");
@@ -295,5 +331,12 @@ class RecordingDiscoveryClient implements DiscoveryClient {
   async deleteIdentity(id: string): Promise<void> {
     this.deleteCalls.push(id);
     this.identities.delete(id);
+  }
+}
+
+class FailingDiscoveryClient extends RecordingDiscoveryClient {
+  override async registerIdentity(payload: DiscoveryRegistrationPayload): Promise<DiscoveryIdentity> {
+    this.registerCalls.push(payload);
+    throw new Error("registry unavailable");
   }
 }

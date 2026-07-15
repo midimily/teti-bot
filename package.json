@@ -13,6 +13,7 @@
     "desktop:icon:generate": "npm --prefix apps/desktop run icon:generate",
     "desktop:icon:verify": "npm --prefix apps/desktop run icon:verify",
     "desktop:build-diagnostics": "npm --prefix apps/desktop run build:diagnostics",
+    "desktop:reset-first-launch": "npm --prefix apps/desktop run reset:first-launch --",
     "desktop:rust-check": "cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml",
     "desktop:rust-fmt": "cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml",
     "desktop:tauri-build": "npm --prefix apps/desktop run tauri:build",

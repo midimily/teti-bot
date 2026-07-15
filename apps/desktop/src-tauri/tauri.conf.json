@@ -20,6 +20,11 @@
   "bundle": {
     "active": true,
     "targets": ["app"],
+    "resources": {
+      "resources/lifecycle-sidecar/main.mjs": "lifecycle-sidecar/main.mjs",
+      "resources/runtime/node": "runtime/node",
+      "resources/runtime/deltachat-rpc-server": "runtime/deltachat-rpc-server"
+    },
     "category": "Productivity",
     "copyright": "Copyright © 2026 Teti",
     "icon": [

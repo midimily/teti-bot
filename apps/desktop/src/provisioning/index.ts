@@ -15,7 +15,7 @@ export async function createDesktopAccountLifecycle(
   env: Record<string, string | undefined>,
   tauri?: TauriInvoker
 ): Promise<DesktopLifecycleSelection> {
-  const config = readProvisioningMode(env);
+  const config = readProvisioningMode(env, tauri?.runtime === "native" ? "real" : "mock");
   if (config.mode === "real") {
     if (!tauri) {
       throw new Error("Real provisioning requires the Tauri lifecycle bridge.");

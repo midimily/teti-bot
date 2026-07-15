@@ -84,13 +84,27 @@ async function registerIdentity(request, env) {
     throw new RegistryError(400, "INVALID_REQUEST", validation.message);
   }
 
-  const existing = await env.TETI.get(registryKey(input.id));
-  if (existing) {
-    throw new RegistryError(409, "IDENTITY_EXISTS", "Identity already exists.");
-  }
-
   const now = new Date().toISOString();
   const publicProfile = sanitizePublicProfile(input.publicProfile);
+  const key = registryKey(input.id);
+  const existing = await readIdentity(env, key);
+  if (existing) {
+    if (existing.address !== input.address || existing.publicKey !== input.publicKey) {
+      throw new RegistryError(409, "IDENTITY_EXISTS", "Identity already exists with different public identity data.");
+    }
+
+    const retriedRecord = toPublicIdentityCard({
+      ...existing,
+      publicProfile,
+      lastSeen: publicProfile.lastSeen || existing.lastSeen || now,
+      updatedAt: now
+    });
+    await env.TETI.put(key, JSON.stringify(retriedRecord), {
+      expirationTtl: REGISTRY_TTL_SECONDS
+    });
+    return jsonResponse(200, { success: true, data: retriedRecord });
+  }
+
   const record = toPublicIdentityCard({
     version: 1,
     id: input.id,
@@ -102,7 +116,7 @@ async function registerIdentity(request, env) {
     updatedAt: now
   });
 
-  await env.TETI.put(registryKey(record.id), JSON.stringify(record), {
+  await env.TETI.put(key, JSON.stringify(record), {
     expirationTtl: REGISTRY_TTL_SECONDS
   });
 

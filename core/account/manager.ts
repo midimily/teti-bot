@@ -1,4 +1,5 @@
 import type { ChatmailAdapter } from "../../integrations/chatmail/types.ts";
+import { validateTetiDisplayName } from "./display-name.ts";
 import { assertAddressMatchesRelay } from "../../integrations/chatmail/relay-config.ts";
 import { RealChatmailAdapter } from "../../integrations/chatmail/real-adapter.ts";
 import {
@@ -35,7 +36,15 @@ export interface TetiAccountManagerOptions {
   discoveryClient?: DiscoveryClient;
   environmentScanner?: () => Promise<EnvironmentScan>;
   expectedAddressSuffix?: string;
+  onCreationStage?: (stage: TetiAccountCreationStage, account?: TetiAccount) => Promise<void> | void;
 }
+
+export type TetiAccountCreationStage =
+  | "identity_created"
+  | "persisting"
+  | "persisted"
+  | "registering_discovery"
+  | "complete";
 
 export class TetiAccountManager {
   private readonly storage: TetiAccountStorage;
@@ -45,6 +54,7 @@ export class TetiAccountManager {
   private readonly environmentScanner: () => Promise<EnvironmentScan>;
   private readonly shouldUseProvisioner: boolean;
   private readonly expectedAddressSuffix?: string;
+  private readonly onCreationStage?: TetiAccountManagerOptions["onCreationStage"];
 
   constructor(options: TetiAccountManagerOptions = {}) {
     this.storage = options.storage ?? new FileTetiAccountStorage();
@@ -57,6 +67,7 @@ export class TetiAccountManager {
     this.discoveryClient = options.discoveryClient ?? new RegistryDiscoveryClient();
     this.environmentScanner = options.environmentScanner ?? scanEnvironment;
     this.expectedAddressSuffix = options.expectedAddressSuffix;
+    this.onCreationStage = options.onCreationStage;
   }
 
   async createTetiAccount(input: CreateTetiAccountInput = {}): Promise<TetiAccount> {
@@ -104,8 +115,13 @@ export class TetiAccountManager {
       account.displayName = accountDisplayName;
     }
 
+    await this.reportCreationStage("identity_created", account);
+    await this.reportCreationStage("persisting", account);
     await this.storage.save(account);
+    await this.reportCreationStage("persisted", account);
+    await this.reportCreationStage("registering_discovery", account);
     await this.discoveryClient.registerIdentity(toDiscoveryRegistrationPayload(account));
+    await this.reportCreationStage("complete", account);
 
     return account;
   }
@@ -180,15 +196,16 @@ export class TetiAccountManager {
 
     return updatedAccount;
   }
+
+  private async reportCreationStage(stage: TetiAccountCreationStage, account: TetiAccount): Promise<void> {
+    await this.onCreationStage?.(stage, account);
+  }
 }
 
 function requireDisplayName(displayName: string | undefined): string {
-  const normalized = displayName?.trim();
-  if (!normalized) {
-    throw new Error("Teti display name is required for automatic chatmail provisioning.");
-  }
-
-  return normalized;
+  const validation = validateTetiDisplayName(displayName ?? "");
+  if (!validation.ok) throw new Error(validation.message);
+  return validation.value;
 }
 
 export function toDiscoveryRegistrationPayload(account: TetiAccount): DiscoveryRegistrationPayload {

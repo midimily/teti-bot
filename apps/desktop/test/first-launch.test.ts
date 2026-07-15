@@ -34,6 +34,24 @@ test("valid existing account skips onboarding and collapses into idle", async ()
   assert.equal(notch.mode, "collapsed");
 });
 
+test("existing relay account with pending registry sync reopens the recovery UI", async () => {
+  const account = createAccount("Milo");
+  const lifecycle = new RecordingLifecycle({ storedAccount: account, registered: false });
+  const notch = new MemoryNotchWindowController();
+  const coordinator = new FirstLaunchCoordinator({
+    accountLifecycle: lifecycle,
+    notchWindow: notch,
+    discoveryClient: new RecordingDiscovery()
+  });
+
+  const snapshot = await coordinator.initialize();
+
+  assert.equal(snapshot.state, "recoverable_error");
+  assert.equal(snapshot.error?.kind, "discovery_registration_failure");
+  assert.equal(snapshot.account?.id, account.id);
+  assert.equal(notch.mode, "expanded");
+});
+
 test("invalid name is rejected before account creation", async () => {
   const lifecycle = new RecordingLifecycle();
   const coordinator = new FirstLaunchCoordinator({
@@ -46,6 +64,22 @@ test("invalid name is rejected before account creation", async () => {
 
   assert.equal(snapshot.state, "recoverable_error");
   assert.equal(snapshot.error?.kind, "invalid_name");
+  assert.equal(lifecycle.createCalls.length, 0);
+});
+
+test("name longer than ten Unicode characters is rejected before relay creation", async () => {
+  const lifecycle = new RecordingLifecycle();
+  const coordinator = new FirstLaunchCoordinator({
+    accountLifecycle: lifecycle,
+    notchWindow: new MemoryNotchWindowController()
+  });
+
+  await coordinator.initialize();
+  const snapshot = await coordinator.submitName("一二三四五六七八九十甲");
+
+  assert.equal(snapshot.state, "recoverable_error");
+  assert.equal(snapshot.error?.kind, "invalid_name");
+  assert.equal(snapshot.error?.message, "名字最多 10 个字符。");
   assert.equal(lifecycle.createCalls.length, 0);
 });
 
@@ -199,9 +233,11 @@ class RecordingLifecycle implements FirstLaunchAccountLifecycle {
   readonly createCalls: string[] = [];
   storedAccount: TetiAccount | null;
   createHandler?: (name: string) => Promise<TetiAccount>;
+  private readonly registered: boolean;
 
-  constructor(options: { storedAccount?: TetiAccount | null } = {}) {
+  constructor(options: { storedAccount?: TetiAccount | null; registered?: boolean } = {}) {
     this.storedAccount = options.storedAccount ?? null;
+    this.registered = options.registered ?? true;
   }
 
   async loadTetiAccount(): Promise<TetiAccount | null> {
@@ -222,7 +258,7 @@ class RecordingLifecycle implements FirstLaunchAccountLifecycle {
   async getTetiStatus(): Promise<TetiStatus> {
     return {
       exists: this.storedAccount !== null,
-      registered: this.storedAccount !== null,
+      registered: this.storedAccount !== null && this.registered,
       onlineStatus: "unknown"
     };
   }

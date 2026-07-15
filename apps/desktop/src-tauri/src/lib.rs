@@ -1,9 +1,14 @@
 mod lifecycle_bridge;
+#[cfg(target_os = "macos")]
+mod macos_panel;
 mod window;
 
 pub fn run() {
-    tauri::Builder::default()
-        .manage(lifecycle_bridge::LifecycleBridge::default())
+    let builder = tauri::Builder::default().manage(lifecycle_bridge::LifecycleBridge::default());
+    #[cfg(target_os = "macos")]
+    let builder = builder.plugin(tauri_nspanel::init());
+
+    builder
         .setup(|app| {
             window::create_island_window(app)?;
             Ok(())

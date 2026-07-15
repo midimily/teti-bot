@@ -17,6 +17,11 @@ test("desktop provisioning defaults to mock mode", () => {
   assert.equal(config.delayMs, 450);
 });
 
+test("native desktop runtime defaults to real provisioning while tests stay mock", () => {
+  assert.equal(readProvisioningMode({}, "real").mode, "real");
+  assert.equal(readProvisioningMode({}).mode, "mock");
+});
+
 test("desktop provisioning only enters real mode when explicitly requested", () => {
   assert.equal(readProvisioningMode({ TETI_PROVISIONING_MODE: "real" }).mode, "real");
   assert.equal(readProvisioningMode({ TETI_PROVISIONING_MODE: "REAL" }).mode, "mock");

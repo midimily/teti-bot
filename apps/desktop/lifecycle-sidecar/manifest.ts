@@ -36,7 +36,7 @@ export function manifestFromAccount(profile: TetiProfile, account: PublicTetiAcc
     publicTetiId: account.id,
     publicChatmailAddress: account.address,
     creationTimestamp: account.createdAt,
-    discoveryRegistrationStatus: "unknown",
+    discoveryRegistrationStatus: "succeeded",
     protocolVersion: 1,
     duplicateCreation: {
       attempted: false,
