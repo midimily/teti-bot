@@ -1,0 +1,29 @@
+{
+  "name": "teti-bot",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --experimental-strip-types --test apps/desktop/test/*.test.ts core/account/*.test.ts core/application/*.test.ts core/connection/*.test.ts core/environment/*.test.ts integrations/chatmail/*.test.ts services/discovery/*.test.ts services/discovery-worker/test/index.test.js",
+    "desktop:dev": "npm --prefix apps/desktop run dev",
+    "desktop:tauri-dev": "npm --prefix apps/desktop run tauri:dev",
+    "desktop:build": "npm --prefix apps/desktop run build",
+    "desktop:typecheck": "npm --prefix apps/desktop run typecheck",
+    "desktop:test": "node --experimental-strip-types --test apps/desktop/test/*.test.ts",
+    "desktop:icon:generate": "npm --prefix apps/desktop run icon:generate",
+    "desktop:icon:verify": "npm --prefix apps/desktop run icon:verify",
+    "desktop:build-diagnostics": "npm --prefix apps/desktop run build:diagnostics",
+    "desktop:rust-check": "cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml",
+    "desktop:rust-fmt": "cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml",
+    "desktop:tauri-build": "npm --prefix apps/desktop run tauri:build",
+    "desktop:profile:create": "npm --prefix apps/desktop run profile:create --",
+    "desktop:profile:status": "npm --prefix apps/desktop run profile:status --",
+    "desktop:profile:preflight": "npm --prefix apps/desktop run profile:preflight --",
+    "desktop:profile:clean": "npm --prefix apps/desktop run profile:clean --",
+    "desktop:rpc:path": "npm --prefix apps/desktop run rpc:path",
+    "desktop:rpc:install": "npm --prefix apps/desktop run rpc:install",
+    "desktop:rpc:verify": "npm --prefix apps/desktop run rpc:verify --",
+    "desktop:bootstrap:mac": "npm --prefix apps/desktop run bootstrap:mac",
+    "desktop:real-validation": "TETI_PROVISIONING_MODE=real TETI_ALLOW_REAL_PROVISIONING=1 npm --prefix apps/desktop run tauri:dev --"
+  }
+}

@@ -1,0 +1,1 @@
+{"default":{"identifier":"default","description":"Teti Desktop shell permissions","local":true,"windows":["island"],"permissions":["core:default","core:window:default"]}}

@@ -1,0 +1,123 @@
+# Teti Discovery Registry V1
+
+Native Cloudflare Worker for discovering public Teti identities.
+
+## KV Binding
+
+Create a KV namespace and bind it as `TETI`.
+
+```sh
+wrangler kv namespace create TETI
+wrangler kv namespace create TETI --preview
+```
+
+Then update `wrangler.toml` with the generated namespace IDs.
+
+## Data Model
+
+KV key:
+
+```text
+teti:{id}
+```
+
+TTL:
+
+```text
+604800 seconds
+```
+
+Stored value:
+
+```json
+{
+  "version": 1,
+  "id": "teti_a83kd9",
+  "address": "yxmtewmvc@mail.seep.im",
+  "publicKey": "chatmail-public-key",
+  "publicProfile": {
+    "platform": "macOS",
+    "category": ["developer", "designer"],
+    "aiEnvironment": ["Claude Code", "Cursor"]
+  },
+  "createdAt": "2026-07-10T00:00:00.000Z",
+  "updatedAt": "2026-07-10T00:00:00.000Z"
+}
+```
+
+## API
+
+All responses use:
+
+```json
+{
+  "success": true,
+  "data": {}
+}
+```
+
+or:
+
+```json
+{
+  "success": false,
+  "error": "ERROR_CODE",
+  "message": "Human readable message"
+}
+```
+
+### POST /register
+
+Registers a new public identity card.
+
+Request:
+
+```json
+{
+  "version": 1,
+  "id": "teti_a83kd9",
+  "address": "yxmtewmvc@mail.seep.im",
+  "publicKey": "chatmail-public-key",
+  "publicProfile": {
+    "platform": "macOS",
+    "category": ["developer"],
+    "aiEnvironment": ["Claude Code"]
+  }
+}
+```
+
+Rules:
+
+- `id` must match `teti_` followed by 3 to 59 letters, numbers, `_`, or `-`.
+- `address` must be a valid `mail.seep.im` chatmail address.
+- `publicKey` must be a non-empty string and must not be `undefined`.
+- Request JSON must be 16 KiB or smaller.
+- Duplicate registrations return `409`.
+
+The Worker adds `createdAt` and `updatedAt`.
+
+### POST /heartbeat
+
+Refreshes an existing identity card without replacing the public profile.
+
+Request:
+
+```json
+{
+  "id": "teti_a83kd9"
+}
+```
+
+The Worker updates only `updatedAt` and refreshes the TTL.
+
+### GET /discover
+
+Returns up to 50 public identity cards.
+
+### GET /profile/:id
+
+Returns one public identity card.
+
+## Future Compatibility
+
+The validation and registration path is structured so future Ed25519 verification can add `signature` and `timestamp` without moving route logic into a framework.

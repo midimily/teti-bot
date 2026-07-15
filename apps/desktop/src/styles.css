@@ -1,0 +1,393 @@
+:root {
+  color-scheme: light dark;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", Inter, sans-serif;
+  background: transparent;
+  color: var(--teti-text-primary);
+  --teti-blue-primary: #4080f0;
+  --teti-blue-secondary: #3070f0;
+  --teti-blue-highlight: #6090f0;
+  --teti-blue-soft: #90c0f0;
+  --teti-blue-surface: #d0e0f0;
+  --teti-blue-wash: rgba(64, 128, 240, 0.11);
+  --teti-blue-black: #001020;
+  --teti-notch-bg: rgba(2, 10, 22, 0.94);
+  --teti-panel: rgba(246, 250, 255, 0.95);
+  --teti-panel-dark: rgba(6, 14, 28, 0.96);
+  --teti-text-primary: #001020;
+  --teti-text-secondary: rgba(0, 16, 32, 0.68);
+  --teti-text-disabled: rgba(0, 16, 32, 0.36);
+  --teti-border: rgba(96, 144, 240, 0.24);
+  --teti-border-strong: rgba(64, 128, 240, 0.42);
+  --teti-focus: rgba(64, 128, 240, 0.28);
+  --teti-processing: #4080f0;
+  --teti-success: #41ad93;
+  --teti-warning: #c98a2e;
+  --teti-error: #ba1a1a;
+  --teti-glow: rgba(64, 128, 240, 0.25);
+  --teti-radius-island: 28px;
+  --teti-radius-control: 13px;
+  --teti-space-1: 4px;
+  --teti-space-2: 8px;
+  --teti-space-3: 12px;
+  --teti-space-4: 16px;
+  --teti-duration-fast: 160ms;
+  --teti-duration-medium: 280ms;
+  --teti-duration-slow: 3000ms;
+  --teti-ease: cubic-bezier(0.2, 0, 0.16, 1);
+}
+
+html,
+body,
+#app {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: transparent;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+.teti-shell {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+}
+
+.teti-island {
+  position: relative;
+  box-sizing: border-box;
+  display: flex;
+  width: 100%;
+  height: 100%;
+  align-items: center;
+  justify-content: center;
+  gap: var(--teti-space-3);
+  overflow: hidden;
+  border: 0.5px solid rgba(144, 192, 240, 0.22);
+  border-radius: 999px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.06), transparent 42%),
+    var(--teti-notch-bg);
+  box-shadow: 0 18px 38px rgba(0, 8, 20, 0.28), 0 0 24px var(--teti-glow);
+  transition: box-shadow var(--teti-duration-medium) var(--teti-ease);
+}
+
+.teti-island::before {
+  position: absolute;
+  inset: 1px;
+  pointer-events: none;
+  content: "";
+  border-radius: inherit;
+  background: linear-gradient(90deg, transparent, rgba(96, 144, 240, 0.14), transparent);
+  opacity: 0.56;
+}
+
+.teti-island--expanded {
+  justify-content: flex-start;
+  padding: 16px 18px;
+  border-radius: var(--teti-radius-island);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(237, 246, 255, 0.94)),
+    var(--teti-panel);
+}
+
+.teti-island--processing::before,
+.teti-island--thinking::before {
+  animation: teti-scan var(--teti-duration-slow) var(--teti-ease) infinite;
+}
+
+.teti-face {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: 8px 8px;
+  grid-template-rows: 20px 4px;
+  column-gap: 12px;
+  row-gap: 7px;
+  place-content: center;
+  flex: 0 0 auto;
+  width: 58px;
+  height: 46px;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 16px;
+  background: linear-gradient(145deg, var(--teti-blue-highlight), var(--teti-blue-primary));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.2);
+  animation: teti-breathe var(--teti-duration-slow) var(--teti-ease) infinite;
+}
+
+.teti-shell--collapsed .teti-face {
+  width: 42px;
+  height: 26px;
+  grid-template-columns: 5px 5px;
+  grid-template-rows: 10px 3px;
+  column-gap: 8px;
+  row-gap: 4px;
+  border-radius: 10px;
+}
+
+.teti-eye {
+  align-self: end;
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--teti-blue-black);
+  animation: teti-blink 5.2s infinite;
+}
+
+.teti-shell--collapsed .teti-eye {
+  width: 5px;
+  height: 5px;
+}
+
+.teti-track {
+  grid-column: 1 / -1;
+  justify-self: center;
+  width: 34px;
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(0, 16, 32, 0.28);
+}
+
+.teti-shell--collapsed .teti-track {
+  width: 22px;
+  height: 3px;
+}
+
+.teti-face--wake {
+  animation-duration: 2200ms;
+}
+
+.teti-face--naming .teti-eye {
+  transform: translateY(1px);
+}
+
+.teti-face--thinking .teti-eye {
+  height: 3px;
+}
+
+.teti-face--thinking .teti-track {
+  animation: teti-track-scan 1300ms var(--teti-ease) infinite;
+}
+
+.teti-face--ready {
+  box-shadow: 0 0 18px rgba(65, 173, 147, 0.28), inset 0 1px 0 rgba(255, 255, 255, 0.22);
+}
+
+.teti-face--error .teti-eye:first-child {
+  transform: rotate(12deg);
+}
+
+.teti-face--error .teti-eye:nth-child(2) {
+  transform: rotate(-12deg);
+}
+
+.teti-content {
+  position: relative;
+  z-index: 1;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.teti-title-row {
+  display: flex;
+  align-items: center;
+  gap: var(--teti-space-2);
+}
+
+.teti-title-row h1 {
+  max-width: 100%;
+  margin: 0;
+  overflow: hidden;
+  color: var(--teti-text-primary);
+  font-size: 15px;
+  font-weight: 650;
+  line-height: 20px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.teti-message {
+  display: -webkit-box;
+  margin: 3px 0 10px;
+  overflow: hidden;
+  color: var(--teti-text-secondary);
+  font-size: 12px;
+  line-height: 16px;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.teti-input {
+  box-sizing: border-box;
+  width: 100%;
+  height: 34px;
+  margin-bottom: var(--teti-space-2);
+  padding: 0 12px;
+  color: var(--teti-text-primary);
+  border: 1px solid var(--teti-border);
+  border-radius: var(--teti-radius-control);
+  outline: none;
+  background: rgba(64, 128, 240, 0.07);
+  transition: border-color var(--teti-duration-fast) var(--teti-ease), box-shadow var(--teti-duration-fast) var(--teti-ease);
+}
+
+.teti-input::placeholder {
+  color: var(--teti-text-disabled);
+}
+
+.teti-input:focus {
+  border-color: var(--teti-blue-primary);
+  box-shadow: 0 0 0 3px var(--teti-focus);
+}
+
+.teti-primary {
+  height: 34px;
+  max-width: 100%;
+  min-width: 96px;
+  padding: 0 16px;
+  overflow: hidden;
+  color: white;
+  border: 0;
+  border-radius: 999px;
+  background: linear-gradient(180deg, var(--teti-blue-highlight), var(--teti-blue-primary));
+  box-shadow: 0 5px 14px rgba(64, 128, 240, 0.24);
+  cursor: pointer;
+  text-overflow: ellipsis;
+  transition: transform var(--teti-duration-fast) var(--teti-ease), box-shadow var(--teti-duration-fast) var(--teti-ease);
+  white-space: nowrap;
+}
+
+.teti-primary:hover {
+  box-shadow: 0 6px 18px rgba(64, 128, 240, 0.32);
+}
+
+.teti-primary:active {
+  transform: scale(0.98);
+}
+
+.teti-primary:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.teti-progress,
+.teti-error {
+  margin: 0 0 var(--teti-space-2);
+  font-size: 11px;
+  line-height: 14px;
+}
+
+.teti-progress {
+  color: var(--teti-processing);
+}
+
+.teti-progress.is-active::before {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: 6px;
+  content: "";
+  border-radius: 50%;
+  background: currentColor;
+  animation: teti-pulse 1.2s var(--teti-ease) infinite;
+}
+
+.teti-error {
+  color: var(--teti-error);
+}
+
+@keyframes teti-breathe {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-1px);
+  }
+}
+
+@keyframes teti-blink {
+  0%,
+  92%,
+  100% {
+    transform: scaleY(1);
+  }
+  95% {
+    transform: scaleY(0.18);
+  }
+}
+
+@keyframes teti-pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+    transform: scale(0.82);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes teti-scan {
+  0% {
+    transform: translateX(-55%);
+  }
+  50%,
+  100% {
+    transform: translateX(55%);
+  }
+}
+
+@keyframes teti-track-scan {
+  0%,
+  100% {
+    opacity: 0.42;
+  }
+  50% {
+    opacity: 0.88;
+  }
+}
+
+@media (prefers-color-scheme: dark) {
+  .teti-island--expanded {
+    border-color: rgba(144, 192, 240, 0.2);
+    background:
+      linear-gradient(180deg, rgba(13, 24, 42, 0.98), rgba(6, 14, 28, 0.96)),
+      var(--teti-panel-dark);
+  }
+
+  .teti-title-row h1 {
+    color: rgba(247, 250, 255, 0.96);
+  }
+
+  .teti-message {
+    color: rgba(247, 250, 255, 0.68);
+  }
+
+  .teti-input {
+    color: rgba(247, 250, 255, 0.96);
+    background: rgba(64, 128, 240, 0.13);
+  }
+
+  .teti-input::placeholder {
+    color: rgba(247, 250, 255, 0.38);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
+  }
+}

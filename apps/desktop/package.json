@@ -1,0 +1,34 @@
+{
+  "name": "@teti/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "tauri:dev": "tauri dev",
+    "build": "vite build",
+    "preview": "vite preview --host 127.0.0.1",
+    "typecheck": "tsc --noEmit",
+    "tauri:build": "tauri build",
+    "profile:create": "node --experimental-strip-types scripts/profile.ts create",
+    "profile:status": "node --experimental-strip-types scripts/profile.ts status",
+    "profile:preflight": "node --experimental-strip-types scripts/profile.ts preflight",
+    "profile:clean": "node --experimental-strip-types scripts/profile.ts clean",
+    "icon:generate": "node --experimental-strip-types scripts/generate-icon.ts",
+    "icon:verify": "node --experimental-strip-types scripts/verify-icon-assets.ts",
+    "build:diagnostics": "node --experimental-strip-types scripts/build-diagnostics.ts",
+    "rpc:path": "node --experimental-strip-types scripts/rpc.ts path",
+    "rpc:install": "node --experimental-strip-types scripts/rpc.ts install",
+    "rpc:verify": "node --experimental-strip-types scripts/rpc.ts verify",
+    "bootstrap:mac": "node --experimental-strip-types scripts/bootstrap-mac.ts"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.0.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0",
+    "@types/node": "^26.1.1",
+    "typescript": "^5.6.0",
+    "vite": "^6.0.0"
+  }
+}

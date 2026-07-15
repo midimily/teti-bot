@@ -1,0 +1,9 @@
+name = "teti-discovery-registry"
+main = "src/index.js"
+compatibility_date = "2026-07-10"
+
+[[kv_namespaces]]
+binding = "TETI_REGISTRY"
+id = "replace-with-production-kv-namespace-id"
+preview_id = "replace-with-preview-kv-namespace-id"
+
