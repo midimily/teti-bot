@@ -89,6 +89,7 @@ export function toTetiIdentity(identity: DiscoveryIdentity): TetiIdentity {
   return {
     id: identity.id,
     address: identity.address,
+    displayName: identity.displayName,
     publicKey: identity.publicKey,
     publicProfile: toPublicProfile(identity.publicProfile),
     createdAt: identity.createdAt,

@@ -34,6 +34,7 @@ Stored value:
   "version": 1,
   "id": "teti_a83kd9",
   "address": "yxmtewmvc@mail.seep.im",
+  "displayName": "Milo",
   "publicKey": "chatmail-public-key",
   "publicProfile": {
     "platform": "macOS",
@@ -77,6 +78,7 @@ Request:
   "version": 1,
   "id": "teti_a83kd9",
   "address": "yxmtewmvc@mail.seep.im",
+  "displayName": "Milo",
   "publicKey": "chatmail-public-key",
   "publicProfile": {
     "platform": "macOS",
@@ -90,6 +92,7 @@ Rules:
 
 - `id` must match `teti_` followed by 3 to 59 letters, numbers, `_`, or `-`.
 - `address` must be a valid `mail.seep.im` chatmail address.
+- `displayName`, when present, must contain 1 to 10 Unicode characters.
 - `publicKey` must be a non-empty string and must not be `undefined`.
 - Request JSON must be 16 KiB or smaller.
 - Duplicate registrations return `409`.

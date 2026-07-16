@@ -76,6 +76,7 @@ test("create account can auto provision chatmail identity from display name", as
   assert.deepEqual(await storage.load(), account);
   assert.equal(discoveryClient.registerCalls.length, 1);
   assert.equal(discoveryClient.registerCalls[0].id, "teti_abcdefghi");
+  assert.equal(discoveryClient.registerCalls[0].displayName, "Alex");
 });
 
 test("account creation reports relay, persistence, and registry transaction stages in order", async () => {
@@ -161,6 +162,32 @@ test("restart simulation loads existing account without network or chatmail call
   assert.deepEqual(loaded, created);
   assert.equal(restartChatmailAdapter.createCalls.length, 0);
   assert.equal(restartDiscoveryClient.registerCalls.length, 0);
+});
+
+test("status reports registry sync pending when a legacy identity is missing its display name", async () => {
+  const storage = new MemoryTetiAccountStorage();
+  await storage.save({
+    version: 1,
+    id: "teti_abcdefghi",
+    address: "abcdefghi@mail.seep.im",
+    displayName: "Milo",
+    chatmailAccountId: 41,
+    publicKey: "provisioned-public-key",
+    publicProfile: {
+      platform: "macOS",
+      category: ["developer"],
+      aiEnvironment: ["Codex"]
+    },
+    createdAt: "2026-07-16T00:00:00.000Z"
+  });
+
+  const manager = new TetiAccountManager({
+    storage,
+    chatmailAdapter: new RecordingChatmailAdapter(),
+    discoveryClient: new LegacyDiscoveryClient()
+  });
+
+  assert.equal((await manager.getTetiStatus()).registered, false);
 });
 
 test("delete account removes discovery identity, deletes chatmail account, and removes local state", async () => {
@@ -296,6 +323,7 @@ class RecordingDiscoveryClient implements DiscoveryClient {
       version: 1,
       id: payload.id,
       address: payload.address,
+      displayName: payload.displayName,
       publicKey: payload.publicKey,
       publicProfile: payload.publicProfile
     };
@@ -338,5 +366,21 @@ class FailingDiscoveryClient extends RecordingDiscoveryClient {
   override async registerIdentity(payload: DiscoveryRegistrationPayload): Promise<DiscoveryIdentity> {
     this.registerCalls.push(payload);
     throw new Error("registry unavailable");
+  }
+}
+
+class LegacyDiscoveryClient extends RecordingDiscoveryClient {
+  override async getIdentity(id: string): Promise<DiscoveryIdentity | null> {
+    return {
+      version: 1,
+      id,
+      address: "abcdefghi@mail.seep.im",
+      publicKey: "provisioned-public-key",
+      publicProfile: {
+        platform: "macOS",
+        category: ["developer"],
+        aiEnvironment: ["Codex"]
+      }
+    };
   }
 }

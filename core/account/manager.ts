@@ -143,7 +143,10 @@ export class TetiAccountManager {
     let registered = false;
     try {
       const identity = await this.discoveryClient.getIdentity(getTetiId(account));
-      registered = identity !== null;
+      registered =
+        identity !== null &&
+        identity.address === account.address &&
+        identity.displayName === account.displayName;
     } catch {
       registered = false;
     }
@@ -218,6 +221,10 @@ export function toDiscoveryRegistrationPayload(account: TetiAccount): DiscoveryR
 
   if (account.publicKey) {
     payload.publicKey = account.publicKey;
+  }
+
+  if (account.displayName) {
+    payload.displayName = account.displayName;
   }
 
   return payload;

@@ -12,6 +12,7 @@ test("discovers public Teti identities from the registry", async () => {
         version: 1,
         id: "teti_alex",
         address: "alex@mail.seep.im",
+        displayName: "Alex",
         publicKey: "public-key",
         publicProfile: {
           platform: "macOS",
@@ -35,6 +36,7 @@ test("discovers public Teti identities from the registry", async () => {
     {
       id: "teti_alex",
       address: "alex@mail.seep.im",
+      displayName: "Alex",
       publicKey: "public-key",
       publicProfile: {
         platform: "macOS",
@@ -63,6 +65,7 @@ test("fetches a Teti profile by id", async () => {
   assert.deepEqual(await service.getTetiProfile("teti_profile"), {
     id: "teti_profile",
     address: "profile@mail.seep.im",
+    displayName: undefined,
     publicKey: undefined,
     publicProfile: {
       category: ["developer"]

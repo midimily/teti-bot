@@ -3,6 +3,7 @@ const MAX_DISCOVERY_RESULTS = 50;
 const MAX_JSON_BYTES = 16 * 1024;
 const MAX_PUBLIC_PROFILE_BYTES = 4 * 1024;
 const MAX_PUBLIC_KEY_BYTES = 12 * 1024;
+const MAX_DISPLAY_NAME_CHARACTERS = 10;
 const ID_PATTERN = /^teti_[A-Za-z0-9_-]{3,59}$/;
 const CHATMAIL_DOMAIN = "mail.seep.im";
 const PRIVATE_FIELD_NAMES = new Set([
@@ -95,6 +96,7 @@ async function registerIdentity(request, env) {
 
     const retriedRecord = toPublicIdentityCard({
       ...existing,
+      displayName: normalizeDisplayName(input.displayName) ?? existing.displayName,
       publicProfile,
       lastSeen: publicProfile.lastSeen || existing.lastSeen || now,
       updatedAt: now
@@ -109,6 +111,7 @@ async function registerIdentity(request, env) {
     version: 1,
     id: input.id,
     address: input.address,
+    displayName: normalizeDisplayName(input.displayName),
     publicKey: input.publicKey,
     publicProfile,
     lastSeen: publicProfile.lastSeen || now,
@@ -227,6 +230,10 @@ function validateRegistration(input) {
     return invalid("address must be a valid mail.seep.im chatmail address.");
   }
 
+  if (input.displayName !== undefined && !isValidDisplayName(input.displayName)) {
+    return invalid("displayName must contain 1 to 10 Unicode characters.");
+  }
+
   if (!isValidPublicKey(input.publicKey)) {
     return invalid("publicKey must be a defined non-empty string.");
   }
@@ -290,6 +297,24 @@ function isValidPublicKey(publicKey) {
     new TextEncoder().encode(publicKey).length <= MAX_PUBLIC_KEY_BYTES &&
     publicKey !== "undefined"
   );
+}
+
+function isValidDisplayName(displayName) {
+  return normalizeDisplayName(displayName) !== undefined;
+}
+
+function normalizeDisplayName(displayName) {
+  if (typeof displayName !== "string") {
+    return undefined;
+  }
+
+  const normalized = displayName.trim();
+  const characters = Array.from(normalized);
+  if (characters.length === 0 || characters.length > MAX_DISPLAY_NAME_CHARACTERS) {
+    return undefined;
+  }
+
+  return normalized;
 }
 
 function isValidPublicProfile(publicProfile) {
@@ -408,7 +433,7 @@ function isSmallString(value) {
 }
 
 function toPublicIdentityCard(record) {
-  return {
+  const card = {
     version: 1,
     id: record.id,
     address: record.address,
@@ -418,6 +443,13 @@ function toPublicIdentityCard(record) {
     createdAt: record.createdAt,
     updatedAt: record.updatedAt
   };
+
+  const displayName = normalizeDisplayName(record.displayName);
+  if (displayName) {
+    card.displayName = displayName;
+  }
+
+  return card;
 }
 
 async function readIdentity(env, key) {

@@ -1,8 +1,7 @@
-name = "teti-discovery-registry"
+name = "teti-registry"
 main = "src/index.js"
 compatibility_date = "2026-07-10"
 
 [[kv_namespaces]]
 binding = "TETI"
-id = "replace-with-production-kv-namespace-id"
-preview_id = "replace-with-preview-kv-namespace-id"
+id = "fcdde2c34e5544e2a4367f9050afa77a"

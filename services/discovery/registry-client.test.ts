@@ -35,6 +35,7 @@ test("registration treats an identical existing KV identity as idempotent succes
     version: 1 as const,
     id: "teti_ukouq6gz8",
     address: "ukouq6gz8@mail.seep.im",
+    displayName: "Milo",
     publicKey: "public-key",
     publicProfile: { platform: "macOS", category: [], aiEnvironment: [] }
   };
@@ -53,6 +54,39 @@ test("registration treats an identical existing KV identity as idempotent succes
   try {
     const result = await new RegistryDiscoveryClient("https://registry.teti.example").registerIdentity(identity);
     assert.deepEqual(result, identity);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("registration rejects a success response that did not persist the display name", async () => {
+  const originalFetch = globalThis.fetch;
+  const payload = {
+    version: 1 as const,
+    id: "teti_ukouq6gz8",
+    address: "ukouq6gz8@mail.seep.im",
+    displayName: "Milo",
+    publicKey: "public-key",
+    publicProfile: { platform: "macOS", category: [], aiEnvironment: [] }
+  };
+
+  globalThis.fetch = async () => Response.json({
+    success: true,
+    data: {
+      ...payload,
+      displayName: undefined
+    }
+  });
+
+  try {
+    await assert.rejects(
+      () => new RegistryDiscoveryClient("https://registry.teti.example").registerIdentity(payload),
+      (error) =>
+        error instanceof Error &&
+        error.name === "Error" &&
+        "code" in error &&
+        error.code === "REGISTRY_WRITE_NOT_CONFIRMED"
+    );
   } finally {
     globalThis.fetch = originalFetch;
   }

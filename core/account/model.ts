@@ -54,6 +54,7 @@ export interface DiscoveryRegistrationPayload {
   version: 1;
   id: string;
   address: string;
+  displayName?: string;
   publicKey?: string;
   publicProfile: TetiPublicProfile;
 }

@@ -8,6 +8,7 @@ export interface TetiPublicProfile {
 export interface TetiIdentity {
   id: string;
   address: string;
+  displayName?: string;
   publicKey?: string;
   publicProfile: TetiPublicProfile;
   createdAt?: string;
@@ -47,4 +48,3 @@ export interface ConnectionRequestDraft {
   intent: "connect";
   publicContext?: Record<string, unknown>;
 }
-

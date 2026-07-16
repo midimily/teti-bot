@@ -10,6 +10,7 @@ export interface DiscoveryIdentity {
   version: 1;
   id: string;
   address: string;
+  displayName?: string;
   publicKey?: string;
   publicProfile: Record<string, unknown>;
   lastSeen?: string;
@@ -41,10 +42,11 @@ export class RegistryDiscoveryClient implements DiscoveryClient {
 
   async registerIdentity(payload: DiscoveryRegistrationPayload): Promise<DiscoveryIdentity> {
     try {
-      return await this.request<DiscoveryIdentity>("/register", {
+      const identity = await this.request<DiscoveryIdentity>("/register", {
         method: "POST",
         body: JSON.stringify(payload)
       });
+      return assertRegistrationConfirmed(identity, payload);
     } catch (error) {
       if (!(error instanceof RegistryClientError) || error.status !== 409 || error.code !== "IDENTITY_EXISTS") {
         throw error;
@@ -59,7 +61,7 @@ export class RegistryDiscoveryClient implements DiscoveryClient {
         throw error;
       }
 
-      return existing;
+      return assertRegistrationConfirmed(existing, payload);
     }
   }
 
@@ -159,4 +161,24 @@ export class RegistryClientError extends Error {
     this.status = status;
     this.code = code;
   }
+}
+
+function assertRegistrationConfirmed(
+  identity: DiscoveryIdentity,
+  payload: DiscoveryRegistrationPayload
+): DiscoveryIdentity {
+  if (
+    identity.id !== payload.id ||
+    identity.address !== payload.address ||
+    identity.publicKey !== payload.publicKey ||
+    identity.displayName !== payload.displayName
+  ) {
+    throw new RegistryClientError(
+      502,
+      "REGISTRY_WRITE_NOT_CONFIRMED",
+      "Teti registry did not confirm the complete public identity."
+    );
+  }
+
+  return identity;
 }

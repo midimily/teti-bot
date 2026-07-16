@@ -8,6 +8,7 @@ test("register stores a public identity card with timestamps and ttl", async () 
     version: 1,
     id: "teti_a83kd9",
     address: "yxmtewmvc@mail.seep.im",
+    displayName: "Milo",
     publicKey: "x".repeat(2048),
     publicProfile: {
       platform: "macOS",
@@ -21,7 +22,9 @@ test("register stores a public identity card with timestamps and ttl", async () 
   assert.equal(body.success, true);
   assert.equal(body.data.id, "teti_a83kd9");
   assert.equal(body.data.address, "yxmtewmvc@mail.seep.im");
+  assert.equal(body.data.displayName, "Milo");
   assert.equal(body.data.privateKey, undefined);
+  assert.equal(JSON.parse(env.store.get("teti:teti_a83kd9")).displayName, "Milo");
   assert.equal(env.putOptions.get("teti:teti_a83kd9").expirationTtl, 604800);
 });
 
@@ -59,6 +62,42 @@ test("register is idempotent for the same relay identity and refreshes ttl", asy
   assert.equal(retry.status, 200);
   assert.equal((await retry.json()).data.id, payload.id);
   assert.equal(env.putOptions.get("teti:teti_a83kd9").expirationTtl, 604800);
+});
+
+test("registration retry backfills display name into an existing identity", async () => {
+  const env = createEnv();
+  const payload = {
+    version: 1,
+    id: "teti_a83kd9",
+    address: "yxmtewmvc@mail.seep.im",
+    publicKey: "stable-public-key",
+    publicProfile: { platform: "macOS" }
+  };
+
+  assert.equal((await handleRequest(jsonRequest("https://registry.test/register", payload), env)).status, 201);
+  const retry = await handleRequest(jsonRequest("https://registry.test/register", {
+    ...payload,
+    displayName: "Milo"
+  }), env);
+
+  assert.equal(retry.status, 200);
+  assert.equal((await retry.json()).data.displayName, "Milo");
+  assert.equal(JSON.parse(env.store.get("teti:teti_a83kd9")).displayName, "Milo");
+});
+
+test("register rejects an invalid display name", async () => {
+  const env = createEnv();
+  const response = await handleRequest(jsonRequest("https://registry.test/register", {
+    version: 1,
+    id: "teti_a83kd9",
+    address: "yxmtewmvc@mail.seep.im",
+    displayName: "12345678901",
+    publicKey: "stable-public-key",
+    publicProfile: { platform: "macOS" }
+  }), env);
+
+  assert.equal(response.status, 400);
+  assert.match((await response.json()).message, /displayName/);
 });
 
 test("heartbeat updates only updatedAt and refreshes ttl", async () => {
