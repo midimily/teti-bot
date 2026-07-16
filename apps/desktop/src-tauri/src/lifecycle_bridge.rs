@@ -8,7 +8,7 @@ use std::{
     process::{Child, ChildStdin, Command, Stdio},
     sync::{
         mpsc::{self, Receiver},
-        Mutex,
+        Arc, Mutex,
     },
     thread,
     time::Duration,
@@ -48,9 +48,9 @@ pub struct LifecycleCommandError {
     pub retry_target: Option<String>,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct LifecycleBridge {
-    process: Mutex<Option<ManagedSidecar>>,
+    process: Arc<Mutex<Option<ManagedSidecar>>>,
 }
 
 struct ManagedSidecar {
@@ -60,15 +60,31 @@ struct ManagedSidecar {
 }
 
 #[tauri::command]
-pub fn lifecycle_request(
+pub async fn lifecycle_request(
     app: AppHandle,
     bridge: tauri::State<'_, LifecycleBridge>,
     request: LifecycleCommandRequest,
-) -> LifecycleCommandResponse {
-    match validate_request(&request) {
-        Ok(()) => bridge.request(&app, request),
-        Err(error) => failure(Some(request.id), error),
+) -> Result<LifecycleCommandResponse, ()> {
+    if let Err(error) = validate_request(&request) {
+        return Ok(failure(Some(request.id), error));
     }
+
+    let request_id = request.id.clone();
+    let bridge = bridge.inner().clone();
+    Ok(
+        match tauri::async_runtime::spawn_blocking(move || bridge.request(&app, request)).await {
+            Ok(response) => response,
+            Err(_) => failure(
+                Some(request_id),
+                bridge_error(
+                    "SIDECAR_UNAVAILABLE",
+                    "Teti's local lifecycle service stopped unexpectedly.",
+                    true,
+                    Some("lifecycle.health"),
+                ),
+            ),
+        },
+    )
 }
 
 impl LifecycleBridge {
@@ -178,6 +194,9 @@ impl LifecycleBridge {
 
 impl Drop for LifecycleBridge {
     fn drop(&mut self) {
+        if Arc::strong_count(&self.process) != 1 {
+            return;
+        }
         if let Ok(mut guard) = self.process.lock() {
             if let Some(process) = guard.as_mut() {
                 let _ = process.child.kill();
@@ -458,6 +477,10 @@ pub fn timeout_for_method(method: &str) -> Duration {
         "account.status" | "account.load" => 5_000,
         "account.create" => 120_000,
         "discovery.register" | "discovery.retry" => 15_000,
+        "connection.resolve" => 15_000,
+        "connection.request" | "connection.accept" | "connection.reject" => 30_000,
+        "connection.poll" => 20_000,
+        "connection.list" => 5_000,
         _ => 5_000,
     })
 }
@@ -471,6 +494,12 @@ fn is_allowed_method(method: &str) -> bool {
             | "account.create"
             | "discovery.register"
             | "discovery.retry"
+            | "connection.resolve"
+            | "connection.request"
+            | "connection.list"
+            | "connection.poll"
+            | "connection.accept"
+            | "connection.reject"
     )
 }
 

@@ -1,5 +1,5 @@
 import { FirstLaunchCoordinator } from "./first-launch/coordinator.ts";
-import { Activity, Settings2, createElement } from "lucide";
+import { Activity, Check, Link2, Radio, Settings2, X, createElement } from "lucide";
 import { countUnicodeCharacters, truncateTetiDisplayName } from "../../../core/account/display-name.ts";
 import type { FirstLaunchSnapshot } from "./first-launch/state-machine.ts";
 import { toFirstLaunchViewModel, type FirstLaunchViewModel } from "./first-launch/view-model.ts";
@@ -7,6 +7,12 @@ import { createDesktopAccountLifecycle } from "./provisioning/index.ts";
 import { readProvisioningMode, type ProvisioningModeConfig } from "./provisioning/modes.ts";
 import { TauriNotchWindowController, visualModeForViewModel } from "./platform/tauri-notch-window.ts";
 import type { TauriInvoker } from "./platform/tauri-api.ts";
+import { LifecycleBridgeClient } from "./provisioning/bridge-lifecycle.ts";
+import {
+  BridgePeerConnectionClient,
+  MockPeerConnectionClient,
+  PeerConnectionController
+} from "./connections/controller.ts";
 import "./styles.css";
 
 export interface DesktopAppOptions {
@@ -18,6 +24,7 @@ export interface DesktopAppOptions {
 
 export interface DesktopApp {
   coordinator: FirstLaunchCoordinator;
+  connections: PeerConnectionController;
   config: ProvisioningModeConfig;
   render(): void;
 }
@@ -28,6 +35,7 @@ export async function createDesktopApp(options: DesktopAppOptions): Promise<Desk
   const selection = await createDesktopAccountLifecycle(options.env, options.tauri);
   const notchWindow = new TauriNotchWindowController(options.tauri);
   let app: DesktopApp;
+  let connectionsInitialized = false;
   const baseSchedule = options.schedule ?? ((callback: () => void, delayMs: number) => setTimeout(callback, delayMs));
   const coordinator = new FirstLaunchCoordinator({
     accountLifecycle: selection.lifecycle,
@@ -39,11 +47,25 @@ export async function createDesktopApp(options: DesktopAppOptions): Promise<Desk
         app?.render();
       }, delayMs)
   });
+  const connections = new PeerConnectionController({
+    client: selection.config.mode === "real"
+      ? new BridgePeerConnectionClient(new LifecycleBridgeClient(options.tauri))
+      : new MockPeerConnectionClient(),
+    notchWindow,
+    onChange: () => app?.render()
+  });
 
   app = {
     coordinator,
+    connections,
     config: selection.config,
-    render: () => renderSnapshot(options.root, coordinator.snapshot, selection.config, coordinator)
+    render: () => {
+      if (coordinator.snapshot.account && !connectionsInitialized) {
+        connectionsInitialized = true;
+        void connections.initialize();
+      }
+      renderSnapshot(options.root, coordinator.snapshot, selection.config, coordinator, connections);
+    }
   };
 
   await coordinator.initialize();
@@ -57,17 +79,24 @@ export function renderSnapshot(
   root: HTMLElement,
   snapshot: FirstLaunchSnapshot,
   config: ProvisioningModeConfig = readProvisioningMode({}),
-  coordinator?: FirstLaunchCoordinator
+  coordinator?: FirstLaunchCoordinator,
+  connections?: PeerConnectionController
 ): void {
   const viewModel = toFirstLaunchViewModel(snapshot);
-  root.className = `teti-shell teti-shell--${viewModel.panel}`;
-  root.replaceChildren(createIsland(viewModel, config, coordinator));
+  const peerPanelOpen = viewModel.panel === "collapsed" && connections?.snapshot.open;
+  root.className = `teti-shell teti-shell--${peerPanelOpen ? "expanded" : viewModel.panel}`;
+  root.replaceChildren(
+    peerPanelOpen
+      ? createConnectionIsland(config, connections)
+      : createIsland(viewModel, config, coordinator, connections)
+  );
 }
 
 function createIsland(
   viewModel: FirstLaunchViewModel,
   config: ProvisioningModeConfig,
-  coordinator?: FirstLaunchCoordinator
+  coordinator?: FirstLaunchCoordinator,
+  connections?: PeerConnectionController
 ): HTMLElement {
   const island = document.createElement("section");
   island.className = `teti-island teti-island--${viewModel.panel} teti-island--${viewModel.character}`;
@@ -77,9 +106,16 @@ function createIsland(
     island.append(createIslandHeader(config));
   }
 
-  const face = document.createElement("div");
+  const face = document.createElement(viewModel.panel === "collapsed" && connections ? "button" : "div");
   face.className = `teti-face teti-face--${viewModel.character}`;
-  face.setAttribute("aria-hidden", "true");
+  if (face instanceof HTMLButtonElement) {
+    face.type = "button";
+    face.setAttribute("aria-label", "打开 Teti 建联");
+    face.setAttribute("title", "打开 Teti 建联");
+    face.addEventListener("click", () => connections?.open());
+  } else {
+    face.setAttribute("aria-hidden", "true");
+  }
   face.innerHTML = '<div class="teti-eye"></div><div class="teti-eye"></div>';
   island.append(face);
 
@@ -118,7 +154,7 @@ function createIsland(
     input.addEventListener("keydown", (event) => {
       if (event.key === "Enter" && coordinator && !viewModel.input?.disabled) {
         event.preventDefault();
-        void submitAndRender(coordinator, island.ownerDocument.getElementById("app"), config);
+        void submitAndRender(coordinator, island.ownerDocument.getElementById("app"), config, connections);
       }
     });
     content.append(input);
@@ -163,28 +199,212 @@ function createIsland(
     button.addEventListener("click", () => {
       if (viewModel.primaryAction === "Continue" || viewModel.primaryAction === "下一步") {
         coordinator.showNaming();
-        renderSnapshot(island.ownerDocument.getElementById("app") as HTMLElement, coordinator.snapshot, config, coordinator);
+        renderSnapshot(
+          island.ownerDocument.getElementById("app") as HTMLElement,
+          coordinator.snapshot,
+          config,
+          coordinator,
+          connections
+        );
         return;
       }
 
       if (viewModel.primaryAction === "Done" || viewModel.primaryAction === "完成") {
         coordinator.collapseReadyToIdle();
-        renderSnapshot(island.ownerDocument.getElementById("app") as HTMLElement, coordinator.snapshot, config, coordinator);
+        renderSnapshot(
+          island.ownerDocument.getElementById("app") as HTMLElement,
+          coordinator.snapshot,
+          config,
+          coordinator,
+          connections
+        );
         return;
       }
 
       if (viewModel.primaryAction?.includes("connecting") || viewModel.primaryAction?.includes("连接")) {
-        void retryDiscoveryAndRender(coordinator, island.ownerDocument.getElementById("app"), config);
+        void retryDiscoveryAndRender(
+          coordinator,
+          island.ownerDocument.getElementById("app"),
+          config,
+          connections
+        );
         return;
       }
 
-      void submitAndRender(coordinator, island.ownerDocument.getElementById("app"), config);
+      void submitAndRender(
+        coordinator,
+        island.ownerDocument.getElementById("app"),
+        config,
+        connections
+      );
     });
     content.append(button);
   }
 
   island.append(content);
   return island;
+}
+
+function createConnectionIsland(
+  config: ProvisioningModeConfig,
+  controller: PeerConnectionController
+): HTMLElement {
+  const snapshot = controller.snapshot;
+  const island = document.createElement("section");
+  island.className = "teti-island teti-island--expanded teti-island--connections";
+  island.setAttribute("aria-label", "连接其他 Teti");
+  island.append(createConnectionHeader(config, controller));
+
+  const face = document.createElement("div");
+  face.className = "teti-face teti-face--ready";
+  face.setAttribute("aria-hidden", "true");
+  face.innerHTML = '<div class="teti-eye"></div><div class="teti-eye"></div>';
+
+  const content = document.createElement("div");
+  content.className = "teti-content teti-connection-content";
+  const title = document.createElement("h1");
+  title.textContent = "连接另一个 Teti";
+  const message = document.createElement("p");
+  message.className = "teti-message teti-connection-message";
+  message.textContent = "输入 teti.bot 信息卡上的 9 位 ID";
+
+  const form = document.createElement("form");
+  form.className = "teti-connect-form";
+  const input = document.createElement("input");
+  input.className = "teti-input teti-connect-input";
+  input.value = snapshot.input;
+  input.placeholder = "076bm9evq";
+  input.disabled = snapshot.busy;
+  input.maxLength = 9;
+  input.autocapitalize = "none";
+  input.spellcheck = false;
+  input.setAttribute("aria-label", "Teti 公开身份");
+  input.addEventListener("focus", () => controller.beginInteraction());
+  input.addEventListener("blur", () => controller.endInteraction());
+  input.addEventListener("input", () => {
+    controller.updateInput(input.value);
+    const normalized = controller.snapshot.input;
+    if (input.value !== normalized) input.value = normalized;
+    connect.disabled = snapshot.busy || !/^[a-z0-9]{9}$/.test(normalized);
+  });
+  const connect = document.createElement("button");
+  connect.className = "teti-connect-button";
+  connect.type = "submit";
+  connect.disabled = snapshot.busy || !/^[a-z0-9]{9}$/.test(snapshot.input);
+  connect.setAttribute("title", "发送建联请求");
+  connect.setAttribute("aria-label", "发送建联请求");
+  connect.append(createElement(Link2, { width: 19, height: 19, "stroke-width": 2, "aria-hidden": "true" }));
+  form.append(input, connect);
+  form.addEventListener("pointerenter", () => controller.beginInteraction());
+  form.addEventListener("pointerleave", () => {
+    if (document.activeElement !== input) controller.endInteraction();
+  });
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    void controller.connect();
+  });
+
+  content.append(title, message, form);
+  if (snapshot.error) {
+    const error = document.createElement("p");
+    error.className = "teti-error teti-connect-error";
+    error.textContent = snapshot.error;
+    content.append(error);
+  }
+
+  if (snapshot.connections.length > 0) {
+    const list = document.createElement("div");
+    list.className = "teti-connection-list";
+    for (const connection of snapshot.connections.slice(0, 3)) {
+      list.append(createConnectionRow(connection, snapshot.busy, controller));
+    }
+    content.append(list);
+  } else {
+    const empty = document.createElement("div");
+    empty.className = "teti-connection-empty";
+    empty.textContent = "还没有建联记录";
+    content.append(empty);
+  }
+
+  island.append(face, content);
+  focusAfterPanelExpansion(input);
+  return island;
+}
+
+function focusAfterPanelExpansion(input: HTMLInputElement): void {
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      if (!input.disabled && input.isConnected && document.activeElement !== input) {
+        input.focus({ preventScroll: true });
+      }
+    });
+  });
+}
+
+function createConnectionRow(
+  connection: import("./lifecycle-bridge/protocol.ts").PeerConnectionDto,
+  busy: boolean,
+  controller: PeerConnectionController
+): HTMLElement {
+  const row = document.createElement("div");
+  row.className = `teti-connection-row is-${connection.state.toLowerCase()}`;
+  const identity = document.createElement("div");
+  identity.className = "teti-connection-identity";
+  const name = document.createElement("strong");
+  name.textContent = connection.remoteDisplayName || connection.remoteTetiId;
+  const address = document.createElement("small");
+  address.textContent = connection.remoteAddress;
+  identity.append(name, address);
+
+  const state = document.createElement("div");
+  state.className = "teti-connection-state";
+  if (connection.state === "Confirmed") {
+    state.append(createElement(Radio, { width: 14, height: 14, "stroke-width": 2, "aria-hidden": "true" }));
+    state.append(document.createTextNode(isHeartbeatFresh(connection.lastHeartbeatReceivedAt) ? " 心跳在线" : " 已建联"));
+  } else if (connection.state === "PendingApproval") {
+    const accept = iconButton(Check, "接受建联", () => void controller.accept(connection.requestId));
+    const reject = iconButton(X, "拒绝建联", () => void controller.reject(connection.requestId));
+    accept.disabled = busy;
+    reject.disabled = busy;
+    state.append(accept, reject);
+  } else if (connection.state === "Requested") {
+    state.textContent = "等待确认";
+  } else if (connection.state === "Rejected") {
+    state.textContent = "已拒绝";
+  } else {
+    state.textContent = connection.state;
+  }
+  row.append(identity, state);
+  return row;
+}
+
+function createConnectionHeader(
+  config: ProvisioningModeConfig,
+  controller: PeerConnectionController
+): HTMLElement {
+  const header = createIslandHeader(config);
+  const controls = header.querySelector(".teti-header-controls");
+  controls?.append(iconButton(X, "收起", () => controller.close()));
+  return header;
+}
+
+function iconButton(
+  icon: Parameters<typeof createElement>[0],
+  label: string,
+  action: () => void
+): HTMLButtonElement {
+  const button = document.createElement("button");
+  button.className = "teti-header-icon";
+  button.type = "button";
+  button.setAttribute("title", label);
+  button.setAttribute("aria-label", label);
+  button.append(createElement(icon, { width: 18, height: 18, "stroke-width": 2, "aria-hidden": "true" }));
+  button.addEventListener("click", action);
+  return button;
+}
+
+function isHeartbeatFresh(timestamp?: string): boolean {
+  return Boolean(timestamp && Date.now() - Date.parse(timestamp) < 15_000);
 }
 
 function updateNameCounter(input: HTMLInputElement, meta: HTMLElement, maxCharacters?: number): void {
@@ -345,32 +565,34 @@ function nonNegative(value: unknown): number {
 async function submitAndRender(
   coordinator: FirstLaunchCoordinator,
   root: HTMLElement | null,
-  config: ProvisioningModeConfig
+  config: ProvisioningModeConfig,
+  connections?: PeerConnectionController
 ): Promise<void> {
   const pending = coordinator.submitName();
   if (root) {
-    renderSnapshot(root, coordinator.snapshot, config, coordinator);
+    renderSnapshot(root, coordinator.snapshot, config, coordinator, connections);
   }
 
   await pending;
   if (root) {
-    renderSnapshot(root, coordinator.snapshot, config, coordinator);
+    renderSnapshot(root, coordinator.snapshot, config, coordinator, connections);
   }
 }
 
 async function retryDiscoveryAndRender(
   coordinator: FirstLaunchCoordinator,
   root: HTMLElement | null,
-  config: ProvisioningModeConfig
+  config: ProvisioningModeConfig,
+  connections?: PeerConnectionController
 ): Promise<void> {
   const pending = coordinator.retryDiscoveryRegistration();
   if (root) {
-    renderSnapshot(root, coordinator.snapshot, config, coordinator);
+    renderSnapshot(root, coordinator.snapshot, config, coordinator, connections);
   }
 
   await pending;
   if (root) {
-    renderSnapshot(root, coordinator.snapshot, config, coordinator);
+    renderSnapshot(root, coordinator.snapshot, config, coordinator, connections);
   }
 }
 

@@ -66,7 +66,7 @@ pub fn create_island_window(app: &App) -> tauri::Result<WebviewWindow> {
     let window = WebviewWindowBuilder::new(app, ISLAND_LABEL, WebviewUrl::App("index.html".into()))
         .title("Teti")
         .inner_size(size.width, size.height)
-        .min_inner_size(32.0, 22.0)
+        .min_inner_size(32.0, 18.0)
         .resizable(false)
         .decorations(false)
         .transparent(true)
@@ -188,8 +188,8 @@ pub fn current_monitor_info(app: AppHandle) -> Result<Option<MonitorInfo>, Strin
 pub fn size_for_mode(mode: IslandMode) -> IslandSize {
     match mode {
         IslandMode::Hidden | IslandMode::Idle => IslandSize {
-            width: 96.0,
-            height: 28.0,
+            width: 64.0,
+            height: 24.0,
         },
         IslandMode::Onboarding | IslandMode::Error => IslandSize {
             width: 500.0,
@@ -204,6 +204,17 @@ pub fn size_for_mode(mode: IslandMode) -> IslandSize {
             height: 150.0,
         },
     }
+}
+
+pub fn size_for_mode_on_monitor(mode: IslandMode, has_notch: bool) -> IslandSize {
+    if has_notch && matches!(mode, IslandMode::Hidden | IslandMode::Idle) {
+        return IslandSize {
+            width: 52.0,
+            height: 18.0,
+        };
+    }
+
+    size_for_mode(mode)
 }
 
 pub fn top_center_position(
@@ -267,7 +278,7 @@ fn island_window(app: &AppHandle) -> Result<WebviewWindow, String> {
 }
 
 fn validate_size(width: f64, height: f64) -> Result<(), String> {
-    if !width.is_finite() || !height.is_finite() || width < 32.0 || height < 22.0 {
+    if !width.is_finite() || !height.is_finite() || width < 32.0 || height < 18.0 {
         return Err("Invalid island geometry.".to_string());
     }
     if width > 640.0 || height > 360.0 {
@@ -292,8 +303,8 @@ mod tests {
         assert_eq!(
             size_for_mode(IslandMode::Idle),
             IslandSize {
-                width: 96.0,
-                height: 28.0
+                width: 64.0,
+                height: 24.0
             }
         );
         assert_eq!(
@@ -302,6 +313,28 @@ mod tests {
                 width: 500.0,
                 height: 352.0
             }
+        );
+    }
+
+    #[test]
+    fn notched_monitor_uses_a_short_idle_tail() {
+        assert_eq!(
+            size_for_mode_on_monitor(IslandMode::Idle, true),
+            IslandSize {
+                width: 52.0,
+                height: 18.0
+            }
+        );
+        assert_eq!(
+            size_for_mode_on_monitor(IslandMode::Idle, false),
+            IslandSize {
+                width: 64.0,
+                height: 24.0
+            }
+        );
+        assert_eq!(
+            size_for_mode_on_monitor(IslandMode::Onboarding, true),
+            size_for_mode(IslandMode::Onboarding)
         );
     }
 

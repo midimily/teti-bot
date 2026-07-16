@@ -7,7 +7,13 @@ export type LifecycleMethod =
   | "account.load"
   | "account.create"
   | "discovery.register"
-  | "discovery.retry";
+  | "discovery.retry"
+  | "connection.resolve"
+  | "connection.request"
+  | "connection.list"
+  | "connection.poll"
+  | "connection.accept"
+  | "connection.reject";
 
 export const LIFECYCLE_METHODS: readonly LifecycleMethod[] = [
   "lifecycle.health",
@@ -15,7 +21,13 @@ export const LIFECYCLE_METHODS: readonly LifecycleMethod[] = [
   "account.load",
   "account.create",
   "discovery.register",
-  "discovery.retry"
+  "discovery.retry",
+  "connection.resolve",
+  "connection.request",
+  "connection.list",
+  "connection.poll",
+  "connection.accept",
+  "connection.reject"
 ];
 
 export interface LifecycleRequest {
@@ -43,6 +55,8 @@ export type LifecycleResult =
   | LifecycleHealthResult
   | LifecycleStatusResult
   | PublicTetiAccount
+  | PublicTetiIdentity
+  | PeerConnectionResult
   | null;
 
 export interface LifecycleHealthResult {
@@ -70,6 +84,33 @@ export interface PublicTetiAccount {
   createdAt: string;
 }
 
+export interface PublicTetiIdentity {
+  id: string;
+  address: string;
+  displayName?: string;
+  publicKey?: string;
+  publicProfile: Record<string, unknown>;
+}
+
+export interface PeerConnectionDto {
+  requestId: string;
+  state: "Requested" | "PendingApproval" | "Accepted" | "Confirmed" | "Rejected" | "Blocked";
+  direction: "incoming" | "outgoing";
+  remoteTetiId: string;
+  remoteAddress: string;
+  remoteDisplayName?: string;
+  createdAt: string;
+  updatedAt: string;
+  lastHeartbeatSentAt?: string;
+  lastHeartbeatReceivedAt?: string;
+}
+
+export interface PeerConnectionResult {
+  connections: PeerConnectionDto[];
+  receivedCount: number;
+  heartbeatCount: number;
+}
+
 export interface LifecycleErrorDto {
   code: LifecycleErrorCode;
   message: string;
@@ -88,6 +129,9 @@ export type LifecycleErrorCode =
   | "ACCOUNT_ALREADY_EXISTS"
   | "ACCOUNT_CREATE_FAILED"
   | "DISCOVERY_REGISTRATION_FAILED"
+  | "CONNECTION_RESOLVE_FAILED"
+  | "CONNECTION_REQUEST_FAILED"
+  | "CONNECTION_POLL_FAILED"
   | "SIDECAR_UNAVAILABLE"
   | "REQUEST_TIMEOUT"
   | "INTERNAL_ERROR";
@@ -98,7 +142,13 @@ export const LIFECYCLE_TIMEOUT_MS: Record<LifecycleMethod, number> = {
   "account.load": 5_000,
   "account.create": 120_000,
   "discovery.register": 15_000,
-  "discovery.retry": 15_000
+  "discovery.retry": 15_000,
+  "connection.resolve": 15_000,
+  "connection.request": 30_000,
+  "connection.list": 5_000,
+  "connection.poll": 20_000,
+  "connection.accept": 30_000,
+  "connection.reject": 30_000
 };
 
 export function isLifecycleMethod(value: unknown): value is LifecycleMethod {

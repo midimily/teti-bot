@@ -10,7 +10,7 @@
     "runtime:bundle": "node --experimental-strip-types scripts/bundle-runtime.ts",
     "preview": "vite preview --host 127.0.0.1",
     "typecheck": "tsc --noEmit",
-    "tauri:build": "tauri build",
+    "tauri:build": "tauri build && node --experimental-strip-types scripts/sign-app.ts",
     "profile:create": "node --experimental-strip-types scripts/profile.ts create",
     "profile:status": "node --experimental-strip-types scripts/profile.ts status",
     "profile:preflight": "node --experimental-strip-types scripts/profile.ts preflight",

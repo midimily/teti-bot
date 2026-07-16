@@ -18,7 +18,7 @@ use objc2_foundation::{
 use tauri::{AppHandle, Manager, WebviewWindow, Wry};
 use tauri_nspanel::WebviewWindowExt;
 
-use crate::window::{size_for_mode, IslandMode, MonitorInfo};
+use crate::window::{size_for_mode_on_monitor, IslandMode, MonitorInfo};
 
 const ISLAND_LABEL: &str = "island";
 const BOTTOM_CORNER_MASK: usize = 3;
@@ -102,7 +102,7 @@ fn resize_and_pin_on_main(app: &AppHandle, mode: IslandMode) -> Result<(), Strin
     let screen = resolve_target_screen(mtm, panel)
         .ok_or_else(|| "No macOS screen is available".to_owned())?;
     let info = screen_info(&screen);
-    let base = size_for_mode(mode);
+    let base = size_for_mode_on_monitor(mode, info.has_notch);
     let safe_top = if info.has_notch {
         info.safe_top_inset
     } else {
@@ -120,15 +120,23 @@ fn resize_and_pin_on_main(app: &AppHandle, mode: IslandMode) -> Result<(), Strin
 
     panel.setFrame_display_animate(target, true, matches!(mode, IslandMode::Idle));
     panel.setHasShadow(!matches!(mode, IslandMode::Hidden | IslandMode::Idle));
+    let accepts_input = matches!(mode, IslandMode::Onboarding | IslandMode::Error);
+    panel.setBecomesKeyOnlyIfNeeded(!accepts_input);
     apply_content_clip(
         panel,
         if matches!(mode, IslandMode::Hidden | IslandMode::Idle) {
-            14.0
+            if info.has_notch {
+                9.0
+            } else {
+                12.0
+            }
         } else {
             28.0
         },
     )?;
-    if mode != IslandMode::Hidden {
+    if accepts_input {
+        panel.makeKeyAndOrderFront(None);
+    } else if mode != IslandMode::Hidden {
         panel.orderFrontRegardless();
     }
     Ok(())

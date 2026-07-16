@@ -106,6 +106,20 @@ test("sidecar discovery retry registers existing account without creating anothe
   assert.equal(deps.createCalls.length, 0);
 });
 
+test("sidecar routes peer resolution and connection polling through the bounded bridge", async () => {
+  const deps = fakeDependencies({ account: createAccount("Milo") });
+  const resolved = await handleLifecycleRequest(request("connection.resolve", { query: "076bm9evq" }), deps);
+  const polled = await handleLifecycleRequest(request("connection.poll"), deps);
+
+  assert.equal(resolved.ok, true);
+  assert.equal(resolved.ok && resolved.result?.id, "teti_076bm9evq");
+  assert.deepEqual(polled.ok && polled.result, {
+    connections: [],
+    receivedCount: 0,
+    heartbeatCount: 0
+  });
+});
+
 function request(method: LifecycleRequest["method"], params: Record<string, unknown> = {}): LifecycleRequest {
   return {
     version: LIFECYCLE_PROTOCOL_VERSION,
@@ -143,6 +157,24 @@ function fakeDependencies(options: { account?: TetiAccount | null } = {}): Lifec
     },
     async registerDiscovery(existing: TetiAccount) {
       registerCalls.push(clone(existing));
+    },
+    async getPeerConnectionService() {
+      const empty = { connections: [], receivedCount: 0, heartbeatCount: 0 } as const;
+      return {
+        async resolve(query: string) {
+          return {
+            id: `teti_${query}`,
+            address: "remote@mail.seep.im",
+            publicKey: "remote-public-key",
+            publicProfile: {}
+          };
+        },
+        async request() { return empty; },
+        async list() { return empty; },
+        async poll() { return empty; },
+        async accept() { return empty; },
+        async reject() { return empty; }
+      };
     }
   };
 }

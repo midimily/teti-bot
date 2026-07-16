@@ -22,12 +22,17 @@ import {
   validateAuthorizedProvisioningProfile
 } from "./profile.ts";
 import { createLifecycleError, sanitizeUnknownError } from "./security.ts";
+import {
+  getDefaultPeerConnectionService,
+  type PeerConnectionService
+} from "./connections.ts";
 
 export interface LifecycleSidecarDependencies {
   loadTetiAccount(): Promise<TetiAccount | null>;
   createTetiAccount(input: { name: string }): Promise<TetiAccount>;
   getTetiStatus(): Promise<TetiStatus>;
   registerDiscovery(account: TetiAccount): Promise<unknown>;
+  getPeerConnectionService(): Promise<PeerConnectionService>;
 }
 
 export const defaultLifecycleSidecarDependencies: LifecycleSidecarDependencies = {
@@ -41,7 +46,8 @@ export const defaultLifecycleSidecarDependencies: LifecycleSidecarDependencies =
   registerDiscovery: async (account) => {
     await new RegistryDiscoveryClient().registerIdentity(toDiscoveryRegistrationPayload(account));
     await markDiscoveryRegistrationComplete(account);
-  }
+  },
+  getPeerConnectionService: getDefaultPeerConnectionService
 };
 
 export async function handleLifecycleRequest(
@@ -120,6 +126,24 @@ async function dispatchLifecycleRequest(
       await dependencies.registerDiscovery(account);
       return statusToDto(await dependencies.getTetiStatus(), account);
     }
+
+    case "connection.resolve":
+      return (await dependencies.getPeerConnectionService()).resolve(validateConnectionQuery(request.params?.query));
+
+    case "connection.request":
+      return (await dependencies.getPeerConnectionService()).request(validateConnectionQuery(request.params?.query));
+
+    case "connection.list":
+      return (await dependencies.getPeerConnectionService()).list();
+
+    case "connection.poll":
+      return (await dependencies.getPeerConnectionService()).poll();
+
+    case "connection.accept":
+      return (await dependencies.getPeerConnectionService()).accept(validateRequestId(request.params?.requestId));
+
+    case "connection.reject":
+      return (await dependencies.getPeerConnectionService()).reject(validateRequestId(request.params?.requestId));
   }
 }
 
@@ -193,6 +217,20 @@ function validateName(value: unknown): string {
   return validation.value;
 }
 
+function validateConnectionQuery(value: unknown): string {
+  if (typeof value !== "string" || !value.trim() || value.length > 32) {
+    throw new Error("Enter the 9-character Teti ID shown on teti.bot.");
+  }
+  return value.trim();
+}
+
+function validateRequestId(value: unknown): string {
+  if (typeof value !== "string" || !value.trim() || value.length > 120) {
+    throw new Error("A valid connection request ID is required.");
+  }
+  return value.trim();
+}
+
 function statusToDto(status: TetiStatus, account: TetiAccount | null): LifecycleStatusResult {
   const result: LifecycleStatusResult = {
     exists: status.exists,
@@ -241,6 +279,15 @@ function fallbackCodeForMethod(method: LifecycleRequest["method"]) {
     case "discovery.register":
     case "discovery.retry":
       return "DISCOVERY_REGISTRATION_FAILED";
+    case "connection.resolve":
+      return "CONNECTION_RESOLVE_FAILED";
+    case "connection.request":
+    case "connection.accept":
+    case "connection.reject":
+      return "CONNECTION_REQUEST_FAILED";
+    case "connection.list":
+    case "connection.poll":
+      return "CONNECTION_POLL_FAILED";
     case "account.load":
     case "account.status":
       return "ACCOUNT_LOAD_FAILED";

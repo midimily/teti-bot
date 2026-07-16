@@ -42,6 +42,9 @@ export function redactSecretLikeText(text: string): string {
 }
 
 function classifyError(message: string, fallbackCode: LifecycleErrorCode): LifecycleErrorCode {
+  if (fallbackCode.startsWith("CONNECTION_")) {
+    return fallbackCode;
+  }
   if (/(network|fetch|registry|discover|register|cloudflare|ECONN|ENOTFOUND|timeout)/i.test(message)) {
     return "DISCOVERY_REGISTRATION_FAILED";
   }
@@ -72,6 +75,12 @@ function publicMessageForCode(code: LifecycleErrorCode): string {
       return "Teti could not finish setting up.";
     case "DISCOVERY_REGISTRATION_FAILED":
       return "Teti could not finish connecting yet.";
+    case "CONNECTION_RESOLVE_FAILED":
+      return "Teti could not find that public identity.";
+    case "CONNECTION_REQUEST_FAILED":
+      return "Teti could not complete the connection request.";
+    case "CONNECTION_POLL_FAILED":
+      return "Teti could not check peer messages yet.";
     case "REQUEST_TIMEOUT":
       return "Teti took too long to respond.";
     case "SIDECAR_UNAVAILABLE":
@@ -87,6 +96,12 @@ function retryTargetForCode(code: LifecycleErrorCode): LifecycleMethod | undefin
       return "account.create";
     case "DISCOVERY_REGISTRATION_FAILED":
       return "discovery.retry";
+    case "CONNECTION_RESOLVE_FAILED":
+      return "connection.resolve";
+    case "CONNECTION_REQUEST_FAILED":
+      return "connection.request";
+    case "CONNECTION_POLL_FAILED":
+      return "connection.poll";
     case "ACCOUNT_LOAD_FAILED":
     case "SIDECAR_UNAVAILABLE":
     case "REQUEST_TIMEOUT":
