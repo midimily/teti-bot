@@ -101,6 +101,10 @@ States:
 
 Stored records include `requestId`, `remoteTetiId`, `remoteAddress`, `state`, `createdAt`, `updatedAt`, and `confirmedAt` when confirmation completes.
 
+`requestId` identifies a handshake attempt, while `remoteTetiId` identifies the current relationship. If both Teti instances send requests at the same time, accepting either request makes that request canonical and removes the other local attempts for the same `remoteTetiId`. A crossed request that arrives after the relationship is already `Confirmed` is handled idempotently and does not create another pending row. Loading a legacy store also reconciles `Confirmed` peers and removes stale waiting attempts for the same peer.
+
+Creating a request is idempotent for an active peer relationship. The desktop bridge returns an explicit request outcome (`created`, `alreadyRequested`, `approvalRequired`, `confirming`, `alreadyConfirmed`, or `blocked`) so the UI can explain why no second message was sent and highlight the existing relationship.
+
 ## Discovery vs Connection
 
 Discovery contains public registry data: Teti id, chatmail address, public key, and public profile.

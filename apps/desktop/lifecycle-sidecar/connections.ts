@@ -7,6 +7,7 @@ import {
   handleAccept,
   handleIncomingRequest,
   handleReject,
+  reconcileConfirmedPeerConnections,
   rejectConnection
 } from "../../../core/connection/handshake.ts";
 import { TetiConnectionManager } from "../../../core/connection/manager.ts";
@@ -32,6 +33,7 @@ import { toTetiIdentity, type TetiRegistryReader } from "../../../services/disco
 import type { TetiIdentity } from "../../../services/discovery/types.ts";
 import type {
   PeerConnectionDto,
+  PeerConnectionRequestOutcome,
   PeerConnectionResult,
   PublicTetiIdentity
 } from "../src/lifecycle-bridge/protocol.ts";
@@ -106,13 +108,14 @@ export class PeerConnectionRuntime implements PeerConnectionService {
         throw new Error("Teti cannot connect to its own identity.");
       }
 
-      const existing = (await this.connectionStorage.loadAll()).find(
-        (item) => item.remoteTetiId === remote.id && item.state !== TetiConnectionState.Rejected
-      );
-      if (!existing) {
-        await this.connectionManager.createRequest(remote);
-      }
-      return this.snapshot();
+      const connections = await reconcileConfirmedPeerConnections(this.connectionStorage);
+      const existing = selectActivePeerConnection(connections, remote.id);
+      const connection = existing ?? await this.connectionManager.createRequest(remote);
+      return this.snapshot(0, 0, {
+        kind: existing ? requestOutcomeKind(existing.state) : "created",
+        requestId: connection.requestId,
+        remoteTetiId: connection.remoteTetiId
+      });
     });
   }
 
@@ -126,7 +129,8 @@ export class PeerConnectionRuntime implements PeerConnectionService {
       const account = await this.requireAccount();
       const messages = await this.chatmailAdapter.receiveMessages({
         accountId: account.chatmailAccountId,
-        limit: 100
+        limit: 100,
+        backlogFirst: true
       });
       let receivedCount = 0;
 
@@ -260,14 +264,20 @@ export class PeerConnectionRuntime implements PeerConnectionService {
     return sent;
   }
 
-  private async snapshot(receivedCount = 0, heartbeatCount = 0): Promise<PeerConnectionResult> {
-    const connections = await this.connectionStorage.loadAll();
+  private async snapshot(
+    receivedCount = 0,
+    heartbeatCount = 0,
+    requestOutcome?: PeerConnectionRequestOutcome
+  ): Promise<PeerConnectionResult> {
+    const connections = await reconcileConfirmedPeerConnections(this.connectionStorage);
     const dtos = await Promise.all(connections.map((connection) => this.toDto(connection)));
-    return {
+    const result: PeerConnectionResult = {
       connections: dtos.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt)),
       receivedCount,
       heartbeatCount
     };
+    if (requestOutcome) result.requestOutcome = requestOutcome;
+    return result;
   }
 
   private async toDto(connection: TetiConnectionRecord): Promise<PeerConnectionDto> {
@@ -385,5 +395,44 @@ async function findConnection(
 function requireMatchingSender(actual: string | undefined, expected: string | undefined): void {
   if (!actual || !expected || actual.toLowerCase() !== expected.toLowerCase()) {
     throw new Error("Chatmail sender does not match the Teti handshake identity.");
+  }
+}
+
+function selectActivePeerConnection(
+  connections: TetiConnectionRecord[],
+  remoteTetiId: string
+): TetiConnectionRecord | undefined {
+  const priority: Record<TetiConnectionState, number> = {
+    [TetiConnectionState.Blocked]: 6,
+    [TetiConnectionState.Confirmed]: 5,
+    [TetiConnectionState.PendingApproval]: 4,
+    [TetiConnectionState.Accepted]: 3,
+    [TetiConnectionState.Requested]: 2,
+    [TetiConnectionState.Rejected]: 1
+  };
+  return connections
+    .filter((connection) =>
+      connection.remoteTetiId === remoteTetiId &&
+      connection.state !== TetiConnectionState.Rejected
+    )
+    .sort((left, right) => priority[right.state] - priority[left.state])[0];
+}
+
+function requestOutcomeKind(
+  state: TetiConnectionState
+): PeerConnectionRequestOutcome["kind"] {
+  switch (state) {
+    case TetiConnectionState.Requested:
+      return "alreadyRequested";
+    case TetiConnectionState.PendingApproval:
+      return "approvalRequired";
+    case TetiConnectionState.Accepted:
+      return "confirming";
+    case TetiConnectionState.Confirmed:
+      return "alreadyConfirmed";
+    case TetiConnectionState.Blocked:
+      return "blocked";
+    case TetiConnectionState.Rejected:
+      return "created";
   }
 }

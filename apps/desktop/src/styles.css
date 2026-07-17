@@ -574,8 +574,9 @@ input {
 }
 
 .teti-connect-input::placeholder {
-  color: #6a94b8;
-  opacity: 1;
+  color: #89a4bc;
+  opacity: 0.48;
+  letter-spacing: 0.08em;
 }
 
 .teti-connect-button {
@@ -601,6 +602,16 @@ input {
   margin: 6px 0 0;
 }
 
+.teti-connect-notice {
+  width: min(100%, 360px);
+  margin: 6px auto 0;
+  color: #176c96;
+  font-size: 10px;
+  font-weight: 650;
+  line-height: 15px;
+  text-align: left;
+}
+
 .teti-connection-list {
   display: grid;
   gap: 6px;
@@ -624,6 +635,11 @@ input {
 
 .teti-connection-row.is-confirmed {
   border-color: rgba(21, 152, 115, 0.3);
+}
+
+.teti-connection-row.is-highlighted {
+  border-color: rgba(20, 125, 242, 0.62);
+  box-shadow: 0 0 0 2px rgba(20, 125, 242, 0.1);
 }
 
 .teti-connection-identity {

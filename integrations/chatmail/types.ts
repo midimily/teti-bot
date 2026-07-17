@@ -38,6 +38,7 @@ export interface SendChatmailMessageInput {
 export interface ReceiveChatmailMessagesInput {
   accountId: number;
   limit?: number;
+  backlogFirst?: boolean;
   onDiagnostic?: (diagnostic: ChatmailReceiveDiagnostic) => void;
 }
 
@@ -48,6 +49,11 @@ export interface DeleteChatmailAccountInput {
 export interface ChatmailSentMessage {
   messageId: number;
   chatId?: number;
+}
+
+export interface WaitForChatmailDeliveryInput {
+  accountId: number;
+  messageId: number;
 }
 
 export interface ChatmailReceivedMessage {
@@ -125,6 +131,7 @@ export interface ChatmailAdapter {
   getIdentity(input: LoadChatmailAccountInput): Promise<ChatmailIdentity>;
   getPublicIdentity(input: LoadChatmailAccountInput): Promise<ChatmailPublicIdentity>;
   sendMessage(input: SendChatmailMessageInput): Promise<ChatmailSentMessage>;
+  waitForDelivery?(input: WaitForChatmailDeliveryInput): Promise<ChatmailMessageStatus>;
   receiveMessages(input: ReceiveChatmailMessagesInput): Promise<ChatmailReceivedMessage[]>;
   deleteAccount(input: DeleteChatmailAccountInput): Promise<void>;
 }

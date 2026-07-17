@@ -44,6 +44,38 @@ test("two Teti runtimes confirm a Chatmail handshake and exchange alpha heartbea
 
   const heartbeatReturn = await runtimeB.poll();
   assert.ok(heartbeatReturn.connections[0]?.lastHeartbeatReceivedAt);
+
+  const repeated = await runtimeA.request("beta00002");
+  assert.equal(repeated.requestOutcome?.kind, "alreadyConfirmed");
+  assert.equal(repeated.connections.length, 1);
+});
+
+test("receiver can approve a relayed request after the initiator goes offline", async () => {
+  const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
+  const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
+  const registry = new StaticRegistry([toIdentity(accountA), toIdentity(accountB)]);
+  const relay = new MemoryChatmailRelay();
+  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), registry);
+
+  const requested = await runtimeA.request("beta00002");
+  assert.equal(requested.connections[0]?.state, "Requested");
+  assert.equal(requested.requestOutcome?.kind, "created");
+
+  const repeated = await runtimeA.request("beta00002");
+  assert.equal(repeated.requestOutcome?.kind, "alreadyRequested");
+  assert.equal(repeated.connections.length, 1);
+
+  // Do not call the initiator again. The receiver starts later and must consume
+  // the request retained by the relay without any sender-side participation.
+  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), registry);
+  const incoming = await runtimeB.poll();
+
+  assert.equal(incoming.connections[0]?.state, "PendingApproval");
+  assert.equal(incoming.connections[0]?.direction, "incoming");
+
+  const reciprocal = await runtimeB.request("alpha0001");
+  assert.equal(reciprocal.requestOutcome?.kind, "approvalRequired");
+  assert.equal(reciprocal.connections.length, 1);
 });
 
 async function makeRuntime(

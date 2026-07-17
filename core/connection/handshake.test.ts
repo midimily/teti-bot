@@ -8,6 +8,7 @@ import {
   createConnectionRejectEnvelope
 } from "./protocol.ts";
 import { TetiConnectionManager } from "./manager.ts";
+import { reconcileConfirmedPeerConnections } from "./handshake.ts";
 import { MemoryTetiConnectionStorage } from "./storage.ts";
 import { TetiConnectionState } from "./types.ts";
 import type {
@@ -71,6 +72,88 @@ test("duplicate incoming requests do not create duplicate connection records", a
   assert.equal((await pair.b.manager.listConnections()).length, 1);
 });
 
+test("crossed requests collapse to one confirmed relationship after either request is accepted", async () => {
+  const pair = await createHandshakePair();
+
+  const requestA = await pair.a.manager.createRequest(pair.b.identity);
+  await pair.b.manager.createRequest(pair.a.identity);
+  await pair.a.manager.receiveEvents();
+  const [incomingAtB] = await pair.b.manager.receiveEvents();
+
+  assert.equal((await pair.a.manager.listConnections()).length, 2);
+  assert.equal((await pair.b.manager.listConnections()).length, 2);
+  assert.equal(incomingAtB.state, TetiConnectionState.PendingApproval);
+
+  await pair.b.manager.acceptRequest(requestA.requestId);
+  await pair.a.manager.receiveEvents();
+
+  const connectionsA = await pair.a.manager.listConnections();
+  const connectionsB = await pair.b.manager.listConnections();
+  assert.equal(connectionsA.length, 1);
+  assert.equal(connectionsB.length, 1);
+  assert.equal(connectionsA[0].requestId, requestA.requestId);
+  assert.equal(connectionsB[0].requestId, requestA.requestId);
+  assert.equal(connectionsA[0].state, TetiConnectionState.Confirmed);
+  assert.equal(connectionsB[0].state, TetiConnectionState.Confirmed);
+});
+
+test("a crossed request arriving after confirmation does not recreate pending approval", async () => {
+  const pair = await createHandshakePair();
+
+  const requestA = await pair.a.manager.createRequest(pair.b.identity);
+  await pair.b.manager.receiveEvents();
+  await pair.b.manager.acceptRequest(requestA.requestId);
+  await pair.a.manager.receiveEvents();
+
+  await pair.b.messaging.sendConnectionRequest({
+    accountId: 2,
+    toAddress: pair.a.identity.address,
+    request: {
+      version: 1,
+      requestId: "late-request-b",
+      fromTetiId: pair.b.identity.id,
+      fromAddress: pair.b.identity.address,
+      publicKey: pair.b.identity.publicKey,
+      profile: pair.b.identity.publicProfile,
+      createdAt: fixedNow,
+      nonce: "late-nonce-b"
+    }
+  });
+  await pair.a.manager.receiveEvents();
+
+  const connectionsA = await pair.a.manager.listConnections();
+  assert.equal(connectionsA.length, 1);
+  assert.equal(connectionsA[0].requestId, requestA.requestId);
+  assert.equal(connectionsA[0].state, TetiConnectionState.Confirmed);
+});
+
+test("legacy confirmed and waiting records for one peer reconcile to one relationship", async () => {
+  const pair = await createHandshakePair();
+  const confirmed = await pair.a.manager.createRequest(pair.b.identity);
+  await pair.b.manager.receiveEvents();
+  await pair.b.manager.acceptRequest(confirmed.requestId);
+  await pair.a.manager.receiveEvents();
+
+  const [canonical] = await pair.a.manager.listConnections();
+  await pair.a.connectionStorage.upsert({
+    ...canonical,
+    requestId: "legacy-waiting-request",
+    state: TetiConnectionState.Requested,
+    direction: "outgoing",
+    request: {
+      ...canonical.request,
+      requestId: "legacy-waiting-request"
+    },
+    confirmedAt: undefined
+  });
+
+  const reconciled = await reconcileConfirmedPeerConnections(pair.a.connectionStorage);
+
+  assert.equal(reconciled.length, 1);
+  assert.equal(reconciled[0].requestId, canonical.requestId);
+  assert.equal((await pair.a.connectionStorage.loadAll()).length, 1);
+});
+
 test("invalid requestId cannot be accepted or confirmed", async () => {
   const pair = await createHandshakePair();
 
@@ -116,11 +199,12 @@ async function createHandshakePair() {
         publicProfile: aAccount.publicProfile
       },
       messaging: aMessaging,
+      connectionStorage: aConnectionStorage,
       manager: new TetiConnectionManager({
         accountStorage: aStorage,
         connectionStorage: aConnectionStorage,
         messagingAdapter: aMessaging,
-        requestIdFactory: () => "request-1",
+        requestIdFactory: () => "request-a",
         nonceFactory: () => "nonce-a",
         now: () => fixedNow
       })
@@ -133,11 +217,12 @@ async function createHandshakePair() {
         publicProfile: bAccount.publicProfile
       },
       messaging: bMessaging,
+      connectionStorage: bConnectionStorage,
       manager: new TetiConnectionManager({
         accountStorage: bStorage,
         connectionStorage: bConnectionStorage,
         messagingAdapter: bMessaging,
-        requestIdFactory: () => "request-1",
+        requestIdFactory: () => "request-b",
         nonceFactory: () => "nonce-b",
         now: () => fixedNow
       })

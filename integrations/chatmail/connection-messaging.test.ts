@@ -17,7 +17,8 @@ import type {
   DeleteChatmailAccountInput,
   LoadChatmailAccountInput,
   ReceiveChatmailMessagesInput,
-  SendChatmailMessageInput
+  SendChatmailMessageInput,
+  WaitForChatmailDeliveryInput
 } from "./types.ts";
 
 test("connection messaging sends request envelopes through chatmail adapter", async () => {
@@ -42,6 +43,7 @@ test("connection messaging sends request envelopes through chatmail adapter", as
   assert.equal(chatmailAdapter.sendCalls[0].peerPublicKey, "remote-public-key");
   assert.equal(JSON.parse(chatmailAdapter.sendCalls[0].text).teti, true);
   assert.deepEqual(parseConnectionRequestEnvelope(chatmailAdapter.sendCalls[0].text), request);
+  assert.deepEqual(chatmailAdapter.deliveryCalls, [{ accountId: 3, messageId: 1 }]);
 });
 
 test("connection messaging receives only valid connection request envelopes", async () => {
@@ -233,6 +235,7 @@ function createRequest(): TetiConnectionRequest {
 
 class RecordingChatmailAdapter implements ChatmailAdapter {
   readonly sendCalls: SendChatmailMessageInput[] = [];
+  readonly deliveryCalls: WaitForChatmailDeliveryInput[] = [];
   readonly receiveCalls: ReceiveChatmailMessagesInput[] = [];
   readonly receivedMessages: ChatmailReceivedMessage[] = [];
   readonly receiveMessageBatches: ChatmailReceivedMessage[][] = [];
@@ -258,6 +261,16 @@ class RecordingChatmailAdapter implements ChatmailAdapter {
     return {
       messageId: this.sendCalls.length,
       chatId: input.accountId
+    };
+  }
+
+  async waitForDelivery(input: WaitForChatmailDeliveryInput) {
+    this.deliveryCalls.push(input);
+    return {
+      messageId: input.messageId,
+      state: 26,
+      showPadlock: true,
+      error: null
     };
   }
 

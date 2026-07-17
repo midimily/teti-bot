@@ -109,6 +109,19 @@ export interface PeerConnectionResult {
   connections: PeerConnectionDto[];
   receivedCount: number;
   heartbeatCount: number;
+  requestOutcome?: PeerConnectionRequestOutcome;
+}
+
+export interface PeerConnectionRequestOutcome {
+  kind:
+    | "created"
+    | "alreadyRequested"
+    | "approvalRequired"
+    | "confirming"
+    | "alreadyConfirmed"
+    | "blocked";
+  requestId: string;
+  remoteTetiId: string;
 }
 
 export interface LifecycleErrorDto {

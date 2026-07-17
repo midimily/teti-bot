@@ -64,6 +64,38 @@ test("real adapter maps account info and public identity without exposing privat
   ]);
 });
 
+test("real adapter waits until the relay accepts an outgoing message", async () => {
+  const rpc = new RecordingChatmailRpcClient();
+  rpc.messageStatuses.push(
+    { messageId: 17, state: 20, showPadlock: true, error: null },
+    { messageId: 17, state: 26, showPadlock: true, error: null }
+  );
+  const adapter = new RealChatmailAdapter(rpc, {
+    deliveryTimeoutMs: 100,
+    deliveryPollIntervalMs: 0,
+    delay: async () => undefined
+  });
+
+  const status = await adapter.waitForDelivery({ accountId: 7, messageId: 17 });
+
+  assert.equal(status.state, 26);
+  assert.deepEqual(rpc.messageStatusCalls, [
+    { accountId: 7, messageId: 17 },
+    { accountId: 7, messageId: 17 }
+  ]);
+});
+
+test("real adapter rejects a failed outgoing message instead of reporting it as sent", async () => {
+  const rpc = new RecordingChatmailRpcClient();
+  rpc.messageStatuses.push({ messageId: 18, state: 24, error: "relay rejected message" });
+  const adapter = new RealChatmailAdapter(rpc);
+
+  await assert.rejects(
+    () => adapter.waitForDelivery({ accountId: 7, messageId: 18 }),
+    /relay rejected message/
+  );
+});
+
 test("JSON-RPC transport maps JSON-RPC errors to ChatmailRpcError", async () => {
   const connection = new StaticJsonRpcConnection({
     jsonrpc: "2.0",
@@ -663,6 +695,42 @@ test("JSON-RPC client falls back to get_next_msgs when event batch has no messag
   });
 });
 
+test("JSON-RPC client drains offline backlog before waiting for live events", async () => {
+  const connection = new RoutingJsonRpcConnection({
+    get_next_msgs: {
+      jsonrpc: "2.0",
+      id: 1,
+      result: [31]
+    },
+    get_message: {
+      jsonrpc: "2.0",
+      id: 2,
+      result: {
+        id: 31,
+        chatId: 32,
+        text: "{\"teti\":true}",
+        timestamp: 1783771200,
+        sender: {
+          address: "offline-peer@mail.seep.im"
+        }
+      }
+    }
+  });
+  const client = new JsonRpcChatmailClient(new JsonRpcClientTransport(connection));
+
+  const messages = await client.receiveMessages({
+    accountId: 8,
+    backlogFirst: true
+  });
+
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].messageId, 31);
+  assert.deepEqual(connection.requests.map((request) => request.method), [
+    "get_next_msgs",
+    "get_message"
+  ]);
+});
+
 test("chatmail provisioner creates identity from display name without exposing password", async () => {
   const rpc = new RecordingChatmailRpcClient();
   const provisioner = new RpcChatmailProvisioner(rpc);
@@ -697,6 +765,8 @@ test("chatmail provisioner creates identity from display name without exposing p
 
 class RecordingChatmailRpcClient implements ChatmailRpcClient {
   readonly calls: string[] = [];
+  readonly messageStatuses: ChatmailMessageStatus[] = [];
+  readonly messageStatusCalls: Array<{ accountId: number; messageId: number }> = [];
   readonly configureInputs: Array<{
     accountId: number;
     input: CreateChatmailAccountInput;
@@ -781,8 +851,9 @@ class RecordingChatmailRpcClient implements ChatmailRpcClient {
     return [];
   }
 
-  async getMessageStatus(_accountId: number, messageId: number): Promise<ChatmailMessageStatus> {
-    return {
+  async getMessageStatus(accountId: number, messageId: number): Promise<ChatmailMessageStatus> {
+    this.messageStatusCalls.push({ accountId, messageId });
+    return this.messageStatuses.shift() ?? {
       messageId,
       state: 26,
       showPadlock: true,

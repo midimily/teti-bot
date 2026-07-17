@@ -23,6 +23,8 @@ export interface PeerConnectionSnapshot {
   input: string;
   busy: boolean;
   error?: string;
+  notice?: string;
+  highlightedRequestId?: string;
   resolved?: PublicTetiIdentity;
   connections: PeerConnectionDto[];
   lastPolledAt?: string;
@@ -86,6 +88,8 @@ export class PeerConnectionController {
     this.collapseToken += 1;
     this.snapshotValue.open = false;
     this.snapshotValue.error = undefined;
+    this.snapshotValue.notice = undefined;
+    this.snapshotValue.highlightedRequestId = undefined;
     void this.notchWindow.setMode("idle", "close-peer-connections");
     this.onChange();
   }
@@ -93,6 +97,8 @@ export class PeerConnectionController {
   updateInput(value: string): void {
     this.snapshotValue.input = value.toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 9);
     this.snapshotValue.error = undefined;
+    this.snapshotValue.notice = undefined;
+    this.snapshotValue.highlightedRequestId = undefined;
     this.snapshotValue.resolved = undefined;
     this.touch();
   }
@@ -115,7 +121,9 @@ export class PeerConnectionController {
 
   async connect(): Promise<void> {
     await this.run(async () => {
-      this.applyResult(await this.client.request(this.snapshotValue.input));
+      const result = await this.client.request(this.snapshotValue.input);
+      this.applyResult(result);
+      this.applyRequestOutcome(result);
       this.snapshotValue.input = "";
       this.snapshotValue.resolved = undefined;
     });
@@ -161,6 +169,8 @@ export class PeerConnectionController {
     if (this.snapshotValue.busy) return;
     this.snapshotValue.busy = true;
     this.snapshotValue.error = undefined;
+    this.snapshotValue.notice = undefined;
+    this.snapshotValue.highlightedRequestId = undefined;
     this.touch();
     this.onChange();
     try {
@@ -176,6 +186,34 @@ export class PeerConnectionController {
 
   private applyResult(result: PeerConnectionResult): void {
     this.snapshotValue.connections = result.connections.map((connection) => ({ ...connection }));
+  }
+
+  private applyRequestOutcome(result: PeerConnectionResult): void {
+    const outcome = result.requestOutcome;
+    if (!outcome) return;
+    const connection = result.connections.find((item) => item.requestId === outcome.requestId);
+    const label = connection?.remoteDisplayName || publicTetiId(outcome.remoteTetiId);
+    this.snapshotValue.highlightedRequestId = outcome.requestId;
+    switch (outcome.kind) {
+      case "created":
+        this.snapshotValue.notice = `已向 ${label} 发送建联邀请，等待对方确认。`;
+        break;
+      case "alreadyRequested":
+        this.snapshotValue.notice = `已经向 ${label} 发送过邀请，正在等待对方确认。`;
+        break;
+      case "approvalRequired":
+        this.snapshotValue.notice = `${label} 正在等待你确认，请使用下方按钮处理。`;
+        break;
+      case "confirming":
+        this.snapshotValue.notice = `正在完成与 ${label} 的建联确认。`;
+        break;
+      case "alreadyConfirmed":
+        this.snapshotValue.notice = `已经与 ${label} 建联，无需再次发送邀请。`;
+        break;
+      case "blocked":
+        this.snapshotValue.notice = `${label} 当前已被阻止建联。`;
+        break;
+    }
   }
 
   private hasPendingApproval(): boolean {
@@ -247,6 +285,14 @@ export class MockPeerConnectionClient implements PeerConnectionClient {
 
   async request(query: string): Promise<PeerConnectionResult> {
     const identity = await this.resolve(query);
+    const existing = this.connections.find((connection) => connection.remoteTetiId === identity.id);
+    if (existing) {
+      return this.result({
+        kind: existing.state === "Confirmed" ? "alreadyConfirmed" : "alreadyRequested",
+        requestId: existing.requestId,
+        remoteTetiId: existing.remoteTetiId
+      });
+    }
     const now = new Date().toISOString();
     this.connections = [{
       requestId: `preview_${Date.now()}`,
@@ -258,7 +304,11 @@ export class MockPeerConnectionClient implements PeerConnectionClient {
       createdAt: now,
       updatedAt: now
     }];
-    return this.result();
+    return this.result({
+      kind: "created",
+      requestId: this.connections[0].requestId,
+      remoteTetiId: identity.id
+    });
   }
 
   async list(): Promise<PeerConnectionResult> { return this.result(); }
@@ -266,7 +316,17 @@ export class MockPeerConnectionClient implements PeerConnectionClient {
   async accept(): Promise<PeerConnectionResult> { return this.result(); }
   async reject(): Promise<PeerConnectionResult> { return this.result(); }
 
-  private result(): PeerConnectionResult {
-    return { connections: this.connections.map((item) => ({ ...item })), receivedCount: 0, heartbeatCount: 0 };
+  private result(requestOutcome?: PeerConnectionResult["requestOutcome"]): PeerConnectionResult {
+    const result: PeerConnectionResult = {
+      connections: this.connections.map((item) => ({ ...item })),
+      receivedCount: 0,
+      heartbeatCount: 0
+    };
+    if (requestOutcome) result.requestOutcome = requestOutcome;
+    return result;
   }
+}
+
+function publicTetiId(tetiId: string): string {
+  return tetiId.startsWith("teti_") ? tetiId.slice(5) : tetiId;
 }

@@ -217,6 +217,13 @@ export class JsonRpcChatmailClient implements ChatmailRpcClient {
     const messages: ChatmailReceivedMessage[] = [];
     let events: ChatmailEvent[] = [];
 
+    if (input.backlogFirst) {
+      await this.appendNextMessages(input, messages);
+      if (messages.length > 0) {
+        return messages;
+      }
+    }
+
     try {
       events = await this.transport.request<ChatmailEvent[]>("get_next_event_batch", []);
       input.onDiagnostic?.({
@@ -263,26 +270,32 @@ export class JsonRpcChatmailClient implements ChatmailRpcClient {
     }
 
     if (messages.length === 0) {
-      const nextMessageIds = await this.getNextMessageIds(input.accountId);
-      input.onDiagnostic?.({
-        type: "nextMessages",
-        accountId: input.accountId,
-        messageIds: nextMessageIds
-      });
-
-      for (const messageId of nextMessageIds) {
-        const message = await this.fetchReceivedMessage(input, messageId);
-        if (message) {
-          messages.push(message);
-        }
-
-        if (input.limit && messages.length >= input.limit) {
-          break;
-        }
-      }
+      await this.appendNextMessages(input, messages);
     }
 
     return messages;
+  }
+
+  private async appendNextMessages(
+    input: ReceiveChatmailMessagesInput,
+    messages: ChatmailReceivedMessage[]
+  ): Promise<void> {
+    const nextMessageIds = await this.getNextMessageIds(input.accountId);
+    input.onDiagnostic?.({
+      type: "nextMessages",
+      accountId: input.accountId,
+      messageIds: nextMessageIds
+    });
+
+    for (const messageId of nextMessageIds) {
+      const message = await this.fetchReceivedMessage(input, messageId);
+      if (message) {
+        messages.push(message);
+      }
+      if (input.limit && messages.length >= input.limit) {
+        break;
+      }
+    }
   }
 
   async getMessageStatus(accountId: number, messageId: number): Promise<ChatmailMessageStatus> {

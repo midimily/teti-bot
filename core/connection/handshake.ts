@@ -67,9 +67,19 @@ export async function handleIncomingRequest(
 ): Promise<TetiConnectionRecord> {
   validateConnectionRequest(request);
 
-  const existing = await findConnection(options.connectionStorage, request.requestId);
+  const connections = await options.connectionStorage.loadAll();
+  const existing = connections.find((connection) => connection.requestId === request.requestId);
   if (existing) {
     return existing;
+  }
+
+  const confirmedPeer = connections.find(
+    (connection) =>
+      connection.state === TetiConnectionState.Confirmed &&
+      connection.remoteTetiId === request.fromTetiId
+  );
+  if (confirmedPeer) {
+    return confirmedPeer;
   }
 
   const timestamp = now(options);
@@ -120,7 +130,7 @@ export async function acceptConnection(
   });
 
   const confirmedAt = now(options);
-  return options.connectionStorage.update(requestId, {
+  return confirmPeerConnection(options.connectionStorage, requestId, {
     state: TetiConnectionState.Confirmed,
     updatedAt: confirmedAt,
     confirmedAt
@@ -163,7 +173,7 @@ export async function handleAccept(
   }
 
   const confirmedAt = accept.createdAt || now(options);
-  return options.connectionStorage.update(accept.requestId, {
+  return confirmPeerConnection(options.connectionStorage, accept.requestId, {
     state: TetiConnectionState.Confirmed,
     remoteTetiId: accept.fromTetiId || existing.remoteTetiId,
     remoteAddress: accept.fromAddress || existing.remoteAddress,
@@ -184,6 +194,30 @@ export async function handleReject(
     updatedAt: rejectedAt,
     rejectedAt
   });
+}
+
+export async function reconcileConfirmedPeerConnections(
+  storage: TetiConnectionStorage
+): Promise<TetiConnectionRecord[]> {
+  const connections = await storage.loadAll();
+  const canonicalByPeer = new Map<string, TetiConnectionRecord>();
+
+  for (const connection of connections) {
+    if (connection.state !== TetiConnectionState.Confirmed) continue;
+    const canonical = canonicalByPeer.get(connection.remoteTetiId);
+    if (!canonical || connection.requestId.localeCompare(canonical.requestId) < 0) {
+      canonicalByPeer.set(connection.remoteTetiId, connection);
+    }
+  }
+
+  const reconciled = connections.filter((connection) => {
+    const canonical = canonicalByPeer.get(connection.remoteTetiId);
+    return !canonical || connection.requestId === canonical.requestId;
+  });
+  if (reconciled.length !== connections.length) {
+    await storage.saveAll(reconciled);
+  }
+  return reconciled;
 }
 
 async function requireLocalAccount(options: TetiConnectionHandshakeOptions) {
@@ -212,6 +246,32 @@ async function requireConnection(
   }
 
   return connection;
+}
+
+async function confirmPeerConnection(
+  storage: TetiConnectionStorage,
+  requestId: string,
+  patch: Partial<TetiConnectionRecord>
+): Promise<TetiConnectionRecord> {
+  const connections = await storage.loadAll();
+  const existingIndex = connections.findIndex((connection) => connection.requestId === requestId);
+  if (existingIndex === -1) {
+    throw new Error(`Teti connection request ${requestId} does not exist.`);
+  }
+
+  const existing = connections[existingIndex];
+  const confirmed: TetiConnectionRecord = {
+    ...existing,
+    ...patch,
+    requestId
+  };
+  const peerIds = new Set([existing.remoteTetiId, confirmed.remoteTetiId]);
+  const canonicalConnections = connections
+    .map((connection, index) => (index === existingIndex ? confirmed : connection))
+    .filter((connection) => connection.requestId === requestId || !peerIds.has(connection.remoteTetiId));
+
+  await storage.saveAll(canonicalConnections);
+  return confirmed;
 }
 
 function requireRequestId(requestId: string): void {

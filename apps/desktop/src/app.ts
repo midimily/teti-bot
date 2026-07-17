@@ -273,7 +273,7 @@ function createConnectionIsland(
   const input = document.createElement("input");
   input.className = "teti-input teti-connect-input";
   input.value = snapshot.input;
-  input.placeholder = "076bm9evq";
+  input.placeholder = "*********";
   input.disabled = snapshot.busy;
   input.maxLength = 9;
   input.autocapitalize = "none";
@@ -310,13 +310,30 @@ function createConnectionIsland(
     error.className = "teti-error teti-connect-error";
     error.textContent = snapshot.error;
     content.append(error);
+  } else if (snapshot.notice) {
+    const notice = document.createElement("p");
+    notice.className = "teti-connect-notice";
+    notice.setAttribute("role", "status");
+    notice.textContent = snapshot.notice;
+    content.append(notice);
   }
 
   if (snapshot.connections.length > 0) {
     const list = document.createElement("div");
     list.className = "teti-connection-list";
-    for (const connection of snapshot.connections.slice(0, 3)) {
-      list.append(createConnectionRow(connection, snapshot.busy, controller));
+    const visibleConnections = [...snapshot.connections]
+      .sort((left, right) =>
+        Number(right.requestId === snapshot.highlightedRequestId) -
+        Number(left.requestId === snapshot.highlightedRequestId)
+      )
+      .slice(0, 3);
+    for (const connection of visibleConnections) {
+      list.append(createConnectionRow(
+        connection,
+        snapshot.busy,
+        connection.requestId === snapshot.highlightedRequestId,
+        controller
+      ));
     }
     content.append(list);
   } else {
@@ -344,10 +361,11 @@ function focusAfterPanelExpansion(input: HTMLInputElement): void {
 function createConnectionRow(
   connection: import("./lifecycle-bridge/protocol.ts").PeerConnectionDto,
   busy: boolean,
+  highlighted: boolean,
   controller: PeerConnectionController
 ): HTMLElement {
   const row = document.createElement("div");
-  row.className = `teti-connection-row is-${connection.state.toLowerCase()}`;
+  row.className = `teti-connection-row is-${connection.state.toLowerCase()}${highlighted ? " is-highlighted" : ""}`;
   const identity = document.createElement("div");
   identity.className = "teti-connection-identity";
   const name = document.createElement("strong");

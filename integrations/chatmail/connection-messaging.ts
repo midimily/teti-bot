@@ -121,12 +121,17 @@ export class ChatmailConnectionMessagingAdapter implements ConnectionMessagingAd
 
   async sendConnectionRequest(input: SendConnectionRequestInput): Promise<SentConnectionRequest> {
     const envelope = createConnectionRequestEnvelope(input.request);
-    return this.chatmailAdapter.sendMessage({
+    const sent = await this.chatmailAdapter.sendMessage({
       accountId: input.accountId,
       peerAddress: input.toAddress,
       peerPublicKey: input.toPublicKey,
       text: serializeTetiConnectionMessage(envelope)
     });
+    await this.chatmailAdapter.waitForDelivery?.({
+      accountId: input.accountId,
+      messageId: sent.messageId
+    });
+    return sent;
   }
 
   async sendConnectionAccept(input: SendConnectionAcceptInput): Promise<SentConnectionEvent> {
