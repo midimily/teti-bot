@@ -24,6 +24,7 @@ export interface PeerConnectionSnapshot {
   busy: boolean;
   error?: string;
   notice?: string;
+  noticeTone?: "info" | "attention" | "success";
   highlightedRequestId?: string;
   resolved?: PublicTetiIdentity;
   connections: PeerConnectionDto[];
@@ -89,6 +90,7 @@ export class PeerConnectionController {
     this.snapshotValue.open = false;
     this.snapshotValue.error = undefined;
     this.snapshotValue.notice = undefined;
+    this.snapshotValue.noticeTone = undefined;
     this.snapshotValue.highlightedRequestId = undefined;
     void this.notchWindow.setMode("idle", "close-peer-connections");
     this.onChange();
@@ -98,6 +100,7 @@ export class PeerConnectionController {
     this.snapshotValue.input = value.toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 9);
     this.snapshotValue.error = undefined;
     this.snapshotValue.notice = undefined;
+    this.snapshotValue.noticeTone = undefined;
     this.snapshotValue.highlightedRequestId = undefined;
     this.snapshotValue.resolved = undefined;
     this.touch();
@@ -170,6 +173,7 @@ export class PeerConnectionController {
     this.snapshotValue.busy = true;
     this.snapshotValue.error = undefined;
     this.snapshotValue.notice = undefined;
+    this.snapshotValue.noticeTone = undefined;
     this.snapshotValue.highlightedRequestId = undefined;
     this.touch();
     this.onChange();
@@ -196,22 +200,32 @@ export class PeerConnectionController {
     this.snapshotValue.highlightedRequestId = outcome.requestId;
     switch (outcome.kind) {
       case "created":
-        this.snapshotValue.notice = `已向 ${label} 发送建联邀请，等待对方确认。`;
+        this.snapshotValue.notice = `邀请已发送，等待 ${label} 确认。`;
+        this.snapshotValue.noticeTone = "info";
         break;
       case "alreadyRequested":
-        this.snapshotValue.notice = `已经向 ${label} 发送过邀请，正在等待对方确认。`;
+        this.snapshotValue.notice = `邀请已发送，正在等待 ${label} 确认。`;
+        this.snapshotValue.noticeTone = "attention";
         break;
       case "approvalRequired":
         this.snapshotValue.notice = `${label} 正在等待你确认，请使用下方按钮处理。`;
+        this.snapshotValue.noticeTone = "attention";
         break;
       case "confirming":
         this.snapshotValue.notice = `正在完成与 ${label} 的建联确认。`;
+        this.snapshotValue.noticeTone = "info";
+        break;
+      case "mutualConfirmed":
+        this.snapshotValue.notice = `双方均已发起邀请，已与 ${label} 建联。`;
+        this.snapshotValue.noticeTone = "success";
         break;
       case "alreadyConfirmed":
         this.snapshotValue.notice = `已经与 ${label} 建联，无需再次发送邀请。`;
+        this.snapshotValue.noticeTone = "info";
         break;
       case "blocked":
         this.snapshotValue.notice = `${label} 当前已被阻止建联。`;
+        this.snapshotValue.noticeTone = "attention";
         break;
     }
   }

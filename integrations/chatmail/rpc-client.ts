@@ -341,6 +341,9 @@ export class JsonRpcChatmailClient implements ChatmailRpcClient {
       messageId
     ]);
     this.observedMessageIds.add(key);
+    if (isOutgoingMessageState(numberValue(message.state))) {
+      return null;
+    }
 
     const received = toChatmailReceivedMessage(messageId, eventBody, message);
     input.onDiagnostic?.({
@@ -646,6 +649,10 @@ function toDiagnosticEvent(event: ChatmailEvent): ChatmailReceiveDiagnosticEvent
 
 function isMessageEvent(kind: string | undefined): boolean {
   return kind === "IncomingMsg" || kind === "MsgsChanged";
+}
+
+function isOutgoingMessageState(state: number | undefined): boolean {
+  return state !== undefined && state >= 18;
 }
 
 function isJsonRpcTimeout(error: unknown): boolean {

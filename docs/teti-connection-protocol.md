@@ -101,9 +101,13 @@ States:
 
 Stored records include `requestId`, `remoteTetiId`, `remoteAddress`, `state`, `createdAt`, `updatedAt`, and `confirmedAt` when confirmation completes.
 
-`requestId` identifies a handshake attempt, while `remoteTetiId` identifies the current relationship. If both Teti instances send requests at the same time, accepting either request makes that request canonical and removes the other local attempts for the same `remoteTetiId`. A crossed request that arrives after the relationship is already `Confirmed` is handled idempotently and does not create another pending row. Loading a legacy store also reconciles `Confirmed` peers and removes stale waiting attempts for the same peer.
+`requestId` identifies a handshake attempt, while `remoteTetiId` identifies the current relationship. If a Teti with an incoming `PendingApproval` explicitly requests the same peer, that reciprocal intent accepts the existing request, sends `teti.connection.accept`, and moves both peers toward one canonical `Confirmed` relationship. If both requests were already in flight, accepting either request makes that request canonical and removes the other local attempts for the same `remoteTetiId`. A crossed request that arrives after the relationship is already `Confirmed` is handled idempotently and does not create another pending row. Loading a legacy store also reconciles `Confirmed` peers and removes stale waiting attempts for the same peer.
 
-Creating a request is idempotent for an active peer relationship. The desktop bridge returns an explicit request outcome (`created`, `alreadyRequested`, `approvalRequired`, `confirming`, `alreadyConfirmed`, or `blocked`) so the UI can explain why no second message was sent and highlight the existing relationship.
+Creating a request is idempotent for an active peer relationship. The desktop bridge returns an explicit request outcome (`created`, `alreadyRequested`, `approvalRequired`, `confirming`, `mutualConfirmed`, `alreadyConfirmed`, or `blocked`) so the UI can explain whether the request was sent, kept waiting, or confirmed by mutual intent, and highlight the existing relationship.
+
+The receive path ignores Delta Chat messages whose state is outgoing and rejects any request whose sender ID or address matches the local account. When loading the connection list, the desktop also removes legacy self-connection records created by older Alpha builds.
+
+The desktop orders confirmed relationships by `confirmedAt` from newest to oldest. Rejected or blocked terminal records follow, while `Requested`, `PendingApproval`, and `Accepted` records waiting for completion remain at the end. The UI renders the complete ordered list in a bounded vertical scroller instead of truncating it.
 
 ## Discovery vs Connection
 

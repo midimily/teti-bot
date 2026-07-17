@@ -604,19 +604,58 @@ input {
 
 .teti-connect-notice {
   width: min(100%, 360px);
-  margin: 6px auto 0;
+  box-sizing: border-box;
+  margin: 8px auto 0;
+  padding: 7px 9px;
+  border: 1px solid rgba(20, 125, 242, 0.24);
+  border-radius: 8px;
+  background: rgba(20, 125, 242, 0.08);
   color: #176c96;
-  font-size: 10px;
-  font-weight: 650;
-  line-height: 15px;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 16px;
   text-align: left;
+}
+
+.teti-connect-notice.is-attention {
+  border-color: rgba(201, 130, 18, 0.3);
+  background: rgba(255, 209, 102, 0.18);
+  color: #81580f;
+}
+
+.teti-connect-notice.is-success {
+  border-color: rgba(21, 152, 115, 0.32);
+  background: rgba(21, 152, 115, 0.1);
+  color: #117154;
 }
 
 .teti-connection-list {
   display: grid;
   gap: 6px;
   width: min(100%, 360px);
+  max-height: 138px;
+  box-sizing: border-box;
   margin: 10px auto 0;
+  padding: 3px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-color: rgba(20, 125, 242, 0.5) rgba(20, 125, 242, 0.08);
+  scrollbar-width: thin;
+}
+
+.teti-connection-list::-webkit-scrollbar {
+  width: 6px;
+}
+
+.teti-connection-list::-webkit-scrollbar-track {
+  border-radius: 999px;
+  background: rgba(20, 125, 242, 0.08);
+}
+
+.teti-connection-list::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: rgba(20, 125, 242, 0.5);
 }
 
 .teti-connection-row {
@@ -638,8 +677,9 @@ input {
 }
 
 .teti-connection-row.is-highlighted {
-  border-color: rgba(20, 125, 242, 0.62);
-  box-shadow: 0 0 0 2px rgba(20, 125, 242, 0.1);
+  border-color: rgba(20, 125, 242, 0.72);
+  background: rgba(20, 125, 242, 0.08);
+  box-shadow: 0 0 0 3px rgba(20, 125, 242, 0.12);
 }
 
 .teti-connection-identity {

@@ -2,7 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { TetiAccount } from "../../../core/account/model.ts";
 import { MemoryTetiAccountStorage } from "../../../core/account/storage.ts";
-import { MemoryTetiConnectionStorage } from "../../../core/connection/storage.ts";
+import { createConnectionRequest } from "../../../core/connection/protocol.ts";
+import {
+  MemoryTetiConnectionStorage,
+  type TetiConnectionStorage
+} from "../../../core/connection/storage.ts";
+import type { TetiConnectionRecord, TetiConnectionState } from "../../../core/connection/types.ts";
 import type {
   ChatmailAdapter,
   ChatmailIdentity,
@@ -50,7 +55,7 @@ test("two Teti runtimes confirm a Chatmail handshake and exchange alpha heartbea
   assert.equal(repeated.connections.length, 1);
 });
 
-test("receiver can approve a relayed request after the initiator goes offline", async () => {
+test("reciprocal intent accepts a relayed request and confirms both Teti instances", async () => {
   const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
   const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
   const registry = new StaticRegistry([toIdentity(accountA), toIdentity(accountB)]);
@@ -74,24 +79,121 @@ test("receiver can approve a relayed request after the initiator goes offline", 
   assert.equal(incoming.connections[0]?.direction, "incoming");
 
   const reciprocal = await runtimeB.request("alpha0001");
-  assert.equal(reciprocal.requestOutcome?.kind, "approvalRequired");
+  assert.equal(reciprocal.requestOutcome?.kind, "mutualConfirmed");
   assert.equal(reciprocal.connections.length, 1);
+  assert.equal(reciprocal.connections[0]?.state, "Confirmed");
+
+  const confirmedAtA = await runtimeA.poll();
+  assert.equal(confirmedAtA.connections.length, 1);
+  assert.equal(confirmedAtA.connections[0]?.state, "Confirmed");
+});
+
+test("an echoed outgoing request cannot create a connection to the local identity", async () => {
+  const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
+  const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
+  const registry = new StaticRegistry([toIdentity(accountA), toIdentity(accountB)]);
+  const relay = new MemoryChatmailRelay();
+  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), registry);
+
+  await runtimeA.request("beta00002");
+  relay.copyLatest(accountB.address, accountA.address);
+  const afterEcho = await runtimeA.poll();
+
+  assert.equal(afterEcho.connections.length, 1);
+  assert.equal(afterEcho.connections[0]?.remoteTetiId, accountB.id);
+  assert.equal(afterEcho.connections[0]?.state, "Requested");
+});
+
+test("listing connections removes a previously persisted local-identity relationship", async () => {
+  const local = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
+  const registry = new StaticRegistry([toIdentity(local)]);
+  const storage = new MemoryTetiConnectionStorage();
+  await storage.saveAll([
+    makeConnectionRecord(local, "Confirmed", "2026-07-17T01:00:00.000Z")
+  ]);
+  const runtime = await makeRuntime(
+    local,
+    new MemoryChatmailRelay().adapter(local.address),
+    registry,
+    storage
+  );
+
+  assert.deepEqual((await runtime.list()).connections, []);
+  assert.deepEqual(await storage.loadAll(), []);
+});
+
+test("confirmed peers sort by confirmation time and waiting records stay last", async () => {
+  const local = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
+  const older = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
+  const newer = makeAccount("teti_gamma0003", "gamma0003@mail.seep.im", 3);
+  const rejected = makeAccount("teti_delta0004", "delta0004@mail.seep.im", 4);
+  const waiting = makeAccount("teti_omega0005", "omega0005@mail.seep.im", 5);
+  const registry = new StaticRegistry([local, older, newer, rejected, waiting].map(toIdentity));
+  const storage = new MemoryTetiConnectionStorage();
+  await storage.saveAll([
+    makeConnectionRecord(waiting, "PendingApproval", "2026-07-17T05:00:00.000Z"),
+    makeConnectionRecord(older, "Confirmed", "2026-07-17T01:00:00.000Z"),
+    makeConnectionRecord(rejected, "Rejected", "2026-07-17T04:00:00.000Z"),
+    makeConnectionRecord(newer, "Confirmed", "2026-07-17T03:00:00.000Z")
+  ]);
+  const runtime = await makeRuntime(
+    local,
+    new MemoryChatmailRelay().adapter(local.address),
+    registry,
+    storage
+  );
+
+  const listed = await runtime.list();
+  assert.deepEqual(listed.connections.map((connection) => connection.remoteTetiId), [
+    newer.id,
+    older.id,
+    rejected.id,
+    waiting.id
+  ]);
+  assert.equal(listed.connections[0]?.confirmedAt, "2026-07-17T03:00:00.000Z");
 });
 
 async function makeRuntime(
   account: TetiAccount,
   chatmailAdapter: ChatmailAdapter,
-  registry: TetiRegistryReader
+  registry: TetiRegistryReader,
+  connectionStorage: TetiConnectionStorage = new MemoryTetiConnectionStorage()
 ): Promise<PeerConnectionRuntime> {
   const accountStorage = new MemoryTetiAccountStorage();
   await accountStorage.save(account);
   return new PeerConnectionRuntime({
     accountStorage,
-    connectionStorage: new MemoryTetiConnectionStorage(),
+    connectionStorage,
     chatmailAdapter,
     registry,
     startIo: async () => undefined
   });
+}
+
+function makeConnectionRecord(
+  remote: TetiAccount,
+  state: TetiConnectionState,
+  timestamp: string
+): TetiConnectionRecord {
+  const request = createConnectionRequest({
+    localAccount: remote,
+    requestId: `request-${remote.id}`,
+    nonce: `nonce-${remote.id}-1234567890`,
+    createdAt: timestamp
+  });
+  return {
+    version: 1,
+    requestId: request.requestId,
+    state,
+    direction: "incoming",
+    remoteTetiId: remote.id,
+    remoteAddress: remote.address,
+    request,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    ...(state === "Confirmed" ? { confirmedAt: timestamp } : {}),
+    ...(state === "Rejected" ? { rejectedAt: timestamp } : {})
+  };
 }
 
 function makeAccount(id: string, address: string, chatmailAccountId: number): TetiAccount {
@@ -153,6 +255,14 @@ class MemoryChatmailRelay {
     const queue = this.queues.get(address) ?? [];
     const count = limit ?? queue.length;
     return queue.splice(0, count);
+  }
+
+  copyLatest(sourceAddress: string, targetAddress: string): void {
+    const latest = this.queues.get(sourceAddress)?.at(-1);
+    if (!latest) throw new Error(`No relayed message exists for ${sourceAddress}.`);
+    const target = this.queues.get(targetAddress) ?? [];
+    target.push({ ...latest });
+    this.queues.set(targetAddress, target);
   }
 }
 

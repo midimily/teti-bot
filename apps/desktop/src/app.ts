@@ -312,8 +312,9 @@ function createConnectionIsland(
     content.append(error);
   } else if (snapshot.notice) {
     const notice = document.createElement("p");
-    notice.className = "teti-connect-notice";
+    notice.className = `teti-connect-notice is-${snapshot.noticeTone ?? "info"}`;
     notice.setAttribute("role", "status");
+    notice.setAttribute("aria-live", "polite");
     notice.textContent = snapshot.notice;
     content.append(notice);
   }
@@ -321,13 +322,7 @@ function createConnectionIsland(
   if (snapshot.connections.length > 0) {
     const list = document.createElement("div");
     list.className = "teti-connection-list";
-    const visibleConnections = [...snapshot.connections]
-      .sort((left, right) =>
-        Number(right.requestId === snapshot.highlightedRequestId) -
-        Number(left.requestId === snapshot.highlightedRequestId)
-      )
-      .slice(0, 3);
-    for (const connection of visibleConnections) {
+    for (const connection of snapshot.connections) {
       list.append(createConnectionRow(
         connection,
         snapshot.busy,

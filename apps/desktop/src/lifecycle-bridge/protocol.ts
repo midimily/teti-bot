@@ -101,6 +101,7 @@ export interface PeerConnectionDto {
   remoteDisplayName?: string;
   createdAt: string;
   updatedAt: string;
+  confirmedAt?: string;
   lastHeartbeatSentAt?: string;
   lastHeartbeatReceivedAt?: string;
 }
@@ -118,6 +119,7 @@ export interface PeerConnectionRequestOutcome {
     | "alreadyRequested"
     | "approvalRequired"
     | "confirming"
+    | "mutualConfirmed"
     | "alreadyConfirmed"
     | "blocked";
   requestId: string;

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { resolveIdentityQuery } from "../lifecycle-sidecar/connections.ts";
 import type { TetiRegistryReader } from "../../../services/discovery/client.ts";
@@ -88,6 +89,87 @@ test("repeating a confirmed peer ID shows explicit feedback and highlights the r
   assert.equal(controller.snapshot.notice, "已经与 Remote 建联，无需再次发送邀请。");
   assert.equal(controller.snapshot.error, undefined);
 });
+
+test("repeating a pending outgoing request keeps one request and emphasizes the wait state", async () => {
+  const connection: PeerConnectionDto = {
+    requestId: "waiting-request",
+    state: "Requested",
+    direction: "outgoing",
+    remoteTetiId: identity.id,
+    remoteAddress: identity.address,
+    remoteDisplayName: identity.displayName,
+    createdAt: "2026-07-17T00:00:00.000Z",
+    updatedAt: "2026-07-17T00:00:01.000Z"
+  };
+  const controller = makeController({
+    connections: [connection],
+    receivedCount: 0,
+    heartbeatCount: 0,
+    requestOutcome: {
+      kind: "alreadyRequested",
+      requestId: connection.requestId,
+      remoteTetiId: connection.remoteTetiId
+    }
+  });
+
+  controller.updateInput("076bm9evq");
+  await controller.connect();
+
+  assert.equal(controller.snapshot.connections.length, 1);
+  assert.equal(controller.snapshot.highlightedRequestId, connection.requestId);
+  assert.equal(controller.snapshot.notice, "邀请已发送，正在等待 Remote 确认。");
+  assert.equal(controller.snapshot.noticeTone, "attention");
+});
+
+test("mutual invitation shows a concise success state and highlights the confirmed peer", async () => {
+  const connection: PeerConnectionDto = {
+    requestId: "mutual-request",
+    state: "Confirmed",
+    direction: "incoming",
+    remoteTetiId: identity.id,
+    remoteAddress: identity.address,
+    remoteDisplayName: identity.displayName,
+    createdAt: "2026-07-17T00:00:00.000Z",
+    updatedAt: "2026-07-17T00:00:01.000Z"
+  };
+  const controller = makeController({
+    connections: [connection],
+    receivedCount: 0,
+    heartbeatCount: 0,
+    requestOutcome: {
+      kind: "mutualConfirmed",
+      requestId: connection.requestId,
+      remoteTetiId: connection.remoteTetiId
+    }
+  });
+
+  controller.updateInput("076bm9evq");
+  await controller.connect();
+
+  assert.equal(controller.snapshot.highlightedRequestId, connection.requestId);
+  assert.equal(controller.snapshot.notice, "双方均已发起邀请，已与 Remote 建联。");
+  assert.equal(controller.snapshot.noticeTone, "success");
+});
+
+test("connection UI renders the complete list inside a bounded vertical scroller", async () => {
+  const [appSource, styles] = await Promise.all([
+    readFile(new URL("../src/app.ts", import.meta.url), "utf8"),
+    readFile(new URL("../src/styles.css", import.meta.url), "utf8")
+  ]);
+
+  assert.doesNotMatch(appSource, /slice\(0,\s*3\)/);
+  assert.match(styles, /\.teti-connection-list\s*\{[\s\S]*max-height:\s*138px/);
+  assert.match(styles, /\.teti-connection-list\s*\{[\s\S]*overflow-y:\s*auto/);
+});
+
+function makeController(result: PeerConnectionResult): PeerConnectionController {
+  return new PeerConnectionController({
+    client: new StaticPeerConnectionClient(result),
+    notchWindow: new TauriNotchWindowController(new RecordingTauriInvoker()),
+    onChange: () => undefined,
+    schedule: () => 0
+  });
+}
 
 class StaticRegistry implements TetiRegistryReader {
   private readonly identities: DiscoveryIdentity[];

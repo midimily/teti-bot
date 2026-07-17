@@ -110,6 +110,15 @@ export class PeerConnectionRuntime implements PeerConnectionService {
 
       const connections = await reconcileConfirmedPeerConnections(this.connectionStorage);
       const existing = selectActivePeerConnection(connections, remote.id);
+      if (existing?.state === TetiConnectionState.PendingApproval) {
+        const confirmed = await acceptConnection(existing.requestId, this.handshakeOptions());
+        await this.sendDueHeartbeats();
+        return this.snapshot(0, 0, {
+          kind: "mutualConfirmed",
+          requestId: confirmed.requestId,
+          remoteTetiId: confirmed.remoteTetiId
+        });
+      }
       const connection = existing ?? await this.connectionManager.createRequest(remote);
       return this.snapshot(0, 0, {
         kind: existing ? requestOutcomeKind(existing.state) : "created",
@@ -120,7 +129,10 @@ export class PeerConnectionRuntime implements PeerConnectionService {
   }
 
   list(): Promise<PeerConnectionResult> {
-    return this.serial(async () => this.snapshot());
+    return this.serial(async () => {
+      await this.removeLocalIdentityConnections();
+      return this.snapshot();
+    });
   }
 
   poll(): Promise<PeerConnectionResult> {
@@ -178,6 +190,7 @@ export class PeerConnectionRuntime implements PeerConnectionService {
     if (this.ready) return;
     const account = await this.requireAccount();
     await this.startIo?.(account.chatmailAccountId);
+    await this.removeLocalIdentityConnections();
     this.ready = true;
   }
 
@@ -204,6 +217,10 @@ export class PeerConnectionRuntime implements PeerConnectionService {
     if (envelope.type === "teti.connection.request") {
       const request = envelope.payload as TetiConnectionRequest;
       requireMatchingSender(fromAddress, request.fromAddress);
+      const local = await this.requireAccount();
+      if (isSameIdentity(request.fromTetiId, request.fromAddress, local.id, local.address)) {
+        return true;
+      }
       await handleIncomingRequest(request, options);
     } else if (envelope.type === "teti.connection.accept") {
       const accept = envelope.payload as TetiConnectionAccept;
@@ -272,7 +289,7 @@ export class PeerConnectionRuntime implements PeerConnectionService {
     const connections = await reconcileConfirmedPeerConnections(this.connectionStorage);
     const dtos = await Promise.all(connections.map((connection) => this.toDto(connection)));
     const result: PeerConnectionResult = {
-      connections: dtos.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt)),
+      connections: dtos.sort(comparePeerConnections),
       receivedCount,
       heartbeatCount
     };
@@ -298,6 +315,7 @@ export class PeerConnectionRuntime implements PeerConnectionService {
       remoteDisplayName: identity?.displayName,
       createdAt: connection.createdAt,
       updatedAt: connection.updatedAt,
+      confirmedAt: connection.confirmedAt,
       lastHeartbeatSentAt: this.heartbeatSent.get(connection.requestId),
       lastHeartbeatReceivedAt: this.heartbeatReceived.get(connection.requestId)
     };
@@ -310,6 +328,17 @@ export class PeerConnectionRuntime implements PeerConnectionService {
       messagingAdapter: this.messagingAdapter,
       now: timestamp ? () => timestamp : () => this.now().toISOString()
     };
+  }
+
+  private async removeLocalIdentityConnections(): Promise<void> {
+    const local = await this.requireAccount();
+    const connections = await this.connectionStorage.loadAll();
+    const retained = connections.filter((connection) =>
+      !isSameIdentity(connection.remoteTetiId, connection.remoteAddress, local.id, local.address)
+    );
+    if (retained.length !== connections.length) {
+      await this.connectionStorage.saveAll(retained);
+    }
   }
 
   private serial<T>(operation: () => Promise<T>): Promise<T> {
@@ -396,6 +425,32 @@ function requireMatchingSender(actual: string | undefined, expected: string | un
   if (!actual || !expected || actual.toLowerCase() !== expected.toLowerCase()) {
     throw new Error("Chatmail sender does not match the Teti handshake identity.");
   }
+}
+
+function isSameIdentity(
+  leftId: string,
+  leftAddress: string,
+  rightId: string,
+  rightAddress: string
+): boolean {
+  return leftId === rightId || leftAddress.toLowerCase() === rightAddress.toLowerCase();
+}
+
+function comparePeerConnections(left: PeerConnectionDto, right: PeerConnectionDto): number {
+  const rank = (connection: PeerConnectionDto): number => {
+    if (connection.state === TetiConnectionState.Confirmed) return 0;
+    if (connection.state === TetiConnectionState.Rejected || connection.state === TetiConnectionState.Blocked) return 1;
+    return 2;
+  };
+  const rankDifference = rank(left) - rank(right);
+  if (rankDifference !== 0) return rankDifference;
+  const leftTime = left.state === TetiConnectionState.Confirmed
+    ? left.confirmedAt ?? left.updatedAt
+    : left.updatedAt;
+  const rightTime = right.state === TetiConnectionState.Confirmed
+    ? right.confirmedAt ?? right.updatedAt
+    : right.updatedAt;
+  return rightTime.localeCompare(leftTime);
 }
 
 function selectActivePeerConnection(

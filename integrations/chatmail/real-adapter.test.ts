@@ -641,6 +641,54 @@ test("JSON-RPC client receives MsgsChanged events like Delta Chat Desktop fallba
   ]);
 });
 
+test("JSON-RPC client ignores outgoing messages reported through MsgsChanged", async () => {
+  const connection = new RoutingJsonRpcConnection({
+    get_next_event_batch: {
+      jsonrpc: "2.0",
+      id: 1,
+      result: [
+        {
+          contextId: 5,
+          event: {
+            kind: "MsgsChanged",
+            chatId: 12,
+            msgId: 14
+          }
+        }
+      ]
+    },
+    get_message: {
+      jsonrpc: "2.0",
+      id: 2,
+      result: {
+        id: 14,
+        chatId: 12,
+        text: "{\"teti\":true}",
+        timestamp: 1783771200,
+        state: 26,
+        sender: {
+          address: "local@mail.seep.im"
+        }
+      }
+    },
+    get_next_msgs: {
+      jsonrpc: "2.0",
+      id: 3,
+      result: []
+    }
+  });
+  const client = new JsonRpcChatmailClient(new JsonRpcClientTransport(connection));
+
+  const messages = await client.receiveMessages({ accountId: 5 });
+
+  assert.deepEqual(messages, []);
+  assert.deepEqual(connection.requests.map((request) => request.method), [
+    "get_next_event_batch",
+    "get_message",
+    "get_next_msgs"
+  ]);
+});
+
 test("JSON-RPC client falls back to get_next_msgs when event batch has no message event", async () => {
   const connection = new RoutingJsonRpcConnection({
     get_next_event_batch: {
