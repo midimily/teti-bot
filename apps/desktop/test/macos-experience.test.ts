@@ -101,6 +101,26 @@ test("first-launch user copy avoids transport and credential internals", () => {
   }
 });
 
+test("desktop shell exposes Codex status and explicit four-character sharing consent", () => {
+  const app = readFileSync(join(desktopRoot, "src", "app.ts"), "utf8");
+  const aiView = readFileSync(join(desktopRoot, "src", "ai-status", "view.ts"), "utf8");
+  const styles = readFileSync(join(desktopRoot, "src", "styles.css"), "utf8");
+
+  assert.match(aiView, /AI 工具状态/);
+  assert.doesNotMatch(aiView, /本周额度剩余/);
+  assert.match(aiView, /title\.textContent = "设置"/);
+  assert.match(aiView, /状态共享/);
+  assert.doesNotMatch(aiView, /仅向已建联的 Teti 分享 AI 工具计划与剩余额度/);
+  assert.doesNotMatch(app, /界面设置|减少动画|运行状态/);
+  assert.match(styles, /@media \(prefers-reduced-motion: reduce\)/);
+  assert.doesNotMatch(styles, /data-reduced-motion/);
+  assert.match(app, /target\.closest\("\.teti-header-panel"\)/);
+  assert.match(app, /target\.closest\("\.teti-header-icon\[aria-expanded\]"\)/);
+  assert.equal(existsSync(join(desktopRoot, "assets", "codex-status.png")), true);
+  assert.equal(existsSync(join(desktopRoot, "assets", "ai-tools-btn.png")), true);
+  assert.equal(existsSync(join(desktopRoot, "assets", "settings.png")), true);
+});
+
 function readJson<T>(path: string): T {
   return JSON.parse(readFileSync(path, "utf8")) as T;
 }

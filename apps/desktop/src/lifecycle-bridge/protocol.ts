@@ -1,3 +1,6 @@
+import type { CodexUsageState } from "../codex-usage/types.ts";
+import type { AiStatusSharingSettings, RemoteAiStatusSnapshot } from "../../../../core/ai-status/types.ts";
+
 export const LIFECYCLE_PROTOCOL_VERSION = 1;
 export const LIFECYCLE_MAX_LINE_BYTES = 64 * 1024;
 
@@ -14,7 +17,11 @@ export type LifecycleMethod =
   | "connection.list"
   | "connection.poll"
   | "connection.accept"
-  | "connection.reject";
+  | "connection.reject"
+  | "usage.get"
+  | "usage.refresh"
+  | "sharing.get"
+  | "sharing.set";
 
 export const LIFECYCLE_METHODS: readonly LifecycleMethod[] = [
   "lifecycle.health",
@@ -29,7 +36,11 @@ export const LIFECYCLE_METHODS: readonly LifecycleMethod[] = [
   "connection.list",
   "connection.poll",
   "connection.accept",
-  "connection.reject"
+  "connection.reject",
+  "usage.get",
+  "usage.refresh",
+  "sharing.get",
+  "sharing.set"
 ];
 
 export interface LifecycleRequest {
@@ -59,6 +70,8 @@ export type LifecycleResult =
   | PublicTetiAccount
   | PublicTetiIdentity
   | PeerConnectionResult
+  | CodexUsageState
+  | AiStatusSharingSettings
   | null;
 
 export interface LifecycleHealthResult {
@@ -106,12 +119,14 @@ export interface PeerConnectionDto {
   confirmedAt?: string;
   lastHeartbeatSentAt?: string;
   lastHeartbeatReceivedAt?: string;
+  remoteAiStatus?: RemoteAiStatusSnapshot;
 }
 
 export interface PeerConnectionResult {
   connections: PeerConnectionDto[];
   receivedCount: number;
   heartbeatCount: number;
+  aiStatusCount?: number;
   requestOutcome?: PeerConnectionRequestOutcome;
 }
 
@@ -167,7 +182,11 @@ export const LIFECYCLE_TIMEOUT_MS: Record<LifecycleMethod, number> = {
   "connection.list": 5_000,
   "connection.poll": 20_000,
   "connection.accept": 30_000,
-  "connection.reject": 30_000
+  "connection.reject": 30_000,
+  "usage.get": 2_000,
+  "usage.refresh": 12_000,
+  "sharing.get": 5_000,
+  "sharing.set": 30_000
 };
 
 export function isLifecycleMethod(value: unknown): value is LifecycleMethod {

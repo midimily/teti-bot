@@ -8,6 +8,7 @@ import {
   type TetiConnectionStorage
 } from "../../../core/connection/storage.ts";
 import type { TetiConnectionRecord, TetiConnectionState } from "../../../core/connection/types.ts";
+import type { AiToolStatusSnapshot } from "../../../core/ai-status/types.ts";
 import type {
   ChatmailAdapter,
   ChatmailIdentity,
@@ -23,6 +24,7 @@ import type {
 import type { TetiRegistryReader } from "../../../services/discovery/client.ts";
 import type { DiscoveryIdentity } from "../../../services/discovery/registry-client.ts";
 import { PeerConnectionRuntime } from "../lifecycle-sidecar/connections.ts";
+import { MemoryAiStatusSettingsStore } from "../lifecycle-sidecar/ai-status/settings.ts";
 
 test("two Teti runtimes confirm a Chatmail handshake and exchange alpha heartbeats", async () => {
   const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
@@ -153,11 +155,84 @@ test("confirmed peers sort by confirmation time and waiting records stay last", 
   assert.equal(listed.connections[0]?.confirmedAt, "2026-07-17T03:00:00.000Z");
 });
 
+test("AI status is opt-in, sent only to confirmed peers, and revoked independently of heartbeats", async () => {
+  const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
+  const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
+  const registry = new StaticRegistry([toIdentity(accountA), toIdentity(accountB)]);
+  const relay = new MemoryChatmailRelay();
+  const runtimeA = await makeRuntime(
+    accountA,
+    relay.adapter(accountA.address),
+    registry,
+    new MemoryTetiConnectionStorage(),
+    {
+      aiStatusSettings: new MemoryAiStatusSettingsStore(),
+      getLocalAiTools: () => [localCodexStatus()]
+    }
+  );
+  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), registry);
+
+  await runtimeA.request("beta00002");
+  const incoming = await runtimeB.poll();
+  await runtimeB.accept(incoming.connections[0]!.requestId);
+  const confirmed = await runtimeA.poll();
+  await runtimeB.poll();
+  assert.equal(confirmed.connections[0]?.remoteAiStatus, undefined);
+  assert.deepEqual(await runtimeA.getStatusSharing(), { statusSharing: false });
+
+  await runtimeA.setStatusSharing(true);
+  await flushBackgroundWork();
+  const shared = await runtimeB.poll();
+  assert.equal(shared.connections[0]?.remoteAiStatus?.sharing, "enabled");
+  assert.equal(shared.connections[0]?.remoteAiStatus?.tools[0]?.toolId, "openai.codex");
+  assert.equal(shared.connections[0]?.remoteAiStatus?.tools[0]?.plan.key, "plus");
+  assert.equal(shared.connections[0]?.remoteAiStatus?.tools[0]?.quotas[0]?.remainingPercent, 42);
+  assert.doesNotMatch(JSON.stringify(shared.connections[0]?.remoteAiStatus), /token|account|raw|displayName/);
+
+  await runtimeA.setStatusSharing(false);
+  await flushBackgroundWork();
+  const revoked = await runtimeB.poll();
+  assert.equal(revoked.connections[0]?.remoteAiStatus?.sharing, "disabled");
+  assert.deepEqual(revoked.connections[0]?.remoteAiStatus?.tools, []);
+});
+
+test("sharing consent persistence does not wait for a blocked peer network queue", async () => {
+  const account = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
+  const accountStorage = new MemoryTetiAccountStorage();
+  await accountStorage.save(account);
+  let releaseIo!: () => void;
+  const ioBlocked = new Promise<void>((resolve) => { releaseIo = resolve; });
+  const runtime = new PeerConnectionRuntime({
+    accountStorage,
+    connectionStorage: new MemoryTetiConnectionStorage(),
+    chatmailAdapter: new MemoryChatmailRelay().adapter(account.address),
+    registry: new StaticRegistry([toIdentity(account)]),
+    startIo: () => ioBlocked,
+    aiStatusSettings: new MemoryAiStatusSettingsStore()
+  });
+
+  const polling = runtime.poll();
+  await flushBackgroundWork();
+  const result = await Promise.race([
+    runtime.setStatusSharing(true).then(() => "saved"),
+    new Promise<string>((resolve) => setTimeout(() => resolve("blocked"), 50))
+  ]);
+  releaseIo();
+  await polling;
+
+  assert.equal(result, "saved");
+  assert.deepEqual(await runtime.getStatusSharing(), { statusSharing: true });
+});
+
 async function makeRuntime(
   account: TetiAccount,
   chatmailAdapter: ChatmailAdapter,
   registry: TetiRegistryReader,
-  connectionStorage: TetiConnectionStorage = new MemoryTetiConnectionStorage()
+  connectionStorage: TetiConnectionStorage = new MemoryTetiConnectionStorage(),
+  aiStatus: {
+    aiStatusSettings?: MemoryAiStatusSettingsStore;
+    getLocalAiTools?: () => AiToolStatusSnapshot[];
+  } = {}
 ): Promise<PeerConnectionRuntime> {
   const accountStorage = new MemoryTetiAccountStorage();
   await accountStorage.save(account);
@@ -166,8 +241,29 @@ async function makeRuntime(
     connectionStorage,
     chatmailAdapter,
     registry,
-    startIo: async () => undefined
+    startIo: async () => undefined,
+    ...aiStatus
   });
+}
+
+function localCodexStatus(): AiToolStatusSnapshot {
+  return {
+    toolId: "openai.codex",
+    status: "ready",
+    plan: { key: "plus", membershipVerified: false },
+    quotas: [{
+      period: "week",
+      remainingPercent: 42,
+      resetAt: "2026-07-20T00:00:00.000Z",
+      windowSeconds: 604_800,
+      identification: "exact"
+    }],
+    observedAt: "2026-07-18T01:00:00.000Z"
+  };
+}
+
+async function flushBackgroundWork(): Promise<void> {
+  await new Promise<void>((resolve) => setImmediate(resolve));
 }
 
 function makeConnectionRecord(

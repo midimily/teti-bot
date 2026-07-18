@@ -1,9 +1,12 @@
+import type { AiStatusSyncPayload } from "../ai-status/types.ts";
+
 export const TETI_APPLICATION_PROTOCOL_VERSION = 1;
 
 export type TetiApplicationMessageType =
   | "teti.profile.sync"
   | "teti.capability.offer"
-  | "teti.presence";
+  | "teti.presence"
+  | "teti.ai.status.sync";
 
 export interface TetiApplicationEnvelope<TPayload = unknown> {
   version: 1;
@@ -32,7 +35,8 @@ export interface TetiPresencePayload {
 export type TetiKnownApplicationEnvelope =
   | TetiApplicationEnvelope<TetiProfileSyncPayload>
   | TetiApplicationEnvelope<TetiCapabilityOfferPayload>
-  | TetiApplicationEnvelope<TetiPresencePayload>;
+  | TetiApplicationEnvelope<TetiPresencePayload>
+  | TetiApplicationEnvelope<AiStatusSyncPayload>;
 
 export interface TetiProcessedMessageStore {
   version: 1;

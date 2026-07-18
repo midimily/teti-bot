@@ -6,10 +6,13 @@ import {
 } from "../src/lifecycle-bridge/protocol.ts";
 import { handleLifecycleLine } from "./handler.ts";
 import { createLifecycleError, redactSecretLikeText } from "./security.ts";
+import { getDefaultCodexUsageService } from "./codex-usage/runtime.ts";
 
 const inFlightRequestIds = new Set<string>();
 const pendingRequests = new Set<Promise<void>>();
 let inputClosed = false;
+const codexUsageService = getDefaultCodexUsageService();
+codexUsageService.start();
 
 const reader = createInterface({
   input: stdin,
@@ -28,6 +31,7 @@ reader.on("line", (line) => {
 
 reader.on("close", () => {
   inputClosed = true;
+  codexUsageService.stop();
   exitWhenDrained();
 });
 

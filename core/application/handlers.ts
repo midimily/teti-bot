@@ -4,6 +4,7 @@ import type {
   TetiPresencePayload,
   TetiProfileSyncPayload
 } from "../protocol/types.ts";
+import type { AiStatusSyncPayload } from "../ai-status/types.ts";
 
 export type TetiApplicationHandlerResult =
   | {
@@ -23,6 +24,12 @@ export type TetiApplicationHandlerResult =
       messageId: string;
       fromTetiId: string;
       presence: TetiPresencePayload;
+    }
+  | {
+      type: "ai.status.sync";
+      messageId: string;
+      fromTetiId: string;
+      status: AiStatusSyncPayload;
     };
 
 export function handleApplicationEnvelope(
@@ -46,10 +53,17 @@ export function handleApplicationEnvelope(
     };
   }
 
-  return {
+  if (envelope.type === "teti.presence") return {
     type: "presence",
     messageId: envelope.messageId,
     fromTetiId: envelope.fromTetiId,
     presence: envelope.payload as TetiPresencePayload
+  };
+
+  return {
+    type: "ai.status.sync",
+    messageId: envelope.messageId,
+    fromTetiId: envelope.fromTetiId,
+    status: envelope.payload as AiStatusSyncPayload
   };
 }

@@ -12,6 +12,7 @@ import {
   type LifecycleSidecarDependencies
 } from "../lifecycle-sidecar/handler.ts";
 import { redactSecretLikeText } from "../lifecycle-sidecar/security.ts";
+import type { CodexUsageState } from "../src/codex-usage/types.ts";
 
 test("sidecar returns health response", async () => {
   const response = await handleLifecycleRequest(request("lifecycle.health"), fakeDependencies());
@@ -145,6 +146,49 @@ test("sidecar routes peer resolution and connection polling through the bounded 
   });
 });
 
+test("sidecar exposes only sanitized Codex usage state through bounded methods", async () => {
+  const deps = fakeDependencies();
+  const usage: CodexUsageState = {
+    status: "ready",
+    snapshot: {
+      source: "live",
+      planTypeRaw: "plus",
+      planDisplayName: null,
+      membershipVerified: false,
+      weekly: {
+        remainingPercent: 42,
+        usedPercent: 58,
+        resetAt: "2026-07-25T00:00:00.000Z",
+        windowSeconds: 604_800,
+        identification: "exact"
+      },
+      observedAt: "2026-07-18T00:00:00.000Z",
+      fetchedAt: "2026-07-18T00:00:00.000Z",
+      stale: false
+    }
+  };
+  deps.getCodexUsageState = () => usage;
+  deps.refreshCodexUsage = async () => usage;
+
+  const current = await handleLifecycleRequest(request("usage.get"), deps);
+  const refreshed = await handleLifecycleRequest(request("usage.refresh"), deps);
+  assert.deepEqual(current.ok && current.result, usage);
+  assert.deepEqual(refreshed.ok && refreshed.result, usage);
+  assert.equal(JSON.stringify([current, refreshed]).includes("token"), false);
+});
+
+test("sidecar keeps status sharing off by default and validates explicit changes", async () => {
+  const deps = fakeDependencies();
+  const initial = await handleLifecycleRequest(request("sharing.get"), deps);
+  const enabled = await handleLifecycleRequest(request("sharing.set", { enabled: true }), deps);
+  const invalid = await handleLifecycleRequest(request("sharing.set", { enabled: "yes" }), deps);
+
+  assert.deepEqual(initial.ok && initial.result, { statusSharing: false });
+  assert.deepEqual(enabled.ok && enabled.result, { statusSharing: true });
+  assert.equal(invalid.ok, false);
+  assert.equal(!invalid.ok && invalid.error.code, "INTERNAL_ERROR");
+});
+
 function request(method: LifecycleRequest["method"], params: Record<string, unknown> = {}): LifecycleRequest {
   return {
     version: LIFECYCLE_PROTOCOL_VERSION,
@@ -162,6 +206,7 @@ function fakeDependencies(options: { account?: TetiAccount | null } = {}): Lifec
   const createCalls: string[] = [];
   const registerCalls: TetiAccount[] = [];
   let account = options.account ?? null;
+  let statusSharing = false;
 
   const dependencies: LifecycleSidecarDependencies & {
     createCalls: string[];
@@ -213,7 +258,12 @@ function fakeDependencies(options: { account?: TetiAccount | null } = {}): Lifec
         async list() { return empty; },
         async poll() { return empty; },
         async accept() { return empty; },
-        async reject() { return empty; }
+        async reject() { return empty; },
+        async getStatusSharing() { return { statusSharing }; },
+        async setStatusSharing(enabled: boolean) {
+          statusSharing = enabled;
+          return { statusSharing };
+        }
       };
     }
   };

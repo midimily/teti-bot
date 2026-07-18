@@ -24,6 +24,7 @@ import { TetiApplicationProtocolError } from "../protocol/validator.ts";
 import { RealChatmailAdapter } from "../../integrations/chatmail/real-adapter.ts";
 import { UnconfiguredChatmailRpcClient } from "../../integrations/chatmail/rpc-client.ts";
 import type { ChatmailAdapter } from "../../integrations/chatmail/types.ts";
+import type { AiStatusSyncPayload } from "../ai-status/types.ts";
 import {
   handleApplicationEnvelope,
   type TetiApplicationHandlerResult
@@ -110,6 +111,17 @@ export class TetiApplicationManager {
     return this.sendApplicationEnvelope({
       connectionRequestId,
       type: "teti.presence",
+      payload
+    });
+  }
+
+  async sendAiStatusSync(
+    connectionRequestId: string,
+    payload: AiStatusSyncPayload
+  ): Promise<SentApplicationEnvelope> {
+    return this.sendApplicationEnvelope({
+      connectionRequestId,
+      type: "teti.ai.status.sync",
       payload
     });
   }

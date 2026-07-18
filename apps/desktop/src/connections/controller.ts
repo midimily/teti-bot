@@ -67,7 +67,7 @@ export class PeerConnectionController {
     return {
       ...this.snapshotValue,
       resolved: this.snapshotValue.resolved ? { ...this.snapshotValue.resolved } : undefined,
-      connections: this.snapshotValue.connections.map((connection) => ({ ...connection }))
+      connections: this.snapshotValue.connections.map((connection) => structuredClone(connection))
     };
   }
 
@@ -207,7 +207,7 @@ export class PeerConnectionController {
   }
 
   private applyResult(result: PeerConnectionResult): void {
-    this.snapshotValue.connections = result.connections.map((connection) => ({ ...connection }));
+    this.snapshotValue.connections = result.connections.map((connection) => structuredClone(connection));
   }
 
   private applyRequestOutcome(result: PeerConnectionResult): void {

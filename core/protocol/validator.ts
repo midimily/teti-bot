@@ -4,6 +4,7 @@ import {
   type TetiApplicationMessageType
 } from "./types.ts";
 import { isCanonicalTetiPublicId } from "../identity/public-id.ts";
+import { validateAiStatusSyncPayload } from "../ai-status/protocol.ts";
 
 export class TetiApplicationProtocolError extends Error {}
 
@@ -78,6 +79,15 @@ function validatePayload(type: TetiApplicationMessageType, payload: Record<strin
   if (type === "teti.presence") {
     requireNonEmptyString(payload.status, "status");
     requireNonEmptyString(payload.timestamp, "timestamp");
+    return;
+  }
+
+  if (type === "teti.ai.status.sync") {
+    try {
+      validateAiStatusSyncPayload(payload);
+    } catch {
+      throw new TetiApplicationProtocolError("AI status sync payload is invalid.");
+    }
   }
 }
 
@@ -101,7 +111,8 @@ function isSupportedApplicationType(value: string): value is TetiApplicationMess
   return [
     "teti.profile.sync",
     "teti.capability.offer",
-    "teti.presence"
+    "teti.presence",
+    "teti.ai.status.sync"
   ].includes(value);
 }
 

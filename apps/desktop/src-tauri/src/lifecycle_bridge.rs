@@ -474,6 +474,10 @@ fn should_restart(process: Option<&mut ManagedSidecar>) -> bool {
 pub fn timeout_for_method(method: &str) -> Duration {
     Duration::from_millis(match method {
         "lifecycle.health" => 2_000,
+        "usage.get" => 2_000,
+        "usage.refresh" => 12_000,
+        "sharing.get" => 5_000,
+        "sharing.set" => 30_000,
         "account.status" | "account.load" => 5_000,
         "account.create" => 120_000,
         "discovery.register" | "discovery.retry" => 15_000,
@@ -502,6 +506,10 @@ fn is_allowed_method(method: &str) -> bool {
             | "connection.poll"
             | "connection.accept"
             | "connection.reject"
+            | "usage.get"
+            | "usage.refresh"
+            | "sharing.get"
+            | "sharing.set"
     )
 }
 
@@ -586,6 +594,7 @@ mod tests {
     #[test]
     fn timeout_values_are_method_specific() {
         assert!(is_allowed_method("discovery.heartbeat"));
+        assert!(is_allowed_method("usage.get"));
         assert_eq!(
             timeout_for_method("lifecycle.health"),
             Duration::from_millis(2_000)
@@ -605,6 +614,10 @@ mod tests {
         assert_eq!(
             timeout_for_method("discovery.heartbeat"),
             Duration::from_millis(30_000)
+        );
+        assert_eq!(
+            timeout_for_method("usage.refresh"),
+            Duration::from_millis(12_000)
         );
     }
 

@@ -1,5 +1,5 @@
 import { FirstLaunchCoordinator } from "./first-launch/coordinator.ts";
-import { Activity, Check, Link2, Radio, Settings2, X, createElement } from "lucide";
+import { Check, Link2, Radio, X, createElement } from "lucide";
 import { countUnicodeCharacters, truncateTetiDisplayName } from "../../../core/account/display-name.ts";
 import type { FirstLaunchSnapshot } from "./first-launch/state-machine.ts";
 import { toFirstLaunchViewModel, type FirstLaunchViewModel } from "./first-launch/view-model.ts";
@@ -20,7 +20,23 @@ import {
   DiscoveryHeartbeatController,
   shouldRunDiscoveryHeartbeat
 } from "./discovery/heartbeat.ts";
+import {
+  AiStatusController,
+  BridgeAiStatusClient,
+  MockAiStatusClient,
+  type AiStatusControllerSnapshot
+} from "./ai-status/controller.ts";
+import {
+  createCodexMark,
+  createCodexStatusPanel,
+  createRemoteAiStatus,
+  createSharingPanel
+} from "./ai-status/view.ts";
+import { presentCodexUsage } from "./codex-usage/presentation.ts";
 import "./styles.css";
+
+const aiToolsButtonIconUrl = new URL("../assets/ai-tools-btn.png", import.meta.url).href;
+const settingsButtonIconUrl = new URL("../assets/settings.png", import.meta.url).href;
 
 export interface DesktopAppOptions {
   root: HTMLElement;
@@ -32,6 +48,7 @@ export interface DesktopAppOptions {
 export interface DesktopApp {
   coordinator: FirstLaunchCoordinator;
   connections: PeerConnectionController;
+  aiStatus: AiStatusController;
   config: ProvisioningModeConfig;
   render(): void;
   dispose(): void;
@@ -64,6 +81,12 @@ export async function createDesktopApp(options: DesktopAppOptions): Promise<Desk
     notchWindow,
     onChange: () => app?.render()
   });
+  const aiStatus = new AiStatusController({
+    client: selection.config.mode === "real"
+      ? new BridgeAiStatusClient(new LifecycleBridgeClient(options.tauri))
+      : new MockAiStatusClient(),
+    onChange: () => app?.render()
+  });
   const discoveryHeartbeat = selection.config.mode === "real"
     ? new DiscoveryHeartbeatController({
         client: new BridgeDiscoveryHeartbeatClient(new LifecycleBridgeClient(options.tauri)),
@@ -73,13 +96,17 @@ export async function createDesktopApp(options: DesktopAppOptions): Promise<Desk
 
   if (options.tauri.onFocusChanged) {
     stopFocusListener = await options.tauri.onFocusChanged((focused) => {
-      if (!focused) connections.dismissFromOutside();
+      if (!focused) {
+        aiStatus.closePanel();
+        connections.dismissFromOutside();
+      }
     });
   }
 
   app = {
     coordinator,
     connections,
+    aiStatus,
     config: selection.config,
     render: () => {
       if (coordinator.snapshot.account && !connectionsInitialized) {
@@ -89,16 +116,18 @@ export async function createDesktopApp(options: DesktopAppOptions): Promise<Desk
       if (!disposed && shouldRunDiscoveryHeartbeat(coordinator.snapshot, selection.config.mode)) {
         discoveryHeartbeat?.start();
       }
-      renderSnapshot(options.root, coordinator.snapshot, selection.config, coordinator, connections);
+      renderSnapshot(options.root, coordinator.snapshot, selection.config, coordinator, connections, aiStatus);
     },
     dispose: () => {
       if (disposed) return;
       disposed = true;
       stopFocusListener?.();
       discoveryHeartbeat?.stop();
+      aiStatus.stop();
     }
   };
 
+  aiStatus.start();
   await coordinator.initialize();
   app.render();
   await notchWindow.setMode(visualModeForViewModel(toFirstLaunchViewModel(coordinator.snapshot)), "initial-render");
@@ -111,15 +140,16 @@ export function renderSnapshot(
   snapshot: FirstLaunchSnapshot,
   config: ProvisioningModeConfig = readProvisioningMode({}),
   coordinator?: FirstLaunchCoordinator,
-  connections?: PeerConnectionController
+  connections?: PeerConnectionController,
+  aiStatus?: AiStatusController
 ): void {
   const viewModel = toFirstLaunchViewModel(snapshot);
   const peerPanelOpen = viewModel.panel === "collapsed" && connections?.snapshot.open;
   root.className = `teti-shell teti-shell--${peerPanelOpen ? "expanded" : viewModel.panel}`;
   root.replaceChildren(
     peerPanelOpen
-      ? createConnectionIsland(config, connections)
-      : createIsland(viewModel, config, coordinator, connections)
+      ? createConnectionIsland(config, connections, aiStatus)
+      : createIsland(viewModel, config, coordinator, connections, aiStatus)
   );
 }
 
@@ -127,14 +157,15 @@ function createIsland(
   viewModel: FirstLaunchViewModel,
   config: ProvisioningModeConfig,
   coordinator?: FirstLaunchCoordinator,
-  connections?: PeerConnectionController
+  connections?: PeerConnectionController,
+  aiStatus?: AiStatusController
 ): HTMLElement {
   const island = document.createElement("section");
   island.className = `teti-island teti-island--${viewModel.panel} teti-island--${viewModel.character}`;
   island.setAttribute("aria-label", viewModel.title);
 
   if (viewModel.panel === "expanded") {
-    island.append(createIslandHeader(config));
+    island.append(createIslandHeader(config, aiStatus));
   }
 
   const face = document.createElement(viewModel.panel === "collapsed" && connections ? "button" : "div");
@@ -155,7 +186,10 @@ function createIsland(
       indicator.setAttribute("aria-hidden", "true");
       face.append(indicator);
     }
-    face.addEventListener("click", () => connections?.open());
+    face.addEventListener("click", () => {
+      aiStatus?.closePanel();
+      connections?.open();
+    });
   } else {
     face.setAttribute("aria-hidden", "true");
   }
@@ -196,7 +230,7 @@ function createIsland(
     input.addEventListener("keydown", (event) => {
       if (event.key === "Enter" && coordinator && !viewModel.input?.disabled) {
         event.preventDefault();
-        void submitAndRender(coordinator, island.ownerDocument.getElementById("app"), config, connections);
+        void submitAndRender(coordinator, island.ownerDocument.getElementById("app"), config, connections, aiStatus);
       }
     });
     content.append(input);
@@ -246,7 +280,8 @@ function createIsland(
           coordinator.snapshot,
           config,
           coordinator,
-          connections
+          connections,
+          aiStatus
         );
         return;
       }
@@ -258,7 +293,8 @@ function createIsland(
           coordinator.snapshot,
           config,
           coordinator,
-          connections
+          connections,
+          aiStatus
         );
         return;
       }
@@ -268,7 +304,8 @@ function createIsland(
           coordinator,
           island.ownerDocument.getElementById("app"),
           config,
-          connections
+          connections,
+          aiStatus
         );
         return;
       }
@@ -277,7 +314,8 @@ function createIsland(
         coordinator,
         island.ownerDocument.getElementById("app"),
         config,
-        connections
+        connections,
+        aiStatus
       );
     });
     content.append(button);
@@ -289,13 +327,14 @@ function createIsland(
 
 function createConnectionIsland(
   config: ProvisioningModeConfig,
-  controller: PeerConnectionController
+  controller: PeerConnectionController,
+  aiStatus?: AiStatusController
 ): HTMLElement {
   const snapshot = controller.snapshot;
   const island = document.createElement("section");
   island.className = "teti-island teti-island--expanded teti-island--connections";
   island.setAttribute("aria-label", "连接其他 Teti");
-  island.append(createConnectionHeader(config, controller));
+  island.append(createConnectionHeader(config, controller, aiStatus));
 
   const face = document.createElement("div");
   face.className = "teti-face teti-face--ready";
@@ -385,18 +424,30 @@ function createConnectionIsland(
   }
 
   island.append(face, content);
-  installConnectionPanelInteractions(island, controller);
+  installConnectionPanelInteractions(island, controller, aiStatus);
   focusAfterPanelExpansion(input);
   return island;
 }
 
 function installConnectionPanelInteractions(
   island: HTMLElement,
-  controller: PeerConnectionController
+  controller: PeerConnectionController,
+  aiStatus?: AiStatusController
 ): void {
   island.addEventListener("pointerenter", () => controller.beginInteraction());
   island.addEventListener("pointerleave", () => controller.endInteraction());
-  island.addEventListener("pointerdown", () => controller.noteActivity());
+  island.addEventListener("pointerdown", (event) => {
+    controller.noteActivity();
+    const target = event.target;
+    if (!(target instanceof Element)) return;
+    if (target.closest(".teti-header-panel") || target.closest(".teti-header-icon[aria-expanded]")) return;
+    const openHeaderPanel = island.querySelector<HTMLElement>(".teti-header-panel:not([hidden])");
+    if (!openHeaderPanel) return;
+    aiStatus?.closePanel(false);
+    openHeaderPanel.hidden = true;
+    island.querySelectorAll<HTMLButtonElement>(".teti-header-icon[aria-expanded='true']")
+      .forEach((button) => button.setAttribute("aria-expanded", "false"));
+  });
   island.addEventListener("keydown", (event) => {
     controller.noteActivity();
     if (event.key !== "Escape") return;
@@ -404,9 +455,13 @@ function installConnectionPanelInteractions(
     event.stopPropagation();
     const openHeaderPanel = island.querySelector<HTMLElement>(".teti-header-panel:not([hidden])");
     if (openHeaderPanel) {
-      openHeaderPanel.hidden = true;
-      island.querySelectorAll<HTMLButtonElement>(".teti-header-icon[aria-expanded='true']")
-        .forEach((button) => button.setAttribute("aria-expanded", "false"));
+      if (aiStatus) {
+        aiStatus.closePanel();
+      } else {
+        openHeaderPanel.hidden = true;
+        island.querySelectorAll<HTMLButtonElement>(".teti-header-icon[aria-expanded='true']")
+          .forEach((button) => button.setAttribute("aria-expanded", "false"));
+      }
       return;
     }
     controller.close("peer-panel-escape");
@@ -442,8 +497,11 @@ function createConnectionRow(
   const state = document.createElement("div");
   state.className = "teti-connection-state";
   if (connection.state === "Confirmed") {
-    state.append(createElement(Radio, { width: 14, height: 14, "stroke-width": 2, "aria-hidden": "true" }));
-    state.append(document.createTextNode(isHeartbeatFresh(connection.lastHeartbeatReceivedAt) ? " 心跳在线" : " 已建联"));
+    const presence = document.createElement("div");
+    presence.className = "teti-connection-presence";
+    presence.append(createElement(Radio, { width: 14, height: 14, "stroke-width": 2, "aria-hidden": "true" }));
+    presence.append(document.createTextNode(isHeartbeatFresh(connection.lastHeartbeatReceivedAt) ? " 心跳在线" : " 已建联"));
+    state.append(presence, createRemoteAiStatus(connection.remoteAiStatus));
   } else if (connection.state === "PendingApproval") {
     const accept = iconButton(Check, "接受建联", () => void controller.accept(connection.requestId));
     const reject = iconButton(X, "拒绝建联", () => void controller.reject(connection.requestId));
@@ -463,9 +521,10 @@ function createConnectionRow(
 
 function createConnectionHeader(
   config: ProvisioningModeConfig,
-  controller: PeerConnectionController
+  controller: PeerConnectionController,
+  aiStatus?: AiStatusController
 ): HTMLElement {
-  const header = createIslandHeader(config);
+  const header = createIslandHeader(config, aiStatus);
   const controls = header.querySelector(".teti-header-controls");
   controls?.append(iconButton(X, "收起", () => controller.close()));
   return header;
@@ -499,7 +558,7 @@ function updateNameCounter(input: HTMLInputElement, meta: HTMLElement, maxCharac
   meta.textContent = `${countUnicodeCharacters(input.value)} / ${maxCharacters}`;
 }
 
-function createIslandHeader(config: ProvisioningModeConfig): HTMLElement {
+function createIslandHeader(_config: ProvisioningModeConfig, aiStatus?: AiStatusController): HTMLElement {
   const header = document.createElement("header");
   header.className = "teti-header";
 
@@ -509,34 +568,56 @@ function createIslandHeader(config: ProvisioningModeConfig): HTMLElement {
 
   const controls = document.createElement("div");
   controls.className = "teti-header-controls";
-  const statusPanel = createHeaderPanel(
-    "运行状态",
-    config.mode === "real" ? "真实连接" : "本地预览",
-    "已贴合当前屏幕顶部"
+  const snapshot = aiStatus?.snapshot ?? defaultAiStatusSnapshot();
+  const presentation = presentCodexUsage(snapshot.usage);
+  const statusPanel = createCodexStatusPanel(snapshot);
+  const sharingPanel = createSharingPanel(snapshot, aiStatus);
+  const statusButton = createHeaderButton(
+    null,
+    `查看 Codex 状态：${presentation.planLabel}`,
+    statusPanel,
+    controls,
+    createToolbarAssetIcon(aiToolsButtonIconUrl, "ai-tools"),
+    snapshot.openPanel === "status",
+    aiStatus ? () => aiStatus.togglePanel("status") : undefined
   );
-  const settingsPanel = createMotionSettingsPanel();
-  const statusButton = createHeaderButton(Activity, "查看运行状态", statusPanel, controls);
-  const settingsButton = createHeaderButton(Settings2, "打开界面设置", settingsPanel, controls);
-  controls.append(statusButton, settingsButton, statusPanel, settingsPanel);
+  const sharingButton = createHeaderButton(
+    null,
+    snapshot.statusSharing ? "状态共享已开启" : "打开共享设置",
+    sharingPanel,
+    controls,
+    createToolbarAssetIcon(settingsButtonIconUrl, "settings"),
+    snapshot.openPanel === "sharing",
+    aiStatus ? () => aiStatus.togglePanel("sharing") : undefined
+  );
+  sharingButton.classList.toggle("is-sharing-enabled", snapshot.statusSharing);
+  controls.append(statusButton, sharingButton, statusPanel, sharingPanel);
 
   header.append(brand, controls);
   return header;
 }
 
 function createHeaderButton(
-  icon: Parameters<typeof createElement>[0],
+  icon: Parameters<typeof createElement>[0] | null,
   label: string,
   panel: HTMLElement,
-  controls: HTMLElement
+  controls: HTMLElement,
+  content?: HTMLElement,
+  isOpen = false,
+  onToggle?: () => void
 ): HTMLButtonElement {
   const button = document.createElement("button");
   button.className = "teti-header-icon";
   button.type = "button";
   button.setAttribute("aria-label", label);
   button.setAttribute("title", label);
-  button.setAttribute("aria-expanded", "false");
-  button.append(createElement(icon, { width: 19, height: 19, "stroke-width": 1.8, "aria-hidden": "true" }));
+  button.setAttribute("aria-expanded", String(isOpen));
+  button.append(content ?? createElement(icon!, { width: 19, height: 19, "stroke-width": 1.8, "aria-hidden": "true" }));
   button.addEventListener("click", () => {
+    if (onToggle) {
+      onToggle();
+      return;
+    }
     const willOpen = panel.hidden;
     controls.querySelectorAll<HTMLElement>(".teti-header-panel").forEach((candidate) => {
       candidate.hidden = true;
@@ -550,42 +631,29 @@ function createHeaderButton(
   return button;
 }
 
-function createHeaderPanel(titleText: string, value: string, detail: string): HTMLElement {
-  const panel = document.createElement("div");
-  panel.className = "teti-header-panel teti-status-panel";
-  panel.hidden = true;
-
-  const title = document.createElement("strong");
-  title.textContent = titleText;
-  const status = document.createElement("span");
-  status.className = "teti-status-value";
-  status.textContent = value;
-  const description = document.createElement("small");
-  description.textContent = detail;
-  panel.append(title, status, description);
-  return panel;
+function createToolbarAssetIcon(source: string, kind: "ai-tools" | "settings"): HTMLImageElement {
+  const image = document.createElement("img");
+  image.className = `teti-toolbar-asset-icon is-${kind}`;
+  image.src = source;
+  image.alt = "";
+  image.setAttribute("aria-hidden", "true");
+  return image;
 }
 
-function createMotionSettingsPanel(): HTMLElement {
-  const panel = document.createElement("div");
-  panel.className = "teti-header-panel teti-settings-panel";
-  panel.hidden = true;
-
-  const title = document.createElement("strong");
-  title.textContent = "界面设置";
-  const label = document.createElement("label");
-  label.className = "teti-toggle-row";
-  const text = document.createElement("span");
-  text.textContent = "减少动画";
-  const toggle = document.createElement("input");
-  toggle.type = "checkbox";
-  toggle.checked = readReducedMotionPreference();
-  toggle.addEventListener("change", () => {
-    applyReducedMotionPreference(toggle.checked, true);
-  });
-  label.append(text, toggle);
-  panel.append(title, label);
-  return panel;
+function defaultAiStatusSnapshot(): AiStatusControllerSnapshot {
+  return {
+    usage: {
+      status: "unavailable",
+      error: {
+        code: "NOT_STARTED",
+        message: "Codex usage has not been refreshed yet.",
+        recoverable: true
+      }
+    },
+    statusSharing: false,
+    sharingBusy: false,
+    openPanel: null
+  };
 }
 
 interface ScreenMetrics {
@@ -594,8 +662,6 @@ interface ScreenMetrics {
   notchWidth?: number;
   notchHeight?: number;
 }
-
-const REDUCED_MOTION_KEY = "teti.desktop.reduced-motion";
 
 async function syncScreenMetrics(tauri: TauriInvoker, root: HTMLElement): Promise<void> {
   try {
@@ -608,7 +674,6 @@ async function syncScreenMetrics(tauri: TauriInvoker, root: HTMLElement): Promis
   } catch {
     root.dataset.hasNotch = "false";
   }
-  applyReducedMotionPreference(readReducedMotionPreference(), false);
 }
 
 function installScreenMetricsSync(tauri: TauriInvoker, ownerDocument: Document): void {
@@ -623,24 +688,6 @@ function installScreenMetricsSync(tauri: TauriInvoker, ownerDocument: Document):
   });
 }
 
-function readReducedMotionPreference(): boolean {
-  try {
-    return localStorage.getItem(REDUCED_MOTION_KEY) === "true";
-  } catch {
-    return false;
-  }
-}
-
-function applyReducedMotionPreference(enabled: boolean, persist: boolean): void {
-  document.documentElement.dataset.reducedMotion = String(enabled);
-  if (!persist) return;
-  try {
-    localStorage.setItem(REDUCED_MOTION_KEY, String(enabled));
-  } catch {
-    // This preference is best effort when WebView storage is unavailable.
-  }
-}
-
 function nonNegative(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) ? Math.max(0, value) : 0;
 }
@@ -649,16 +696,17 @@ async function submitAndRender(
   coordinator: FirstLaunchCoordinator,
   root: HTMLElement | null,
   config: ProvisioningModeConfig,
-  connections?: PeerConnectionController
+  connections?: PeerConnectionController,
+  aiStatus?: AiStatusController
 ): Promise<void> {
   const pending = coordinator.submitName();
   if (root) {
-    renderSnapshot(root, coordinator.snapshot, config, coordinator, connections);
+    renderSnapshot(root, coordinator.snapshot, config, coordinator, connections, aiStatus);
   }
 
   await pending;
   if (root) {
-    renderSnapshot(root, coordinator.snapshot, config, coordinator, connections);
+    renderSnapshot(root, coordinator.snapshot, config, coordinator, connections, aiStatus);
   }
 }
 
@@ -666,16 +714,17 @@ async function retryDiscoveryAndRender(
   coordinator: FirstLaunchCoordinator,
   root: HTMLElement | null,
   config: ProvisioningModeConfig,
-  connections?: PeerConnectionController
+  connections?: PeerConnectionController,
+  aiStatus?: AiStatusController
 ): Promise<void> {
   const pending = coordinator.retryDiscoveryRegistration();
   if (root) {
-    renderSnapshot(root, coordinator.snapshot, config, coordinator, connections);
+    renderSnapshot(root, coordinator.snapshot, config, coordinator, connections, aiStatus);
   }
 
   await pending;
   if (root) {
-    renderSnapshot(root, coordinator.snapshot, config, coordinator, connections);
+    renderSnapshot(root, coordinator.snapshot, config, coordinator, connections, aiStatus);
   }
 }
 
