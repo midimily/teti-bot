@@ -8,8 +8,12 @@ if (!root) {
 }
 
 const tauri = await createTauriInvoker();
-await createDesktopApp({
+const app = await createDesktopApp({
   root,
   tauri,
   env: import.meta.env
 });
+
+const dispose = () => app.dispose();
+window.addEventListener("pagehide", dispose, { once: true });
+window.addEventListener("beforeunload", dispose, { once: true });

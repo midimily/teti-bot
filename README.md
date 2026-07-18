@@ -13,6 +13,14 @@ Teti uses two layers:
 
 Private keys, chat credentials, private profiles, connection graphs, and conversation history stay on the user's device.
 
+## Public ID Rule
+
+Teti has one canonical public-ID format: `teti_[a-z0-9]{9}`. The card and desktop UI show only the 9-character suffix. Human input is case-insensitive, but local storage, Workers KV keys, registry writes, and protocol messages must contain the lowercase canonical form. Invalid characters are rejected, never removed silently.
+
+See [`docs/teti-public-id.md`](docs/teti-public-id.md) for the complete boundary rules and the mandatory pre-deployment KV audit.
+
+Production Desktop instances send a discovery activity heartbeat at startup and approximately every five minutes while running. This registry signal is intentionally separate from Chatmail connection heartbeats; see [`docs/teti-discovery.md`](docs/teti-discovery.md#desktop-activity-heartbeat).
+
 ## Repository Layout
 
 ```text
@@ -33,4 +41,3 @@ teti-bot/
 ## Current Component
 
 The first implemented network component is `services/discovery-worker`, a native Cloudflare Worker that provides Teti Discovery Registry V1.
-

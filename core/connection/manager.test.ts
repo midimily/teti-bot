@@ -35,8 +35,8 @@ test("creates and sends a connection request through chatmail messaging", async 
   });
 
   const record = await manager.createRequest({
-    id: "teti_remote",
-    address: "remote@mail.seep.im",
+    id: "teti_remote001",
+    address: "remote001@mail.seep.im",
     publicKey: "remote-public-key",
     publicProfile: {
       platform: "Windows"
@@ -46,15 +46,15 @@ test("creates and sends a connection request through chatmail messaging", async 
   assert.equal(record.requestId, "request-1");
   assert.equal(record.state, TetiConnectionState.Requested);
   assert.equal(record.direction, "outgoing");
-  assert.equal(record.remoteTetiId, "teti_remote");
-  assert.equal(record.remoteAddress, "remote@mail.seep.im");
-  assert.equal(record.request.fromTetiId, "teti_local");
+  assert.equal(record.remoteTetiId, "teti_remote001");
+  assert.equal(record.remoteAddress, "remote001@mail.seep.im");
+  assert.equal(record.request.fromTetiId, "teti_local0001");
   assert.equal(record.request.publicKey, "local-public-key");
   assert.equal(record.request.nonce, "nonce-1");
   assert.deepEqual(await connectionStorage.loadAll(), [record]);
   assert.equal(messagingAdapter.sendCalls.length, 1);
   assert.equal(messagingAdapter.sendCalls[0].accountId, 9);
-  assert.equal(messagingAdapter.sendCalls[0].toAddress, "remote@mail.seep.im");
+  assert.equal(messagingAdapter.sendCalls[0].toAddress, "remote001@mail.seep.im");
 });
 
 test("accepts an incoming request, sends accept, and persists confirmed state", async () => {
@@ -89,8 +89,8 @@ test("receives connection requests and stores incoming pending records", async (
   const incomingRequest: TetiConnectionRequest = {
     version: 1,
     requestId: "incoming-1",
-    fromTetiId: "teti_remote",
-    fromAddress: "remote@mail.seep.im",
+    fromTetiId: "teti_remote001",
+    fromAddress: "remote001@mail.seep.im",
     publicKey: "remote-public-key",
     profile: {
       platform: "Linux",
@@ -103,7 +103,7 @@ test("receives connection requests and stores incoming pending records", async (
   messagingAdapter.received.push({
     messageId: 100,
     chatId: 200,
-    fromAddress: "remote@mail.seep.im",
+    fromAddress: "remote001@mail.seep.im",
     receivedAt: fixedNow,
     request: incomingRequest,
     envelope: createConnectionRequestEnvelope(incomingRequest)
@@ -120,7 +120,7 @@ test("receives connection requests and stores incoming pending records", async (
   assert.equal(records.length, 1);
   assert.equal(records[0].state, TetiConnectionState.PendingApproval);
   assert.equal(records[0].direction, "incoming");
-  assert.equal(records[0].remoteTetiId, "teti_remote");
+  assert.equal(records[0].remoteTetiId, "teti_remote001");
   assert.deepEqual(await manager.listConnections(), records);
 });
 
@@ -165,7 +165,7 @@ test("rejects invalid connection request payloads with private material", () => 
     payload: {
       version: 1,
       requestId: "bad-request",
-      fromTetiId: "teti_bad",
+      fromTetiId: "teti_bad000001",
       fromAddress: "bad@mail.seep.im",
       profile: {
         platform: "macOS"
@@ -209,8 +209,8 @@ async function createManagerWithPendingRequest() {
   });
 
   await manager.createRequest({
-    id: "teti_remote",
-    address: "remote@mail.seep.im",
+    id: "teti_remote001",
+    address: "remote001@mail.seep.im",
     publicProfile: {}
   });
 
@@ -236,13 +236,13 @@ async function createManagerWithIncomingRequest() {
     requestId: "request-1",
     state: TetiConnectionState.PendingApproval,
     direction: "incoming",
-    remoteTetiId: "teti_remote",
-    remoteAddress: "remote@mail.seep.im",
+    remoteTetiId: "teti_remote001",
+    remoteAddress: "remote001@mail.seep.im",
     request: {
       version: 1,
       requestId: "request-1",
-      fromTetiId: "teti_remote",
-      fromAddress: "remote@mail.seep.im",
+      fromTetiId: "teti_remote001",
+      fromAddress: "remote001@mail.seep.im",
       publicKey: "remote-public-key",
       profile: {
         platform: "Linux",
@@ -262,8 +262,8 @@ async function createManagerWithIncomingRequest() {
 function createLocalAccount(): TetiAccount {
   return {
     version: 1,
-    id: "teti_local",
-    address: "local@mail.seep.im",
+    id: "teti_local0001",
+    address: "local0001@mail.seep.im",
     chatmailAccountId: 9,
     publicKey: "local-public-key",
     publicProfile: {

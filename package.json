@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --experimental-strip-types --test apps/desktop/test/*.test.ts core/account/*.test.ts core/application/*.test.ts core/connection/*.test.ts core/environment/*.test.ts integrations/chatmail/*.test.ts services/discovery/*.test.ts services/discovery-worker/test/index.test.js",
+    "test": "node --experimental-strip-types --test apps/desktop/test/*.test.ts core/account/*.test.ts core/application/*.test.ts core/connection/*.test.ts core/environment/*.test.ts core/identity/*.test.ts integrations/chatmail/*.test.ts services/discovery/*.test.ts services/discovery-worker/test/*.test.js",
     "desktop:dev": "npm --prefix apps/desktop run dev",
     "desktop:tauri-dev": "npm --prefix apps/desktop run tauri:dev",
     "desktop:build": "npm --prefix apps/desktop run build",
@@ -26,6 +26,7 @@
     "desktop:rpc:install": "npm --prefix apps/desktop run rpc:install",
     "desktop:rpc:verify": "npm --prefix apps/desktop run rpc:verify --",
     "desktop:bootstrap:mac": "npm --prefix apps/desktop run bootstrap:mac",
-    "desktop:real-validation": "TETI_PROVISIONING_MODE=real TETI_ALLOW_REAL_PROVISIONING=1 npm --prefix apps/desktop run tauri:dev --"
+    "desktop:real-validation": "TETI_PROVISIONING_MODE=real TETI_ALLOW_REAL_PROVISIONING=1 npm --prefix apps/desktop run tauri:dev --",
+    "registry:audit-public-ids": "npm --prefix services/discovery-worker run audit:ids"
   }
 }

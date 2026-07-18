@@ -18,7 +18,7 @@ Then update `wrangler.toml` with the generated namespace IDs.
 KV key:
 
 ```text
-teti:{id}
+teti:teti_{9-character-public-code}
 ```
 
 TTL:
@@ -32,8 +32,8 @@ Stored value:
 ```json
 {
   "version": 1,
-  "id": "teti_a83kd9",
-  "address": "yxmtewmvc@mail.seep.im",
+  "id": "teti_a83kd9x2q",
+  "address": "a83kd9x2q@mail.seep.im",
   "displayName": "Milo",
   "publicKey": "chatmail-public-key",
   "publicProfile": {
@@ -76,8 +76,8 @@ Request:
 ```json
 {
   "version": 1,
-  "id": "teti_a83kd9",
-  "address": "yxmtewmvc@mail.seep.im",
+  "id": "teti_a83kd9x2q",
+  "address": "a83kd9x2q@mail.seep.im",
   "displayName": "Milo",
   "publicKey": "chatmail-public-key",
   "publicProfile": {
@@ -90,8 +90,8 @@ Request:
 
 Rules:
 
-- `id` must match `teti_` followed by 3 to 59 letters, numbers, `_`, or `-`.
-- `address` must be a valid `mail.seep.im` chatmail address.
+- `id` must match `teti_[a-z0-9]{9}` exactly.
+- `address` must be lowercase, use `mail.seep.im`, and its 9-character local part must match the ID suffix.
 - `displayName`, when present, must contain 1 to 10 Unicode characters.
 - `publicKey` must be a non-empty string and must not be `undefined`.
 - Request JSON must be 16 KiB or smaller.
@@ -107,7 +107,7 @@ Request:
 
 ```json
 {
-  "id": "teti_a83kd9"
+  "id": "teti_a83kd9x2q"
 }
 ```
 
@@ -120,6 +120,21 @@ Returns up to 50 public identity cards.
 ### GET /profile/:id
 
 Returns one public identity card.
+
+The profile lookup accepts ASCII uppercase input for user-facing convenience and folds it to the lowercase canonical key. Registry writes remain strict and reject non-canonical casing.
+
+## Required Pre-deployment Audit
+
+Run the read-only KV key audit before deploying changes to the ID validation rule:
+
+```bash
+CLOUDFLARE_ACCOUNT_ID=... \
+TETI_KV_NAMESPACE_ID=... \
+CLOUDFLARE_API_TOKEN=... \
+npm run registry:audit-public-ids
+```
+
+Deployment is blocked when the report contains uppercase, invalid, or case-folding collision keys. See [`docs/teti-public-id.md`](../../docs/teti-public-id.md) for the migration boundary.
 
 ## Future Compatibility
 

@@ -132,7 +132,7 @@ test("manifest writes sanitized public account data", async () => {
     await writeManifest(profile, manifestFromAccount(profile, createAccount("Milo")));
     const raw = await import("node:fs/promises").then((fs) => fs.readFile(profile.manifestPath, "utf8"));
 
-    assert.equal(raw.includes("teti_milo"), true);
+    assert.equal(raw.includes("teti_milo00000"), true);
     assert.equal(/password|privateKey|token|credential/i.test(raw), false);
   } finally {
     await rm(profile.root, { recursive: true, force: true });
@@ -151,10 +151,11 @@ async function createTempValidationProfile() {
 }
 
 function createAccount(displayName: string): TetiAccount {
+  const publicIdCode = "milo00000";
   return {
     version: 1,
-    id: `teti_${displayName.toLowerCase()}`,
-    address: `${displayName.toLowerCase()}@mail.seep.im`,
+    id: `teti_${publicIdCode}`,
+    address: `${publicIdCode}@mail.seep.im`,
     displayName,
     chatmailAccountId: 7,
     publicKey: "public-key",

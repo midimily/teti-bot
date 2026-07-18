@@ -128,7 +128,7 @@ During environment refresh, Teti calls `/heartbeat` with:
 
 ```json
 {
-  "id": "teti_xxx",
+  "id": "teti_abc123xyz",
   "publicProfile": {
     "platform": "macOS",
     "device": {

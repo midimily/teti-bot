@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { normalizeTetiPublicIdCode } from "../../../core/identity/public-id.ts";
 import type { TetiAccountStorage } from "../../../core/account/storage.ts";
 import { FileTetiAccountStorage } from "../../../core/account/storage.ts";
 import { TetiApplicationManager } from "../../../core/application/manager.ts";
@@ -387,14 +388,7 @@ export async function resolveIdentityQuery(
 }
 
 export function normalizePublicTetiId(value: string): string {
-  if (typeof value !== "string") {
-    throw new Error("Enter the 9-character Teti ID shown on teti.bot.");
-  }
-  const publicId = value.trim().toLowerCase();
-  if (!/^[a-z0-9]{9}$/.test(publicId)) {
-    throw new Error("Teti ID must contain exactly 9 lowercase letters or numbers.");
-  }
-  return publicId;
+  return normalizeTetiPublicIdCode(value);
 }
 
 function toPublicIdentity(identity: TetiIdentity): PublicTetiIdentity {

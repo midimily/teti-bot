@@ -20,7 +20,7 @@ import {
 const discovery = new TetiDiscoveryService();
 
 const tetis = await discovery.discoverTetis({ limit: 20 });
-const profile = await discovery.getTetiProfile("teti_alex");
+const profile = await discovery.getTetiProfile("teti_abc123xyz");
 
 const matches = matchTetis({
   localProfile: {

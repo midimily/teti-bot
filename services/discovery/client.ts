@@ -9,6 +9,11 @@ import type {
   TetiIdentity,
   TetiPublicProfile
 } from "./types.ts";
+import {
+  isCanonicalTetiChatmailAddress,
+  isCanonicalTetiPublicId,
+  normalizeTetiPublicId
+} from "../../core/identity/public-id.ts";
 
 export interface TetiRegistryReader {
   discover(): Promise<DiscoveryIdentity[]>;
@@ -48,7 +53,7 @@ export class TetiDiscoveryService {
   }
 
   async getTetiProfile(id: string): Promise<TetiIdentity | null> {
-    const identity = await this.registry.getIdentity(id);
+    const identity = await this.registry.getIdentity(normalizeTetiPublicId(id));
     return identity ? toTetiIdentity(identity) : null;
   }
 
@@ -86,6 +91,12 @@ export function prepareConnectionRequest(
 }
 
 export function toTetiIdentity(identity: DiscoveryIdentity): TetiIdentity {
+  if (!isCanonicalTetiPublicId(identity.id)) {
+    throw new Error("Discovery returned a non-canonical Teti public ID.");
+  }
+  if (!isCanonicalTetiChatmailAddress(identity.address, identity.id)) {
+    throw new Error("Discovery returned a Chatmail address that does not match its Teti public ID.");
+  }
   return {
     id: identity.id,
     address: identity.address,

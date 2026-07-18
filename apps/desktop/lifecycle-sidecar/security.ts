@@ -42,6 +42,9 @@ export function redactSecretLikeText(text: string): string {
 }
 
 function classifyError(message: string, fallbackCode: LifecycleErrorCode): LifecycleErrorCode {
+  if (fallbackCode === "DISCOVERY_HEARTBEAT_FAILED") {
+    return fallbackCode;
+  }
   if (fallbackCode.startsWith("CONNECTION_")) {
     return fallbackCode;
   }
@@ -75,6 +78,8 @@ function publicMessageForCode(code: LifecycleErrorCode): string {
       return "Teti could not finish setting up.";
     case "DISCOVERY_REGISTRATION_FAILED":
       return "Teti could not finish connecting yet.";
+    case "DISCOVERY_HEARTBEAT_FAILED":
+      return "Teti could not refresh its public activity yet.";
     case "CONNECTION_RESOLVE_FAILED":
       return "Teti could not find that public identity.";
     case "CONNECTION_REQUEST_FAILED":
@@ -96,6 +101,8 @@ function retryTargetForCode(code: LifecycleErrorCode): LifecycleMethod | undefin
       return "account.create";
     case "DISCOVERY_REGISTRATION_FAILED":
       return "discovery.retry";
+    case "DISCOVERY_HEARTBEAT_FAILED":
+      return "discovery.heartbeat";
     case "CONNECTION_RESOLVE_FAILED":
       return "connection.resolve";
     case "CONNECTION_REQUEST_FAILED":

@@ -41,8 +41,8 @@ Connection messages are JSON envelopes sent through chatmail text messages. Teti
   "payload": {
     "version": 1,
     "requestId": "uuid",
-    "fromTetiId": "teti_xxx",
-    "fromAddress": "xxx@mail.seep.im",
+    "fromTetiId": "teti_abc123xyz",
+    "fromAddress": "abc123xyz@mail.seep.im",
     "publicKey": "...",
     "profile": {
       "platform": "macOS",
@@ -63,8 +63,8 @@ Connection messages are JSON envelopes sent through chatmail text messages. Teti
   "payload": {
     "version": 1,
     "requestId": "uuid",
-    "fromTetiId": "teti_yyy",
-    "fromAddress": "yyy@mail.seep.im",
+    "fromTetiId": "teti_def456uvw",
+    "fromAddress": "def456uvw@mail.seep.im",
     "createdAt": "2026-07-11T00:00:00.000Z",
     "nonce": "random"
   }
@@ -85,6 +85,8 @@ Connection messages are JSON envelopes sent through chatmail text messages. Teti
 ```
 
 The envelope also reserves `teti.profile.update` for future public profile sync.
+
+Every request and accept `fromTetiId` must match `teti_[a-z0-9]{9}` exactly. Protocol messages never perform case folding: non-canonical IDs are rejected. Case-insensitive handling exists only at the human input boundary before lookup.
 
 ## Connection State
 

@@ -36,7 +36,7 @@ test("create account calls chatmail adapter, saves local state, and registers di
   const manager = new TetiAccountManager({ storage, chatmailAdapter, discoveryClient });
 
   const account = await manager.createTetiAccount({
-    address: "teti_test@mail.seep.im",
+    address: "test00001@mail.seep.im",
     publicProfile: {
       platform: "macOS",
       category: ["developer"],
@@ -45,8 +45,8 @@ test("create account calls chatmail adapter, saves local state, and registers di
   });
 
   assert.equal(chatmailAdapter.createCalls.length, 1);
-  assert.equal(account.id, "teti_test");
-  assert.equal(account.address, "teti_test@mail.seep.im");
+  assert.equal(account.id, "teti_test00001");
+  assert.equal(account.address, "test00001@mail.seep.im");
   assert.equal(account.chatmailAccountId, 1);
   assert.equal(account.publicKey, "mock-public-key");
   assert.deepEqual(await storage.load(), account);
@@ -77,6 +77,25 @@ test("create account can auto provision chatmail identity from display name", as
   assert.equal(discoveryClient.registerCalls.length, 1);
   assert.equal(discoveryClient.registerCalls[0].id, "teti_abcdefghi");
   assert.equal(discoveryClient.registerCalls[0].displayName, "Alex");
+});
+
+test("account creation canonicalizes a case-insensitive relay identity before persistence and registration", async () => {
+  const storage = new MemoryTetiAccountStorage();
+  const discoveryClient = new RecordingDiscoveryClient();
+  const manager = new TetiAccountManager({
+    storage,
+    chatmailProvisioner: new RecordingChatmailProvisioner("AbC123XyZ@MAIL.SEEP.IM"),
+    discoveryClient,
+    expectedAddressSuffix: "@mail.seep.im"
+  });
+
+  const account = await manager.createTetiAccount({ name: "Alex" });
+
+  assert.equal(account.id, "teti_abc123xyz");
+  assert.equal(account.address, "abc123xyz@mail.seep.im");
+  assert.equal((await storage.load())?.id, "teti_abc123xyz");
+  assert.equal(discoveryClient.registerCalls[0].id, "teti_abc123xyz");
+  assert.equal(discoveryClient.registerCalls[0].address, "abc123xyz@mail.seep.im");
 });
 
 test("account creation reports relay, persistence, and registry transaction stages in order", async () => {
@@ -146,7 +165,7 @@ test("restart simulation loads existing account without network or chatmail call
   });
 
   const created = await firstManager.createTetiAccount({
-    address: "teti_restart@mail.seep.im"
+    address: "restart01@mail.seep.im"
   });
 
   const restartChatmailAdapter = new RecordingChatmailAdapter();
@@ -197,13 +216,13 @@ test("delete account removes discovery identity, deletes chatmail account, and r
   const manager = new TetiAccountManager({ storage, chatmailAdapter, discoveryClient });
 
   const account = await manager.createTetiAccount({
-    address: "teti_delete@mail.seep.im"
+    address: "delete001@mail.seep.im"
   });
 
   await manager.deleteTetiAccount();
 
   assert.equal(discoveryClient.deleteCalls.length, 1);
-  assert.equal(discoveryClient.deleteCalls[0], "teti_delete");
+  assert.equal(discoveryClient.deleteCalls[0], "teti_delete001");
   assert.equal(chatmailAdapter.deleteCalls.length, 1);
   assert.deepEqual(chatmailAdapter.deleteCalls[0], {
     accountId: account.chatmailAccountId
@@ -227,7 +246,7 @@ test("refresh environment updates local profile and registry heartbeat payload",
   });
 
   await manager.createTetiAccount({
-    address: "teti_env@mail.seep.im"
+    address: "env000001@mail.seep.im"
   });
 
   const refreshed = await manager.refreshTetiEnvironment();
@@ -237,7 +256,7 @@ test("refresh environment updates local profile and registry heartbeat payload",
   assert.equal(refreshed.publicProfile.lastSeen, "2026-07-11T00:00:00.000Z");
   assert.equal(discoveryClient.heartbeatCalls.length, 1);
   assert.deepEqual(discoveryClient.heartbeatCalls[0], {
-    id: "teti_env",
+    id: "teti_env000001",
     publicProfile: refreshed.publicProfile
   });
 });
@@ -251,7 +270,7 @@ class RecordingChatmailAdapter implements ChatmailAdapter {
     this.createCalls.push(input);
     return {
       accountId: this.nextAccountId++,
-      address: input.address ?? "teti_test@mail.seep.im",
+      address: input.address ?? "test00001@mail.seep.im",
       isConfigured: true,
       isChatmail: true,
       publicKey: "mock-public-key",
@@ -262,7 +281,7 @@ class RecordingChatmailAdapter implements ChatmailAdapter {
   async loadAccount(input: LoadChatmailAccountInput): Promise<ChatmailIdentity> {
     return {
       accountId: input.accountId,
-      address: "teti_test@mail.seep.im",
+      address: "test00001@mail.seep.im",
       isConfigured: true,
       isChatmail: true
     };

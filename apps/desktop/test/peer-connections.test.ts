@@ -52,6 +52,22 @@ test("peer identity input rejects unknown public data", async () => {
   );
 });
 
+test("peer identity input folds ASCII uppercase but reports invalid characters without deleting them", () => {
+  const controller = makeController({ connections: [], receivedCount: 0, heartbeatCount: 0 });
+
+  controller.updateInput("ABC123XYZ");
+  assert.equal(controller.snapshot.input, "abc123xyz");
+  assert.equal(controller.snapshot.inputError, undefined);
+
+  controller.updateInput("abc-12345");
+  assert.equal(controller.snapshot.input, "abc-12345");
+  assert.equal(controller.snapshot.inputError, "ID 只能包含英文字母和数字。");
+
+  controller.updateInput("abc123xyz!");
+  assert.equal(controller.snapshot.input, "abc123xyz!");
+  assert.equal(controller.snapshot.inputError, "ID 只能包含英文字母和数字。");
+});
+
 test("repeating a confirmed peer ID shows explicit feedback and highlights the relationship", async () => {
   const connection: PeerConnectionDto = {
     requestId: "confirmed-request",
@@ -151,6 +167,62 @@ test("mutual invitation shows a concise success state and highlights the confirm
   assert.equal(controller.snapshot.noticeTone, "success");
 });
 
+test("outside focus loss collapses an open connection panel even with pending approval", async () => {
+  const pending: PeerConnectionDto = {
+    requestId: "pending-request",
+    state: "PendingApproval",
+    direction: "incoming",
+    remoteTetiId: identity.id,
+    remoteAddress: identity.address,
+    remoteDisplayName: identity.displayName,
+    createdAt: "2026-07-17T00:00:00.000Z",
+    updatedAt: "2026-07-17T00:00:01.000Z"
+  };
+  const invoker = new RecordingTauriInvoker();
+  const controller = new PeerConnectionController({
+    client: new StaticPeerConnectionClient({ connections: [pending], receivedCount: 1, heartbeatCount: 0 }),
+    notchWindow: new TauriNotchWindowController(invoker),
+    onChange: () => undefined,
+    schedule: () => 0
+  });
+
+  await controller.connect();
+  controller.open();
+  controller.dismissFromOutside();
+
+  assert.equal(controller.snapshot.open, false);
+  assert.deepEqual(invoker.calls.at(-1), {
+    command: "set_island_mode",
+    args: { mode: "idle", reason: "peer-panel-focus-lost" }
+  });
+});
+
+test("pending approval no longer disables the inactive auto-collapse timer", async () => {
+  const pending: PeerConnectionDto = {
+    requestId: "pending-timeout",
+    state: "PendingApproval",
+    direction: "incoming",
+    remoteTetiId: identity.id,
+    remoteAddress: identity.address,
+    createdAt: "2026-07-17T00:00:00.000Z",
+    updatedAt: "2026-07-17T00:00:01.000Z"
+  };
+  const scheduled: Array<{ callback: () => void; delayMs: number }> = [];
+  const controller = new PeerConnectionController({
+    client: new StaticPeerConnectionClient({ connections: [pending], receivedCount: 1, heartbeatCount: 0 }),
+    notchWindow: new TauriNotchWindowController(new RecordingTauriInvoker()),
+    onChange: () => undefined,
+    schedule: (callback, delayMs) => scheduled.push({ callback, delayMs })
+  });
+
+  await controller.connect();
+  controller.open();
+  scheduled.at(-1)?.callback();
+
+  assert.equal(scheduled.at(-1)?.delayMs, 20_000);
+  assert.equal(controller.snapshot.open, false);
+});
+
 test("connection UI renders the complete list inside a bounded vertical scroller", async () => {
   const [appSource, styles] = await Promise.all([
     readFile(new URL("../src/app.ts", import.meta.url), "utf8"),
@@ -160,6 +232,9 @@ test("connection UI renders the complete list inside a bounded vertical scroller
   assert.doesNotMatch(appSource, /slice\(0,\s*3\)/);
   assert.match(styles, /\.teti-connection-list\s*\{[\s\S]*max-height:\s*138px/);
   assert.match(styles, /\.teti-connection-list\s*\{[\s\S]*overflow-y:\s*auto/);
+  assert.match(styles, /\.teti-pending-indicator\s*\{/);
+  assert.match(styles, /data-has-notch="true"\]\s+\.teti-header\s*\{[\s\S]*grid-template-columns/);
+  assert.match(styles, /data-has-notch="true"\]\s+\.teti-island--connections\s*\{[\s\S]*safe-top-inset/);
 });
 
 function makeController(result: PeerConnectionResult): PeerConnectionController {

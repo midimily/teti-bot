@@ -8,6 +8,11 @@ import { TauriNotchWindowController, visualModeForViewModel } from "../src/platf
 import { createDesktopAccountLifecycle } from "../src/provisioning/index.ts";
 import { MockDesktopAccountLifecycle, MOCK_ACCOUNT_STORAGE_KEY } from "../src/provisioning/mock-lifecycle.ts";
 import { readProvisioningMode } from "../src/provisioning/modes.ts";
+import { shouldRunDiscoveryHeartbeat } from "../src/discovery/heartbeat.ts";
+import {
+  BridgeDiscoveryHeartbeatClient,
+  LifecycleBridgeClient
+} from "../src/provisioning/bridge-lifecycle.ts";
 
 test("desktop provisioning defaults to mock mode", () => {
   const config = readProvisioningMode({});
@@ -177,15 +182,61 @@ test("view-model states map to desktop shell window modes", () => {
   );
 });
 
+test("registry heartbeat starts for any local real desktop account", () => {
+  const account = createAccount("Milo");
+  const real = readProvisioningMode({ TETI_PROVISIONING_MODE: "real" });
+  const mock = readProvisioningMode({ TETI_PROVISIONING_MODE: "mock" });
+
+  assert.equal(shouldRunDiscoveryHeartbeat({
+    state: "idle",
+    nameInput: "Milo",
+    submitting: false,
+    account
+  }, real.mode), true);
+  assert.equal(shouldRunDiscoveryHeartbeat({
+    state: "recoverable_error",
+    nameInput: "Milo",
+    submitting: false,
+    account,
+    error: { kind: "discovery_registration_failure", message: "pending", recoverable: true }
+  }, real.mode), true);
+  assert.equal(shouldRunDiscoveryHeartbeat({
+    state: "welcome",
+    nameInput: "",
+    submitting: false
+  }, real.mode), false);
+  assert.equal(shouldRunDiscoveryHeartbeat({
+    state: "idle",
+    nameInput: "Milo",
+    submitting: false,
+    account
+  }, mock.mode), false);
+});
+
+test("desktop heartbeat client calls the bounded discovery heartbeat lifecycle method", async () => {
+  const account = createAccount("Milo");
+  const invoker = new SequencedTauriInvoker([
+    { version: 1, id: "heartbeat", ok: true, result: account }
+  ]);
+  const client = new BridgeDiscoveryHeartbeatClient(new LifecycleBridgeClient(invoker));
+
+  assert.deepEqual(await client.heartbeat(), account);
+  assert.equal(
+    (invoker.calls[0]?.args?.request as { method?: string } | undefined)?.method,
+    "discovery.heartbeat"
+  );
+});
+
 function visualModeForSnapshot(snapshot: FirstLaunchSnapshot): string {
   return visualModeForViewModel(toFirstLaunchViewModel(snapshot));
 }
 
 function createAccount(displayName: string): TetiAccount {
+  const publicIdCode = "milo00000";
   return {
     version: 1,
-    id: `teti_${displayName.toLowerCase()}`,
-    address: `${displayName.toLowerCase()}@mail.seep.im`,
+    id: `teti_${publicIdCode}`,
+    address: `${publicIdCode}@mail.seep.im`,
     displayName,
     chatmailAccountId: 1,
     publicKey: "public-key",

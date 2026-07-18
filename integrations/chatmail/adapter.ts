@@ -65,7 +65,7 @@ export class MockChatmailAdapter implements ChatmailAdapter {
     const accountId = this.nextAccountId++;
     const identity: ChatmailIdentity = {
       accountId,
-      address: input.address || "teti_test@mail.seep.im",
+      address: input.address || "test00001@mail.seep.im",
       displayName: input.displayName,
       isConfigured: true,
       isChatmail: true

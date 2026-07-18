@@ -8,6 +8,7 @@ export type LifecycleMethod =
   | "account.create"
   | "discovery.register"
   | "discovery.retry"
+  | "discovery.heartbeat"
   | "connection.resolve"
   | "connection.request"
   | "connection.list"
@@ -22,6 +23,7 @@ export const LIFECYCLE_METHODS: readonly LifecycleMethod[] = [
   "account.create",
   "discovery.register",
   "discovery.retry",
+  "discovery.heartbeat",
   "connection.resolve",
   "connection.request",
   "connection.list",
@@ -144,6 +146,7 @@ export type LifecycleErrorCode =
   | "ACCOUNT_ALREADY_EXISTS"
   | "ACCOUNT_CREATE_FAILED"
   | "DISCOVERY_REGISTRATION_FAILED"
+  | "DISCOVERY_HEARTBEAT_FAILED"
   | "CONNECTION_RESOLVE_FAILED"
   | "CONNECTION_REQUEST_FAILED"
   | "CONNECTION_POLL_FAILED"
@@ -158,6 +161,7 @@ export const LIFECYCLE_TIMEOUT_MS: Record<LifecycleMethod, number> = {
   "account.create": 120_000,
   "discovery.register": 15_000,
   "discovery.retry": 15_000,
+  "discovery.heartbeat": 30_000,
   "connection.resolve": 15_000,
   "connection.request": 30_000,
   "connection.list": 5_000,

@@ -108,7 +108,7 @@ fn resize_and_pin_on_main(app: &AppHandle, mode: IslandMode) -> Result<(), Strin
     } else {
         0.0
     };
-    let height = base.height + safe_top;
+    let height = panel_height(mode, base.height, safe_top, info.has_notch);
     let frame = screen.frame();
     let target = NSRect::new(
         NSPoint::new(
@@ -202,6 +202,19 @@ fn resolved_notch_width(screen_width: f64, candidate: f64) -> f64 {
     } else {
         candidate
     }
+}
+
+fn panel_height(mode: IslandMode, base_height: f64, safe_top: f64, has_notch: bool) -> f64 {
+    if has_notch
+        && matches!(
+            mode,
+            IslandMode::Onboarding | IslandMode::Processing | IslandMode::Error
+        )
+    {
+        return base_height;
+    }
+
+    base_height + safe_top
 }
 
 fn apply_content_clip(panel: &NSPanel, radius: f64) -> Result<(), String> {
@@ -312,5 +325,23 @@ mod tests {
     #[test]
     fn content_clip_uses_only_bottom_corners() {
         assert_eq!(BOTTOM_CORNER_MASK, 0b0011);
+    }
+
+    #[test]
+    fn expanded_notch_modes_reclaim_the_camera_row() {
+        assert_eq!(
+            panel_height(IslandMode::Onboarding, 352.0, 32.0, true),
+            352.0
+        );
+        assert_eq!(
+            panel_height(IslandMode::Processing, 300.0, 32.0, true),
+            300.0
+        );
+        assert_eq!(panel_height(IslandMode::Idle, 18.0, 32.0, true), 50.0);
+        assert_eq!(panel_height(IslandMode::Ready, 150.0, 32.0, true), 182.0);
+        assert_eq!(
+            panel_height(IslandMode::Onboarding, 352.0, 0.0, false),
+            352.0
+        );
     }
 }

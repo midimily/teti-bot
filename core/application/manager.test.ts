@@ -39,9 +39,9 @@ test("confirmed connection can send application envelope", async () => {
 
   assert.equal(sent.envelope.type, "teti.profile.sync");
   assert.equal(sent.envelope.messageId, "message-1");
-  assert.equal(sent.envelope.fromTetiId, "teti_local");
+  assert.equal(sent.envelope.fromTetiId, "teti_local0001");
   assert.equal(chatmailAdapter.sendCalls.length, 1);
-  assert.equal(chatmailAdapter.sendCalls[0].peerAddress, "remote@mail.seep.im");
+  assert.equal(chatmailAdapter.sendCalls[0].peerAddress, "remote001@mail.seep.im");
   assert.deepEqual(JSON.parse(chatmailAdapter.sendCalls[0].text), sent.envelope);
 });
 
@@ -69,7 +69,7 @@ test("invalid application envelope is rejected", () => {
         version: 1,
         type: "teti.capability.offer",
         messageId: "bad-message",
-        fromTetiId: "teti_remote",
+        fromTetiId: "teti_remote001",
         createdAt: fixedNow,
         payload: {
           capabilities: ["coding"],
@@ -82,6 +82,23 @@ test("invalid application envelope is rejected", () => {
   );
 });
 
+test("application protocol rejects a non-canonical fromTetiId", () => {
+  assert.throws(
+    () =>
+      validateApplicationEnvelope({
+        version: 1,
+        type: "teti.presence",
+        messageId: "bad-public-id",
+        fromTetiId: "teti_REMOTE001",
+        createdAt: fixedNow,
+        payload: { status: "online", timestamp: fixedNow }
+      }),
+    (error) =>
+      error instanceof TetiApplicationProtocolError &&
+      /exactly 9 ASCII lowercase/.test(error.message)
+  );
+});
+
 test("duplicate message is ignored after first processing", async () => {
   const { manager, chatmailAdapter } = await createApplicationHarness({
     connectionState: TetiConnectionState.Confirmed,
@@ -90,7 +107,7 @@ test("duplicate message is ignored after first processing", async () => {
   const envelope = createApplicationEnvelope({
     type: "teti.presence",
     messageId: "incoming-message",
-    fromTetiId: "teti_remote",
+    fromTetiId: "teti_remote001",
     createdAt: fixedNow,
     payload: {
       status: "online",
@@ -101,14 +118,14 @@ test("duplicate message is ignored after first processing", async () => {
     {
       messageId: 1,
       chatId: 1,
-      fromAddress: "remote@mail.seep.im",
+      fromAddress: "remote001@mail.seep.im",
       text: serializeApplicationEnvelope(envelope),
       receivedAt: fixedNow
     },
     {
       messageId: 2,
       chatId: 1,
-      fromAddress: "remote@mail.seep.im",
+      fromAddress: "remote001@mail.seep.im",
       text: serializeApplicationEnvelope(envelope),
       receivedAt: fixedNow
     }
@@ -130,7 +147,7 @@ test("capability exchange is handled for confirmed connections", async () => {
   const envelope = createApplicationEnvelope({
     type: "teti.capability.offer",
     messageId: "capability-message",
-    fromTetiId: "teti_remote",
+    fromTetiId: "teti_remote001",
     createdAt: fixedNow,
     payload: {
       capabilities: ["coding", "research"]
@@ -139,7 +156,7 @@ test("capability exchange is handled for confirmed connections", async () => {
   chatmailAdapter.receivedMessages.push({
     messageId: 1,
     chatId: 1,
-    fromAddress: "remote@mail.seep.im",
+    fromAddress: "remote001@mail.seep.im",
     text: serializeApplicationEnvelope(envelope),
     receivedAt: fixedNow
   });
@@ -177,8 +194,8 @@ async function createApplicationHarness(input: {
 function createLocalAccount(): TetiAccount {
   return {
     version: 1,
-    id: "teti_local",
-    address: "local@mail.seep.im",
+    id: "teti_local0001",
+    address: "local0001@mail.seep.im",
     chatmailAccountId: 7,
     publicKey: "local-public-key",
     publicProfile: {
@@ -196,13 +213,13 @@ function createConnection(state: TetiConnectionState): TetiConnectionRecord {
     requestId: "request-1",
     state,
     direction: "outgoing",
-    remoteTetiId: "teti_remote",
-    remoteAddress: "remote@mail.seep.im",
+    remoteTetiId: "teti_remote001",
+    remoteAddress: "remote001@mail.seep.im",
     request: {
       version: 1,
       requestId: "request-1",
-      fromTetiId: "teti_local",
-      fromAddress: "local@mail.seep.im",
+      fromTetiId: "teti_local0001",
+      fromAddress: "local0001@mail.seep.im",
       publicKey: "local-public-key",
       profile: {
         platform: "macOS",

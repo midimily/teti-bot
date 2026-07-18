@@ -7,12 +7,19 @@ import { createDesktopAccountLifecycle } from "./provisioning/index.ts";
 import { readProvisioningMode, type ProvisioningModeConfig } from "./provisioning/modes.ts";
 import { TauriNotchWindowController, visualModeForViewModel } from "./platform/tauri-notch-window.ts";
 import type { TauriInvoker } from "./platform/tauri-api.ts";
-import { LifecycleBridgeClient } from "./provisioning/bridge-lifecycle.ts";
+import {
+  BridgeDiscoveryHeartbeatClient,
+  LifecycleBridgeClient
+} from "./provisioning/bridge-lifecycle.ts";
 import {
   BridgePeerConnectionClient,
   MockPeerConnectionClient,
   PeerConnectionController
 } from "./connections/controller.ts";
+import {
+  DiscoveryHeartbeatController,
+  shouldRunDiscoveryHeartbeat
+} from "./discovery/heartbeat.ts";
 import "./styles.css";
 
 export interface DesktopAppOptions {
@@ -27,6 +34,7 @@ export interface DesktopApp {
   connections: PeerConnectionController;
   config: ProvisioningModeConfig;
   render(): void;
+  dispose(): void;
 }
 
 export async function createDesktopApp(options: DesktopAppOptions): Promise<DesktopApp> {
@@ -36,6 +44,8 @@ export async function createDesktopApp(options: DesktopAppOptions): Promise<Desk
   const notchWindow = new TauriNotchWindowController(options.tauri);
   let app: DesktopApp;
   let connectionsInitialized = false;
+  let disposed = false;
+  let stopFocusListener: (() => void) | undefined;
   const baseSchedule = options.schedule ?? ((callback: () => void, delayMs: number) => setTimeout(callback, delayMs));
   const coordinator = new FirstLaunchCoordinator({
     accountLifecycle: selection.lifecycle,
@@ -54,6 +64,18 @@ export async function createDesktopApp(options: DesktopAppOptions): Promise<Desk
     notchWindow,
     onChange: () => app?.render()
   });
+  const discoveryHeartbeat = selection.config.mode === "real"
+    ? new DiscoveryHeartbeatController({
+        client: new BridgeDiscoveryHeartbeatClient(new LifecycleBridgeClient(options.tauri)),
+        onFailure: () => console.warn("Teti discovery heartbeat failed; retrying on the next interval.")
+      })
+    : undefined;
+
+  if (options.tauri.onFocusChanged) {
+    stopFocusListener = await options.tauri.onFocusChanged((focused) => {
+      if (!focused) connections.dismissFromOutside();
+    });
+  }
 
   app = {
     coordinator,
@@ -64,7 +86,16 @@ export async function createDesktopApp(options: DesktopAppOptions): Promise<Desk
         connectionsInitialized = true;
         void connections.initialize();
       }
+      if (!disposed && shouldRunDiscoveryHeartbeat(coordinator.snapshot, selection.config.mode)) {
+        discoveryHeartbeat?.start();
+      }
       renderSnapshot(options.root, coordinator.snapshot, selection.config, coordinator, connections);
+    },
+    dispose: () => {
+      if (disposed) return;
+      disposed = true;
+      stopFocusListener?.();
+      discoveryHeartbeat?.stop();
     }
   };
 
@@ -108,15 +139,26 @@ function createIsland(
 
   const face = document.createElement(viewModel.panel === "collapsed" && connections ? "button" : "div");
   face.className = `teti-face teti-face--${viewModel.character}`;
+  face.innerHTML = '<div class="teti-eye"></div><div class="teti-eye"></div>';
   if (face instanceof HTMLButtonElement) {
     face.type = "button";
-    face.setAttribute("aria-label", "打开 Teti 建联");
-    face.setAttribute("title", "打开 Teti 建联");
+    const pendingCount = connections?.snapshot.connections.filter(
+      (connection) => connection.state === "PendingApproval"
+    ).length ?? 0;
+    const openLabel = pendingCount > 0 ? `打开 Teti 建联，${pendingCount} 个请求待确认` : "打开 Teti 建联";
+    face.setAttribute("aria-label", openLabel);
+    face.setAttribute("title", openLabel);
+    if (pendingCount > 0) {
+      face.classList.add("teti-face--attention");
+      const indicator = document.createElement("span");
+      indicator.className = "teti-pending-indicator";
+      indicator.setAttribute("aria-hidden", "true");
+      face.append(indicator);
+    }
     face.addEventListener("click", () => connections?.open());
   } else {
     face.setAttribute("aria-hidden", "true");
   }
-  face.innerHTML = '<div class="teti-eye"></div><div class="teti-eye"></div>';
   island.append(face);
 
   if (viewModel.panel === "collapsed") {
@@ -279,32 +321,36 @@ function createConnectionIsland(
   input.autocapitalize = "none";
   input.spellcheck = false;
   input.setAttribute("aria-label", "Teti 公开身份");
-  input.addEventListener("focus", () => controller.beginInteraction());
-  input.addEventListener("blur", () => controller.endInteraction());
+  input.setAttribute("aria-describedby", "teti-connect-input-error");
+  const inputError = document.createElement("p");
+  inputError.id = "teti-connect-input-error";
+  inputError.className = "teti-error teti-connect-input-error";
+  inputError.setAttribute("role", "alert");
+  inputError.textContent = snapshot.inputError ?? "";
+  inputError.hidden = !snapshot.inputError;
+  input.addEventListener("focus", () => controller.noteActivity());
   input.addEventListener("input", () => {
     controller.updateInput(input.value);
-    const normalized = controller.snapshot.input;
-    if (input.value !== normalized) input.value = normalized;
-    connect.disabled = snapshot.busy || !/^[a-z0-9]{9}$/.test(normalized);
+    const current = controller.snapshot;
+    if (input.value !== current.input) input.value = current.input;
+    inputError.textContent = current.inputError ?? "";
+    inputError.hidden = !current.inputError;
+    connect.disabled = current.busy || Boolean(current.inputError) || !/^[a-z0-9]{9}$/.test(current.input);
   });
   const connect = document.createElement("button");
   connect.className = "teti-connect-button";
   connect.type = "submit";
-  connect.disabled = snapshot.busy || !/^[a-z0-9]{9}$/.test(snapshot.input);
+  connect.disabled = snapshot.busy || Boolean(snapshot.inputError) || !/^[a-z0-9]{9}$/.test(snapshot.input);
   connect.setAttribute("title", "发送建联请求");
   connect.setAttribute("aria-label", "发送建联请求");
   connect.append(createElement(Link2, { width: 19, height: 19, "stroke-width": 2, "aria-hidden": "true" }));
   form.append(input, connect);
-  form.addEventListener("pointerenter", () => controller.beginInteraction());
-  form.addEventListener("pointerleave", () => {
-    if (document.activeElement !== input) controller.endInteraction();
-  });
   form.addEventListener("submit", (event) => {
     event.preventDefault();
     void controller.connect();
   });
 
-  content.append(title, message, form);
+  content.append(title, message, form, inputError);
   if (snapshot.error) {
     const error = document.createElement("p");
     error.className = "teti-error teti-connect-error";
@@ -339,8 +385,32 @@ function createConnectionIsland(
   }
 
   island.append(face, content);
+  installConnectionPanelInteractions(island, controller);
   focusAfterPanelExpansion(input);
   return island;
+}
+
+function installConnectionPanelInteractions(
+  island: HTMLElement,
+  controller: PeerConnectionController
+): void {
+  island.addEventListener("pointerenter", () => controller.beginInteraction());
+  island.addEventListener("pointerleave", () => controller.endInteraction());
+  island.addEventListener("pointerdown", () => controller.noteActivity());
+  island.addEventListener("keydown", (event) => {
+    controller.noteActivity();
+    if (event.key !== "Escape") return;
+    event.preventDefault();
+    event.stopPropagation();
+    const openHeaderPanel = island.querySelector<HTMLElement>(".teti-header-panel:not([hidden])");
+    if (openHeaderPanel) {
+      openHeaderPanel.hidden = true;
+      island.querySelectorAll<HTMLButtonElement>(".teti-header-icon[aria-expanded='true']")
+        .forEach((button) => button.setAttribute("aria-expanded", "false"));
+      return;
+    }
+    controller.close("peer-panel-escape");
+  });
 }
 
 function focusAfterPanelExpansion(input: HTMLInputElement): void {

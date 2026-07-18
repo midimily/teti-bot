@@ -1,3 +1,8 @@
+import {
+  normalizeTetiPublicId,
+  tetiPublicIdFromAddress
+} from "../identity/public-id.ts";
+
 export const TETI_ACCOUNT_VERSION = 1;
 
 export interface TetiPublicProfile {
@@ -87,29 +92,11 @@ export function createDefaultPublicProfile(
 }
 
 export function getTetiIdFromAddress(address: string): string {
-  const [localPart] = address.split("@");
-  if (!localPart) {
-    throw new Error("Cannot derive Teti id from empty address.");
-  }
-
-  if (localPart.startsWith("teti_")) {
-    return normalizeTetiId(localPart);
-  }
-
-  return normalizeTetiId(`teti_${localPart}`);
+  return tetiPublicIdFromAddress(address);
 }
 
 export function getTetiId(account: Pick<TetiAccount, "id" | "address">): string {
-  return account.id || getTetiIdFromAddress(account.address);
-}
-
-function normalizeTetiId(id: string): string {
-  const safeId = id.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 64);
-  if (!/^teti_[A-Za-z0-9_-]{3,59}$/.test(safeId)) {
-    throw new Error("Cannot derive valid Teti id from address.");
-  }
-
-  return safeId;
+  return account.id ? normalizeTetiPublicId(account.id) : getTetiIdFromAddress(account.address);
 }
 
 function detectPlatform(): string {

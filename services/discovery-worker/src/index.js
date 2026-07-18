@@ -4,7 +4,8 @@ const MAX_JSON_BYTES = 16 * 1024;
 const MAX_PUBLIC_PROFILE_BYTES = 4 * 1024;
 const MAX_PUBLIC_KEY_BYTES = 12 * 1024;
 const MAX_DISPLAY_NAME_CHARACTERS = 10;
-const ID_PATTERN = /^teti_[A-Za-z0-9_-]{3,59}$/;
+const ID_PATTERN = /^teti_[a-z0-9]{9}$/;
+const CHATMAIL_LOCAL_PART_PATTERN = /^[a-z0-9]{9}$/;
 const CHATMAIL_DOMAIN = "mail.seep.im";
 const PRIVATE_FIELD_NAMES = new Set([
   "privateKey",
@@ -178,11 +179,12 @@ async function discoverIdentities(env) {
 }
 
 async function getIdentityProfile(env, id) {
-  if (!isValidId(id)) {
+  const canonicalId = typeof id === "string" ? id.toLowerCase() : id;
+  if (!isValidId(canonicalId)) {
     throw new RegistryError(400, "INVALID_ID", "Invalid Teti ID.");
   }
 
-  const record = await readIdentity(env, registryKey(id));
+  const record = await readIdentity(env, registryKey(canonicalId));
   if (!record) {
     throw new RegistryError(404, "IDENTITY_NOT_FOUND", "Identity not found.");
   }
@@ -223,11 +225,15 @@ function validateRegistration(input) {
   }
 
   if (!isValidId(input.id)) {
-    return invalid("id must match teti_ followed by 3 to 59 safe characters.");
+    return invalid("id must match teti_ followed by exactly 9 ASCII lowercase letters or numbers.");
   }
 
   if (!isValidAddress(input.address)) {
-    return invalid("address must be a valid mail.seep.im chatmail address.");
+    return invalid("address must use a 9-character ASCII lowercase mail.seep.im local part.");
+  }
+
+  if (!addressMatchesId(input.address, input.id)) {
+    return invalid("address local part must match the 9-character Teti public ID code.");
   }
 
   if (input.displayName !== undefined && !isValidDisplayName(input.displayName)) {
@@ -257,7 +263,7 @@ function validateHeartbeat(input) {
   }
 
   if (!isValidId(input.id)) {
-    return invalid("id must match teti_ followed by 3 to 59 safe characters.");
+    return invalid("id must match teti_ followed by exactly 9 ASCII lowercase letters or numbers.");
   }
 
   if (input.publicProfile !== undefined && !isValidPublicProfile(input.publicProfile)) {
@@ -286,8 +292,13 @@ function isValidAddress(address) {
   return (
     domain === CHATMAIL_DOMAIN &&
     typeof localPart === "string" &&
-    /^[A-Za-z0-9._%+-]{1,64}$/.test(localPart)
+    CHATMAIL_LOCAL_PART_PATTERN.test(localPart)
   );
+}
+
+function addressMatchesId(address, id) {
+  const [localPart] = address.split("@");
+  return id === `teti_${localPart}`;
 }
 
 function isValidPublicKey(publicKey) {
@@ -466,7 +477,7 @@ async function readIdentity(env, key) {
 }
 
 function registryKey(id) {
-  return `teti:${id}`;
+  return `teti:${id.toLowerCase()}`;
 }
 
 function normalizePathname(pathname) {

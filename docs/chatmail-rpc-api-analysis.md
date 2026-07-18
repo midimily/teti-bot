@@ -320,7 +320,7 @@ Creation requirements:
 - Domain must match configured `mail_domain`.
 - Local part length must be between `username_min_length` and `username_max_length`.
 
-### How Teti Should Create `teti_xxx@mail.seep.im`
+### Why the historical `teti_xxx@mail.seep.im` placeholder is invalid
 
 With the current relay config, Teti should not assume it can create `teti_xxx@mail.seep.im`.
 
@@ -339,7 +339,9 @@ Viable options:
 Recommendation for V1:
 
 - Use random or 9-character compliant chatmail addresses.
+- Define the canonical public ID as `teti_` plus that lowercase 9-character local part; the `teti_` prefix is not part of the Chatmail address.
 - Put Teti semantics in public profile/discovery, not in the email local part.
+- Apply the authoritative boundary rules in [`teti-public-id.md`](teti-public-id.md).
 
 ## Comparison With Current Teti Adapter
 

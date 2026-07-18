@@ -1,7 +1,12 @@
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
-import { getTetiIdFromAddress, type TetiAccount } from "./model.ts";
+import {
+  isCanonicalTetiChatmailAddress,
+  isCanonicalTetiPublicId,
+  normalizeTetiChatmailAddress
+} from "../identity/public-id.ts";
+import { getTetiId, getTetiIdFromAddress, type TetiAccount } from "./model.ts";
 
 export interface TetiAccountStorage {
   exists(): Promise<boolean>;
@@ -25,7 +30,8 @@ export class FileTetiAccountStorage implements TetiAccountStorage {
     try {
       const raw = await readFile(this.accountPath, "utf8");
       const account = JSON.parse(raw) as TetiAccount;
-      account.id ??= getTetiIdFromAddress(account.address);
+      account.address = normalizeTetiChatmailAddress(account.address);
+      account.id = account.id ? getTetiId(account) : getTetiIdFromAddress(account.address);
       validateStoredAccount(account);
       return account;
     } catch (error) {
@@ -99,12 +105,12 @@ function validateStoredAccount(account: TetiAccount): void {
     throw new Error("Unsupported Teti account version.");
   }
 
-  if (!account.id) {
-    throw new Error("Teti account id is required.");
+  if (!isCanonicalTetiPublicId(account.id)) {
+    throw new Error("Teti account id must be a canonical lowercase public ID.");
   }
 
-  if (!account.address) {
-    throw new Error("Teti account address is required.");
+  if (!isCanonicalTetiChatmailAddress(account.address, account.id)) {
+    throw new Error("Teti account address must be canonical lowercase and match its public ID.");
   }
 
   if (typeof account.chatmailAccountId !== "number") {

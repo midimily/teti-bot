@@ -6,8 +6,8 @@ test("register stores a public identity card with timestamps and ttl", async () 
   const env = createEnv();
   const response = await handleRequest(jsonRequest("https://registry.test/register", {
     version: 1,
-    id: "teti_a83kd9",
-    address: "yxmtewmvc@mail.seep.im",
+    id: "teti_a83kd9x2q",
+    address: "a83kd9x2q@mail.seep.im",
     displayName: "Milo",
     publicKey: "x".repeat(2048),
     publicProfile: {
@@ -20,20 +20,20 @@ test("register stores a public identity card with timestamps and ttl", async () 
   assert.equal(response.status, 201);
   const body = await response.json();
   assert.equal(body.success, true);
-  assert.equal(body.data.id, "teti_a83kd9");
-  assert.equal(body.data.address, "yxmtewmvc@mail.seep.im");
+  assert.equal(body.data.id, "teti_a83kd9x2q");
+  assert.equal(body.data.address, "a83kd9x2q@mail.seep.im");
   assert.equal(body.data.displayName, "Milo");
   assert.equal(body.data.privateKey, undefined);
-  assert.equal(JSON.parse(env.store.get("teti:teti_a83kd9")).displayName, "Milo");
-  assert.equal(env.putOptions.get("teti:teti_a83kd9").expirationTtl, 604800);
+  assert.equal(JSON.parse(env.store.get("teti:teti_a83kd9x2q")).displayName, "Milo");
+  assert.equal(env.putOptions.get("teti:teti_a83kd9x2q").expirationTtl, 604800);
 });
 
 test("register rejects private fields", async () => {
   const env = createEnv();
   const response = await handleRequest(jsonRequest("https://registry.test/register", {
     version: 1,
-    id: "teti_a83kd9",
-    address: "teti_a83kd9@mail.seep.im",
+    id: "teti_a83kd9x2q",
+    address: "a83kd9x2q@mail.seep.im",
     publicKey: "ed25519-public-key",
     publicProfile: {
       platform: "macOS",
@@ -46,12 +46,38 @@ test("register rejects private fields", async () => {
   assert.equal(body.success, false);
 });
 
+test("register rejects uppercase IDs instead of silently canonicalizing writes", async () => {
+  const env = createEnv();
+  const response = await handleRequest(jsonRequest("https://registry.test/register", {
+    version: 1,
+    id: "teti_A83KD9X2Q",
+    address: "a83kd9x2q@mail.seep.im",
+    publicProfile: { platform: "macOS" }
+  }), env);
+
+  assert.equal(response.status, 400);
+  assert.equal(env.store.size, 0);
+});
+
+test("register rejects an address that does not match the public ID code", async () => {
+  const env = createEnv();
+  const response = await handleRequest(jsonRequest("https://registry.test/register", {
+    version: 1,
+    id: "teti_a83kd9x2q",
+    address: "different@mail.seep.im",
+    publicProfile: { platform: "macOS" }
+  }), env);
+
+  assert.equal(response.status, 400);
+  assert.equal(env.store.size, 0);
+});
+
 test("register is idempotent for the same relay identity and refreshes ttl", async () => {
   const env = createEnv();
   const payload = {
     version: 1,
-    id: "teti_a83kd9",
-    address: "yxmtewmvc@mail.seep.im",
+    id: "teti_a83kd9x2q",
+    address: "a83kd9x2q@mail.seep.im",
     publicKey: "stable-public-key",
     publicProfile: { platform: "macOS" }
   };
@@ -61,15 +87,15 @@ test("register is idempotent for the same relay identity and refreshes ttl", asy
 
   assert.equal(retry.status, 200);
   assert.equal((await retry.json()).data.id, payload.id);
-  assert.equal(env.putOptions.get("teti:teti_a83kd9").expirationTtl, 604800);
+  assert.equal(env.putOptions.get("teti:teti_a83kd9x2q").expirationTtl, 604800);
 });
 
 test("registration retry backfills display name into an existing identity", async () => {
   const env = createEnv();
   const payload = {
     version: 1,
-    id: "teti_a83kd9",
-    address: "yxmtewmvc@mail.seep.im",
+    id: "teti_a83kd9x2q",
+    address: "a83kd9x2q@mail.seep.im",
     publicKey: "stable-public-key",
     publicProfile: { platform: "macOS" }
   };
@@ -82,15 +108,15 @@ test("registration retry backfills display name into an existing identity", asyn
 
   assert.equal(retry.status, 200);
   assert.equal((await retry.json()).data.displayName, "Milo");
-  assert.equal(JSON.parse(env.store.get("teti:teti_a83kd9")).displayName, "Milo");
+  assert.equal(JSON.parse(env.store.get("teti:teti_a83kd9x2q")).displayName, "Milo");
 });
 
 test("register rejects an invalid display name", async () => {
   const env = createEnv();
   const response = await handleRequest(jsonRequest("https://registry.test/register", {
     version: 1,
-    id: "teti_a83kd9",
-    address: "yxmtewmvc@mail.seep.im",
+    id: "teti_a83kd9x2q",
+    address: "a83kd9x2q@mail.seep.im",
     displayName: "12345678901",
     publicKey: "stable-public-key",
     publicProfile: { platform: "macOS" }
@@ -102,10 +128,10 @@ test("register rejects an invalid display name", async () => {
 
 test("heartbeat updates only updatedAt and refreshes ttl", async () => {
   const env = createEnv();
-  env.store.set("teti:teti_a83kd9", JSON.stringify({
+  env.store.set("teti:teti_a83kd9x2q", JSON.stringify({
     version: 1,
-    id: "teti_a83kd9",
-    address: "teti_a83kd9@mail.seep.im",
+    id: "teti_a83kd9x2q",
+    address: "a83kd9x2q@mail.seep.im",
     publicKey: "ed25519-public-key",
     publicProfile: { platform: "macOS" },
     createdAt: "2026-07-10T00:00:00.000Z",
@@ -113,7 +139,7 @@ test("heartbeat updates only updatedAt and refreshes ttl", async () => {
   }));
 
   const response = await handleRequest(jsonRequest("https://registry.test/heartbeat", {
-    id: "teti_a83kd9"
+    id: "teti_a83kd9x2q"
   }), env);
 
   assert.equal(response.status, 200);
@@ -121,15 +147,15 @@ test("heartbeat updates only updatedAt and refreshes ttl", async () => {
   assert.equal(body.data.createdAt, "2026-07-10T00:00:00.000Z");
   assert.notEqual(body.data.updatedAt, "2026-07-10T00:00:00.000Z");
   assert.deepEqual(body.data.publicProfile, { platform: "macOS" });
-  assert.equal(env.putOptions.get("teti:teti_a83kd9").expirationTtl, 604800);
+  assert.equal(env.putOptions.get("teti:teti_a83kd9x2q").expirationTtl, 604800);
 });
 
 test("heartbeat can update public AI environment and lastSeen", async () => {
   const env = createEnv();
-  env.store.set("teti:teti_a83kd9", JSON.stringify({
+  env.store.set("teti:teti_a83kd9x2q", JSON.stringify({
     version: 1,
-    id: "teti_a83kd9",
-    address: "teti_a83kd9@mail.seep.im",
+    id: "teti_a83kd9x2q",
+    address: "a83kd9x2q@mail.seep.im",
     publicKey: "ed25519-public-key",
     publicProfile: { platform: "macOS", aiEnvironment: ["Claude Code"] },
     lastSeen: "2026-07-10T00:00:00.000Z",
@@ -138,7 +164,7 @@ test("heartbeat can update public AI environment and lastSeen", async () => {
   }));
 
   const response = await handleRequest(jsonRequest("https://registry.test/heartbeat", {
-    id: "teti_a83kd9",
+    id: "teti_a83kd9x2q",
     publicProfile: {
       platform: "macOS",
       device: {
@@ -188,10 +214,10 @@ test("heartbeat can update public AI environment and lastSeen", async () => {
 
 test("heartbeat rejects private environment fields", async () => {
   const env = createEnv();
-  env.store.set("teti:teti_a83kd9", JSON.stringify({
+  env.store.set("teti:teti_a83kd9x2q", JSON.stringify({
     version: 1,
-    id: "teti_a83kd9",
-    address: "teti_a83kd9@mail.seep.im",
+    id: "teti_a83kd9x2q",
+    address: "a83kd9x2q@mail.seep.im",
     publicKey: "ed25519-public-key",
     publicProfile: { platform: "macOS" },
     createdAt: "2026-07-10T00:00:00.000Z",
@@ -199,7 +225,7 @@ test("heartbeat rejects private environment fields", async () => {
   }));
 
   const response = await handleRequest(jsonRequest("https://registry.test/heartbeat", {
-    id: "teti_a83kd9",
+    id: "teti_a83kd9x2q",
     publicProfile: {
       platform: "macOS",
       aiEnvironment: ["Claude Code"],
@@ -225,10 +251,10 @@ test("heartbeat rejects private environment fields", async () => {
 
 test("discover returns at most public identity fields", async () => {
   const env = createEnv();
-  env.store.set("teti:teti_a83kd9", JSON.stringify({
+  env.store.set("teti:teti_a83kd9x2q", JSON.stringify({
     version: 1,
-    id: "teti_a83kd9",
-    address: "teti_a83kd9@mail.seep.im",
+    id: "teti_a83kd9x2q",
+    address: "a83kd9x2q@mail.seep.im",
     publicKey: "ed25519-public-key",
     privateKey: "must-not-leak",
     publicProfile: { platform: "macOS" },
@@ -249,6 +275,24 @@ test("profile validates id", async () => {
   const response = await handleRequest(new Request("https://registry.test/profile/not-safe"), env);
 
   assert.equal(response.status, 400);
+});
+
+test("profile lookup accepts human uppercase input but reads the canonical lowercase KV key", async () => {
+  const env = createEnv();
+  env.store.set("teti:teti_a83kd9x2q", JSON.stringify({
+    version: 1,
+    id: "teti_a83kd9x2q",
+    address: "a83kd9x2q@mail.seep.im",
+    publicProfile: { platform: "macOS" }
+  }));
+
+  const response = await handleRequest(
+    new Request("https://registry.test/profile/teti_A83KD9X2Q"),
+    env
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).data.id, "teti_a83kd9x2q");
 });
 
 function jsonRequest(url, body) {

@@ -477,6 +477,7 @@ pub fn timeout_for_method(method: &str) -> Duration {
         "account.status" | "account.load" => 5_000,
         "account.create" => 120_000,
         "discovery.register" | "discovery.retry" => 15_000,
+        "discovery.heartbeat" => 30_000,
         "connection.resolve" => 15_000,
         "connection.request" | "connection.accept" | "connection.reject" => 30_000,
         "connection.poll" => 20_000,
@@ -494,6 +495,7 @@ fn is_allowed_method(method: &str) -> bool {
             | "account.create"
             | "discovery.register"
             | "discovery.retry"
+            | "discovery.heartbeat"
             | "connection.resolve"
             | "connection.request"
             | "connection.list"
@@ -583,6 +585,7 @@ mod tests {
 
     #[test]
     fn timeout_values_are_method_specific() {
+        assert!(is_allowed_method("discovery.heartbeat"));
         assert_eq!(
             timeout_for_method("lifecycle.health"),
             Duration::from_millis(2_000)
@@ -598,6 +601,10 @@ mod tests {
         assert_eq!(
             timeout_for_method("discovery.retry"),
             Duration::from_millis(15_000)
+        );
+        assert_eq!(
+            timeout_for_method("discovery.heartbeat"),
+            Duration::from_millis(30_000)
         );
     }
 

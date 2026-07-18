@@ -10,8 +10,8 @@ test("discovers public Teti identities from the registry", async () => {
     registry: new StaticRegistry([
       {
         version: 1,
-        id: "teti_alex",
-        address: "alex@mail.seep.im",
+        id: "teti_alex00001",
+        address: "alex00001@mail.seep.im",
         displayName: "Alex",
         publicKey: "public-key",
         publicProfile: {
@@ -21,8 +21,8 @@ test("discovers public Teti identities from the registry", async () => {
       },
       {
         version: 1,
-        id: "teti_blair",
-        address: "blair@mail.seep.im",
+        id: "teti_blair0001",
+        address: "blair0001@mail.seep.im",
         publicProfile: {
           platform: "Windows"
         }
@@ -34,8 +34,8 @@ test("discovers public Teti identities from the registry", async () => {
 
   assert.deepEqual(identities, [
     {
-      id: "teti_alex",
-      address: "alex@mail.seep.im",
+      id: "teti_alex00001",
+      address: "alex00001@mail.seep.im",
       displayName: "Alex",
       publicKey: "public-key",
       publicProfile: {
@@ -53,8 +53,8 @@ test("fetches a Teti profile by id", async () => {
     registry: new StaticRegistry([
       {
         version: 1,
-        id: "teti_profile",
-        address: "profile@mail.seep.im",
+        id: "teti_profile01",
+        address: "profile01@mail.seep.im",
         publicProfile: {
           category: ["developer"]
         }
@@ -62,9 +62,9 @@ test("fetches a Teti profile by id", async () => {
     ])
   });
 
-  assert.deepEqual(await service.getTetiProfile("teti_profile"), {
-    id: "teti_profile",
-    address: "profile@mail.seep.im",
+  assert.deepEqual(await service.getTetiProfile("teti_profile01"), {
+    id: "teti_profile01",
+    address: "profile01@mail.seep.im",
     displayName: undefined,
     publicKey: undefined,
     publicProfile: {
@@ -73,7 +73,7 @@ test("fetches a Teti profile by id", async () => {
     createdAt: undefined,
     updatedAt: undefined
   });
-  assert.equal(await service.getTetiProfile("missing"), null);
+  assert.equal(await service.getTetiProfile("teti_missing00"), null);
 });
 
 test("calculates deterministic compatibility scores", () => {
@@ -85,16 +85,16 @@ test("calculates deterministic compatibility scores", () => {
     },
     remoteTetis: [
       {
-        id: "teti_low",
-        address: "low@mail.seep.im",
+        id: "teti_low000001",
+        address: "low000001@mail.seep.im",
         publicProfile: {
           platform: "Windows",
           aiEnvironment: ["Codex"]
         }
       },
       {
-        id: "teti_high",
-        address: "high@mail.seep.im",
+        id: "teti_high00001",
+        address: "high00001@mail.seep.im",
         publicKey: "public-key",
         publicProfile: {
           platform: "macOS",
@@ -105,7 +105,7 @@ test("calculates deterministic compatibility scores", () => {
     ]
   });
 
-  assert.equal(matches[0].identity.id, "teti_high");
+  assert.equal(matches[0].identity.id, "teti_high00001");
   assert.equal(matches[0].score, 65);
   assert.deepEqual(matches[0].reasons, [
     "same platform: macOS",
@@ -113,7 +113,7 @@ test("calculates deterministic compatibility scores", () => {
     "shared category: developer",
     "public key available"
   ]);
-  assert.equal(matches[1].identity.id, "teti_low");
+  assert.equal(matches[1].identity.id, "teti_low000001");
   assert.equal(matches[1].score, 0);
 });
 
@@ -136,12 +136,12 @@ test("prepares a public connection request draft without sending a message", () 
   assert.deepEqual(
     service.prepareConnectionRequest({
       local: {
-        id: "teti_local",
-        address: "local@mail.seep.im"
+        id: "teti_local0001",
+        address: "local0001@mail.seep.im"
       },
       remote: {
-        id: "teti_remote",
-        address: "remote@mail.seep.im",
+        id: "teti_remote001",
+        address: "remote001@mail.seep.im",
         publicKey: "remote-public-key",
         publicProfile: {}
       },
@@ -151,13 +151,13 @@ test("prepares a public connection request draft without sending a message", () 
     }),
     {
       to: {
-        id: "teti_remote",
-        address: "remote@mail.seep.im",
+        id: "teti_remote001",
+        address: "remote001@mail.seep.im",
         publicKey: "remote-public-key"
       },
       from: {
-        id: "teti_local",
-        address: "local@mail.seep.im"
+        id: "teti_local0001",
+        address: "local0001@mail.seep.im"
       },
       intent: "connect",
       publicContext: {

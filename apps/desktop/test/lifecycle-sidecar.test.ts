@@ -106,6 +106,31 @@ test("sidecar discovery retry registers existing account without creating anothe
   assert.equal(deps.createCalls.length, 0);
 });
 
+test("sidecar discovery heartbeat refreshes the local public profile and registry activity", async () => {
+  const deps = fakeDependencies({ account: createAccount("Milo") });
+  const response = await handleLifecycleRequest(request("discovery.heartbeat"), deps);
+
+  assert.equal(response.ok, true);
+  assert.equal(deps.heartbeatCalls, 1);
+  assert.equal(
+    response.ok && response.result?.publicProfile.lastSeen,
+    "2026-07-18T00:00:00.000Z"
+  );
+});
+
+test("sidecar keeps discovery heartbeat failures distinct from registration failures", async () => {
+  const deps = fakeDependencies({ account: createAccount("Milo") });
+  deps.heartbeatDiscovery = async () => {
+    throw new Error("registry fetch timeout");
+  };
+
+  const response = await handleLifecycleRequest(request("discovery.heartbeat"), deps);
+
+  assert.equal(response.ok, false);
+  assert.equal(!response.ok && response.error.code, "DISCOVERY_HEARTBEAT_FAILED");
+  assert.equal(!response.ok && response.error.retryTarget, "discovery.heartbeat");
+});
+
 test("sidecar routes peer resolution and connection polling through the bounded bridge", async () => {
   const deps = fakeDependencies({ account: createAccount("Milo") });
   const resolved = await handleLifecycleRequest(request("connection.resolve", { query: "076bm9evq" }), deps);
@@ -132,14 +157,20 @@ function request(method: LifecycleRequest["method"], params: Record<string, unkn
 function fakeDependencies(options: { account?: TetiAccount | null } = {}): LifecycleSidecarDependencies & {
   createCalls: string[];
   registerCalls: TetiAccount[];
+  heartbeatCalls: number;
 } {
   const createCalls: string[] = [];
   const registerCalls: TetiAccount[] = [];
   let account = options.account ?? null;
 
-  return {
+  const dependencies: LifecycleSidecarDependencies & {
+    createCalls: string[];
+    registerCalls: TetiAccount[];
+    heartbeatCalls: number;
+  } = {
     createCalls,
     registerCalls,
+    heartbeatCalls: 0,
     async loadTetiAccount() {
       return account ? clone(account) : null;
     },
@@ -158,13 +189,22 @@ function fakeDependencies(options: { account?: TetiAccount | null } = {}): Lifec
     async registerDiscovery(existing: TetiAccount) {
       registerCalls.push(clone(existing));
     },
+    async heartbeatDiscovery() {
+      if (!account) throw new Error("A local Teti account is required.");
+      account.publicProfile = {
+        ...account.publicProfile,
+        lastSeen: "2026-07-18T00:00:00.000Z"
+      };
+      dependencies.heartbeatCalls += 1;
+      return clone(account);
+    },
     async getPeerConnectionService() {
       const empty = { connections: [], receivedCount: 0, heartbeatCount: 0 } as const;
       return {
         async resolve(query: string) {
           return {
             id: `teti_${query}`,
-            address: "remote@mail.seep.im",
+            address: `${query}@mail.seep.im`,
             publicKey: "remote-public-key",
             publicProfile: {}
           };
@@ -177,13 +217,15 @@ function fakeDependencies(options: { account?: TetiAccount | null } = {}): Lifec
       };
     }
   };
+  return dependencies;
 }
 
 function createAccount(displayName: string): TetiAccount {
+  const publicIdCode = "milo00000";
   return {
     version: 1,
-    id: `teti_${displayName.toLowerCase()}`,
-    address: `${displayName.toLowerCase()}@mail.seep.im`,
+    id: `teti_${publicIdCode}`,
+    address: `${publicIdCode}@mail.seep.im`,
     displayName,
     chatmailAccountId: 7,
     publicKey: "public-key",

@@ -1,5 +1,6 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import type { TetiAccount } from "../account/model.ts";
+import { isCanonicalTetiPublicId } from "../identity/public-id.ts";
 import {
   TETI_CONNECTION_VERSION,
   type TetiConnectionEnvelope,
@@ -202,7 +203,7 @@ export function validateConnectionRequest(value: unknown): asserts value is Teti
   }
 
   requireNonEmptyString(value.requestId, "requestId");
-  requireNonEmptyString(value.fromTetiId, "fromTetiId");
+  requireCanonicalPublicId(value.fromTetiId, "fromTetiId");
   requireNonEmptyString(value.fromAddress, "fromAddress");
   requireNonEmptyString(value.createdAt, "createdAt");
   requireNonEmptyString(value.nonce, "nonce");
@@ -230,7 +231,7 @@ export function validateConnectionAccept(value: unknown): asserts value is TetiC
   }
 
   requireNonEmptyString(value.requestId, "requestId");
-  requireNonEmptyString(value.fromTetiId, "fromTetiId");
+  requireCanonicalPublicId(value.fromTetiId, "fromTetiId");
   requireNonEmptyString(value.fromAddress, "fromAddress");
   requireNonEmptyString(value.createdAt, "createdAt");
   requireNonEmptyString(value.nonce, "nonce");
@@ -266,6 +267,14 @@ export function rejectPrivateFields(value: Record<string, unknown>, label: strin
     if (value[field] !== undefined) {
       throw new TetiConnectionProtocolError(`${label} must not contain ${field}.`);
     }
+  }
+}
+
+function requireCanonicalPublicId(value: unknown, fieldName: string): asserts value is string {
+  if (!isCanonicalTetiPublicId(value)) {
+    throw new TetiConnectionProtocolError(
+      `${fieldName} must match teti_ followed by exactly 9 ASCII lowercase letters or numbers.`
+    );
   }
 }
 

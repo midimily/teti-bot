@@ -13,11 +13,11 @@ Current run date: 2026-07-15.
 | RPC install/build | NOT TESTED | PASS: repo-local RPC verified at 2.54.0-dev |
 | Frontend build | NOT TESTED | PASS: `npm run desktop:build` |
 | Desktop typecheck | NOT TESTED | PASS: `npm run desktop:typecheck` |
-| Desktop tests | NOT TESTED | PASS: 42/42 |
-| Root tests | NOT TESTED | PASS: 117/117 |
+| Desktop tests | NOT TESTED | PASS: 72/72 |
+| Root tests | NOT TESTED | PASS: 176/176 |
 | Cargo fmt check | NOT TESTED | PASS |
 | Cargo check | NOT TESTED | PASS |
-| Cargo test | NOT TESTED | PASS: 9/9 Rust tests |
+| Cargo test | NOT TESTED | PASS: 15/15 Rust tests |
 | Tauri build | NOT TESTED | PASS: generated `Teti.app` |
 | `.app` bundle exists | NOT TESTED | PASS: `apps/desktop/src-tauri/target/release/bundle/macos/Teti.app` |
 | `.app` launch | NOT TESTED | PASS: launched via `open` |
@@ -39,10 +39,10 @@ Current run date: 2026-07-15.
 | Transparency | NOT TESTED | NOT TESTED |
 | Borderless behavior | NOT TESTED | PASS: native config uses `decorations(false)` |
 | Always-on-top | NOT TESTED | PASS: native config uses `always_on_top(true)` |
-| Click handling | NOT TESTED | NOT TESTED |
+| Click handling | NOT TESTED | PASS: focus-loss collapse and inactivity policy covered by controller tests; manual cross-app click pending |
 | Input focus | NOT TESTED | PASS: covered by render code; no manual IME run |
 | Chinese input method | NOT TESTED | NOT TESTED |
-| Escape behavior | NOT TESTED | NOT TESTED |
+| Escape behavior | NOT TESTED | PASS: connection panel handles popover-first Escape and panel collapse; manual native run pending |
 | Return behavior | NOT TESTED | PASS: submit handler covered by code path; no manual UI screenshot |
 | Mission Control | NOT TESTED | NOT TESTED |
 | Spaces | NOT TESTED | NOT TESTED |
@@ -61,7 +61,7 @@ Current run date: 2026-07-15.
 | Sleep/wake | NOT TESTED | NOT TESTED |
 | Lock/unlock | NOT TESTED | NOT TESTED |
 | Built-in display | NOT TESTED | NOT TESTED |
-| Physical notch display | NOT TESTED | NOT TESTED |
+| Physical notch display | NOT TESTED | NOT TESTED: adaptive safe-row layout and native height policy covered programmatically; physical display pending |
 | External display | NOT TESTED | NOT TESTED |
 | Disconnect external display | NOT TESTED | NOT TESTED |
 | Reconnect external display | NOT TESTED | NOT TESTED |

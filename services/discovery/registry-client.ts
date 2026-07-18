@@ -2,6 +2,11 @@ import type {
   DiscoveryHeartbeatPayload,
   DiscoveryRegistrationPayload
 } from "../../core/account/model.ts";
+import {
+  isCanonicalTetiChatmailAddress,
+  isCanonicalTetiPublicId,
+  normalizeTetiPublicId
+} from "../../core/identity/public-id.ts";
 
 export const DEFAULT_TETI_REGISTRY_URL = "https://teti-registry.seep2026.workers.dev";
 export const TETI_REGISTRY_URL_ENV = "TETI_REGISTRY_URL";
@@ -41,6 +46,8 @@ export class RegistryDiscoveryClient implements DiscoveryClient {
   }
 
   async registerIdentity(payload: DiscoveryRegistrationPayload): Promise<DiscoveryIdentity> {
+    requireCanonicalRegistrationId(payload.id);
+    requireCanonicalRegistrationAddress(payload.address, payload.id);
     try {
       const identity = await this.request<DiscoveryIdentity>("/register", {
         method: "POST",
@@ -66,6 +73,7 @@ export class RegistryDiscoveryClient implements DiscoveryClient {
   }
 
   async heartbeatIdentity(payload: DiscoveryHeartbeatPayload): Promise<DiscoveryIdentity> {
+    requireCanonicalRegistrationId(payload.id);
     return this.request<DiscoveryIdentity>("/heartbeat", {
       method: "POST",
       body: JSON.stringify(payload)
@@ -73,8 +81,9 @@ export class RegistryDiscoveryClient implements DiscoveryClient {
   }
 
   async getIdentity(id: string): Promise<DiscoveryIdentity | null> {
+    const canonicalId = normalizeTetiPublicId(id);
     try {
-      return await this.request<DiscoveryIdentity>(`/profile/${encodeURIComponent(id)}`, {
+      return await this.request<DiscoveryIdentity>(`/profile/${encodeURIComponent(canonicalId)}`, {
         method: "GET"
       });
     } catch (error) {
@@ -95,7 +104,8 @@ export class RegistryDiscoveryClient implements DiscoveryClient {
   }
 
   async deleteIdentity(id: string): Promise<void> {
-    await this.request<void>(`/profile/${encodeURIComponent(id)}`, {
+    const canonicalId = normalizeTetiPublicId(id);
+    await this.request<void>(`/profile/${encodeURIComponent(canonicalId)}`, {
       method: "DELETE"
     });
   }
@@ -119,6 +129,18 @@ export class RegistryDiscoveryClient implements DiscoveryClient {
     }
 
     return body.data as TData;
+  }
+}
+
+function requireCanonicalRegistrationId(id: string): void {
+  if (!isCanonicalTetiPublicId(id)) {
+    throw new Error("Registry writes require a canonical lowercase 9-character Teti public ID.");
+  }
+}
+
+function requireCanonicalRegistrationAddress(address: string, id: string): void {
+  if (!isCanonicalTetiChatmailAddress(address, id)) {
+    throw new Error("Registry writes require a matching lowercase 9-character mail.seep.im address.");
   }
 }
 

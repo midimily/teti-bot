@@ -32,6 +32,7 @@ export interface LifecycleSidecarDependencies {
   createTetiAccount(input: { name: string }): Promise<TetiAccount>;
   getTetiStatus(): Promise<TetiStatus>;
   registerDiscovery(account: TetiAccount): Promise<unknown>;
+  heartbeatDiscovery(): Promise<TetiAccount>;
   getPeerConnectionService(): Promise<PeerConnectionService>;
 }
 
@@ -47,6 +48,7 @@ export const defaultLifecycleSidecarDependencies: LifecycleSidecarDependencies =
     await new RegistryDiscoveryClient().registerIdentity(toDiscoveryRegistrationPayload(account));
     await markDiscoveryRegistrationComplete(account);
   },
+  heartbeatDiscovery: async () => (await getDefaultAccountManager()).refreshTetiEnvironment(),
   getPeerConnectionService: getDefaultPeerConnectionService
 };
 
@@ -126,6 +128,9 @@ async function dispatchLifecycleRequest(
       await dependencies.registerDiscovery(account);
       return statusToDto(await dependencies.getTetiStatus(), account);
     }
+
+    case "discovery.heartbeat":
+      return publicAccount(await dependencies.heartbeatDiscovery());
 
     case "connection.resolve":
       return (await dependencies.getPeerConnectionService()).resolve(validateConnectionQuery(request.params?.query));
@@ -279,6 +284,8 @@ function fallbackCodeForMethod(method: LifecycleRequest["method"]) {
     case "discovery.register":
     case "discovery.retry":
       return "DISCOVERY_REGISTRATION_FAILED";
+    case "discovery.heartbeat":
+      return "DISCOVERY_HEARTBEAT_FAILED";
     case "connection.resolve":
       return "CONNECTION_RESOLVE_FAILED";
     case "connection.request":

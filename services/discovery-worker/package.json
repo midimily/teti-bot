@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "audit:ids": "node scripts/audit-kv-public-ids.mjs",
     "test": "node --test"
   }
 }
-

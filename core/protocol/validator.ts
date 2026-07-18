@@ -3,6 +3,7 @@ import {
   type TetiApplicationEnvelope,
   type TetiApplicationMessageType
 } from "./types.ts";
+import { isCanonicalTetiPublicId } from "../identity/public-id.ts";
 
 export class TetiApplicationProtocolError extends Error {}
 
@@ -24,7 +25,11 @@ export function validateApplicationEnvelope(
   }
 
   requireNonEmptyString(value.messageId, "messageId");
-  requireNonEmptyString(value.fromTetiId, "fromTetiId");
+  if (!isCanonicalTetiPublicId(value.fromTetiId)) {
+    throw new TetiApplicationProtocolError(
+      "fromTetiId must match teti_ followed by exactly 9 ASCII lowercase letters or numbers."
+    );
+  }
   requireNonEmptyString(value.createdAt, "createdAt");
 
   if (!isRecord(value.payload)) {

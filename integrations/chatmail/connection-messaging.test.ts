@@ -28,7 +28,7 @@ test("connection messaging sends request envelopes through chatmail adapter", as
 
   const sent = await messaging.sendConnectionRequest({
     accountId: 3,
-    toAddress: "remote@mail.seep.im",
+    toAddress: "remote001@mail.seep.im",
     toPublicKey: "remote-public-key",
     request
   });
@@ -39,7 +39,7 @@ test("connection messaging sends request envelopes through chatmail adapter", as
   });
   assert.equal(chatmailAdapter.sendCalls.length, 1);
   assert.equal(chatmailAdapter.sendCalls[0].accountId, 3);
-  assert.equal(chatmailAdapter.sendCalls[0].peerAddress, "remote@mail.seep.im");
+  assert.equal(chatmailAdapter.sendCalls[0].peerAddress, "remote001@mail.seep.im");
   assert.equal(chatmailAdapter.sendCalls[0].peerPublicKey, "remote-public-key");
   assert.equal(JSON.parse(chatmailAdapter.sendCalls[0].text).teti, true);
   assert.deepEqual(parseConnectionRequestEnvelope(chatmailAdapter.sendCalls[0].text), request);
@@ -53,7 +53,7 @@ test("connection messaging receives only valid connection request envelopes", as
     {
       messageId: 1,
       chatId: 3,
-      fromAddress: "remote@mail.seep.im",
+      fromAddress: "remote001@mail.seep.im",
       text: JSON.stringify({
         type: "teti.connection.request",
         version: 1,
@@ -84,20 +84,20 @@ test("connection messaging sends accept and reject envelopes through chatmail ad
 
   await messaging.sendConnectionAccept({
     accountId: 3,
-    toAddress: "remote@mail.seep.im",
+    toAddress: "remote001@mail.seep.im",
     toPublicKey: "remote-public-key",
     accept: {
       version: 1,
       requestId: "request-1",
-      fromTetiId: "teti_local",
-      fromAddress: "local@mail.seep.im",
+      fromTetiId: "teti_local0001",
+      fromAddress: "local0001@mail.seep.im",
       createdAt: "2026-07-11T00:00:00.000Z",
       nonce: "accept-nonce"
     }
   });
   await messaging.sendConnectionReject({
     accountId: 3,
-    toAddress: "remote@mail.seep.im",
+    toAddress: "remote001@mail.seep.im",
     toPublicKey: "remote-public-key",
     reject: {
       requestId: "request-2",
@@ -110,8 +110,8 @@ test("connection messaging sends accept and reject envelopes through chatmail ad
   assert.deepEqual(parseConnectionAcceptEnvelope(chatmailAdapter.sendCalls[0].text), {
     version: 1,
     requestId: "request-1",
-    fromTetiId: "teti_local",
-    fromAddress: "local@mail.seep.im",
+    fromTetiId: "teti_local0001",
+    fromAddress: "local0001@mail.seep.im",
     createdAt: "2026-07-11T00:00:00.000Z",
     nonce: "accept-nonce"
   });
@@ -127,7 +127,7 @@ test("connection messaging receives accept envelopes and ignores malformed envel
     {
       messageId: 1,
       chatId: 3,
-      fromAddress: "remote@mail.seep.im",
+      fromAddress: "remote001@mail.seep.im",
       text: JSON.stringify({
         teti: true,
         type: "teti.connection.accept",
@@ -135,8 +135,8 @@ test("connection messaging receives accept envelopes and ignores malformed envel
         payload: {
           version: 1,
           requestId: "request-1",
-          fromTetiId: "teti_remote",
-          fromAddress: "remote@mail.seep.im",
+          fromTetiId: "teti_remote001",
+          fromAddress: "remote001@mail.seep.im",
           createdAt: "2026-07-11T00:00:00.000Z",
           nonce: "accept-nonce"
         }
@@ -184,7 +184,7 @@ test("connection messaging polls repeatedly and extracts a Teti envelope", async
       {
         messageId: 2,
         chatId: 3,
-        fromAddress: "remote@mail.seep.im",
+        fromAddress: "remote001@mail.seep.im",
         text: JSON.stringify({
           teti: true,
           type: "teti.connection.request",
@@ -220,8 +220,8 @@ function createRequest(): TetiConnectionRequest {
   return {
     version: 1,
     requestId: "request-1",
-    fromTetiId: "teti_local",
-    fromAddress: "local@mail.seep.im",
+    fromTetiId: "teti_local0001",
+    fromAddress: "local0001@mail.seep.im",
     publicKey: "local-public-key",
     profile: {
       platform: "macOS",

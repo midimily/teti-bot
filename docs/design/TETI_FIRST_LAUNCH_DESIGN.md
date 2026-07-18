@@ -229,9 +229,26 @@ Expanded onboarding state:
 
 Safe spacing:
 
-- Keep at least `8px` vertical space below the menu bar/notch exclusion region.
+- On a physical-notch display, place the compact brand and toolbar only inside the system-reported
+  `auxiliaryTopLeftArea` and `auxiliaryTopRightArea`; reserve the detected notch width plus `12px`
+  through the center of the header.
+- Center `28px` header controls vertically inside the top safe row. If either auxiliary area is too
+  narrow, fall back to placing the complete header `8px` below the notch exclusion region.
+- Start connection content `14px` below the safe-top inset and keep header popovers below the
+  physical notch.
 - Keep `16px` internal horizontal padding minimum.
 - Keep character away from clipped rounded corners.
+
+Expanded-panel dismissal:
+
+- A user-invoked connection panel collapses when the Teti panel loses window focus, when the user
+  presses Escape, or after `20s` without pointer or keyboard activity.
+- Network operations continue safely if the panel collapses; reopening the eye restores the latest
+  connection state.
+- Incoming approval does not keep the expanded panel permanently above the workspace. A collapsed
+  amber indicator remains visible until the request is accepted or rejected.
+- First-launch registration and unrecoverable account setup states do not use the connection-panel
+  focus-loss dismissal rule.
 
 Displays without physical notch:
 

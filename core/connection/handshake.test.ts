@@ -5,7 +5,8 @@ import { MemoryTetiAccountStorage } from "../account/storage.ts";
 import {
   createConnectionAcceptEnvelope,
   createConnectionRequestEnvelope,
-  createConnectionRejectEnvelope
+  createConnectionRejectEnvelope,
+  validateConnectionRequest
 } from "./protocol.ts";
 import { TetiConnectionManager } from "./manager.ts";
 import { reconcileConfirmedPeerConnections } from "./handshake.ts";
@@ -166,8 +167,8 @@ test("invalid requestId cannot be accepted or confirmed", async () => {
       pair.a.manager.handleAccept({
         version: 1,
         requestId: "missing-request",
-        fromTetiId: "teti_b",
-        fromAddress: "b@mail.seep.im",
+        fromTetiId: "teti_beta00002",
+        fromAddress: "beta00002@mail.seep.im",
         createdAt: fixedNow,
         nonce: "accept-nonce"
       }),
@@ -175,11 +176,26 @@ test("invalid requestId cannot be accepted or confirmed", async () => {
   );
 });
 
+test("connection protocol rejects a non-canonical fromTetiId", () => {
+  assert.throws(
+    () => validateConnectionRequest({
+      version: 1,
+      requestId: "bad-public-id",
+      fromTetiId: "teti_ALPHA0001",
+      fromAddress: "alpha0001@mail.seep.im",
+      profile: { platform: "macOS", category: [], aiEnvironment: [] },
+      createdAt: fixedNow,
+      nonce: "nonce"
+    }),
+    /exactly 9 ASCII lowercase/
+  );
+});
+
 async function createHandshakePair() {
   const aStorage = new MemoryTetiAccountStorage();
   const bStorage = new MemoryTetiAccountStorage();
-  const aAccount = createAccount("teti_a", "a@mail.seep.im", 1);
-  const bAccount = createAccount("teti_b", "b@mail.seep.im", 2);
+  const aAccount = createAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
+  const bAccount = createAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
   await aStorage.save(aAccount);
   await bStorage.save(bAccount);
 

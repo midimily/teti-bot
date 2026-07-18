@@ -14,6 +14,7 @@ import {
   scanEnvironment
 } from "../environment/scanner.ts";
 import type { EnvironmentScan } from "../environment/types.ts";
+import { normalizeTetiChatmailAddress } from "../identity/public-id.ts";
 import {
   TETI_ACCOUNT_VERSION,
   createDefaultPublicProfile,
@@ -91,6 +92,8 @@ export class TetiAccountManager {
       assertAddressMatchesRelay(chatmailIdentity.address, this.expectedAddressSuffix);
     }
 
+    const canonicalAddress = normalizeTetiChatmailAddress(chatmailIdentity.address);
+
     const environmentProfile = environmentScanToPublicProfile(await this.environmentScanner());
     const publicProfile = createDefaultPublicProfile({
       platform: environmentProfile.platform,
@@ -102,8 +105,8 @@ export class TetiAccountManager {
     });
     const account: TetiAccount = {
       version: TETI_ACCOUNT_VERSION,
-      id: getTetiIdFromAddress(chatmailIdentity.address),
-      address: chatmailIdentity.address,
+      id: getTetiIdFromAddress(canonicalAddress),
+      address: canonicalAddress,
       chatmailAccountId: chatmailIdentity.accountId,
       publicKey: chatmailIdentity.publicKey,
       fingerprint: chatmailIdentity.fingerprint,

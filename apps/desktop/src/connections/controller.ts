@@ -3,11 +3,15 @@ import type {
   PeerConnectionResult,
   PublicTetiIdentity
 } from "../lifecycle-bridge/protocol.ts";
+import {
+  normalizeTetiPublicIdCode,
+  TETI_PUBLIC_ID_CODE_CHARACTERS_PATTERN
+} from "../../../../core/identity/public-id.ts";
 import type { LifecycleBridgeClient } from "../provisioning/bridge-lifecycle.ts";
 import type { TauriNotchWindowController } from "../platform/tauri-notch-window.ts";
 
 const POLL_INTERVAL_MS = 3_000;
-const AUTO_COLLAPSE_MS = 12_000;
+const AUTO_COLLAPSE_MS = 20_000;
 
 export interface PeerConnectionClient {
   resolve(query: string): Promise<PublicTetiIdentity>;
@@ -23,6 +27,7 @@ export interface PeerConnectionSnapshot {
   input: string;
   busy: boolean;
   error?: string;
+  inputError?: string;
   notice?: string;
   noticeTone?: "info" | "attention" | "success";
   highlightedRequestId?: string;
@@ -85,19 +90,31 @@ export class PeerConnectionController {
     this.onChange();
   }
 
-  close(): void {
+  close(reason = "close-peer-connections"): void {
     this.collapseToken += 1;
     this.snapshotValue.open = false;
     this.snapshotValue.error = undefined;
     this.snapshotValue.notice = undefined;
     this.snapshotValue.noticeTone = undefined;
     this.snapshotValue.highlightedRequestId = undefined;
-    void this.notchWindow.setMode("idle", "close-peer-connections");
+    void this.notchWindow.setMode("idle", reason);
     this.onChange();
   }
 
+  dismissFromOutside(): void {
+    if (this.snapshotValue.open) this.close("peer-panel-focus-lost");
+  }
+
+  noteActivity(): void {
+    if (this.snapshotValue.open) this.touch();
+  }
+
   updateInput(value: string): void {
-    this.snapshotValue.input = value.toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 9);
+    const normalizedCase = value.toLowerCase();
+    this.snapshotValue.input = normalizedCase;
+    this.snapshotValue.inputError = normalizedCase && !TETI_PUBLIC_ID_CODE_CHARACTERS_PATTERN.test(normalizedCase)
+      ? "ID 只能包含英文字母和数字。"
+      : undefined;
     this.snapshotValue.error = undefined;
     this.snapshotValue.notice = undefined;
     this.snapshotValue.noticeTone = undefined;
@@ -128,6 +145,7 @@ export class PeerConnectionController {
       this.applyResult(result);
       this.applyRequestOutcome(result);
       this.snapshotValue.input = "";
+      this.snapshotValue.inputError = undefined;
       this.snapshotValue.resolved = undefined;
     });
   }
@@ -241,8 +259,7 @@ export class PeerConnectionController {
         token === this.collapseToken &&
         this.snapshotValue.open &&
         !this.snapshotValue.busy &&
-        !this.interactionActive &&
-        !this.hasPendingApproval()
+        !this.interactionActive
       ) {
         this.close();
       }
@@ -286,7 +303,7 @@ export class MockPeerConnectionClient implements PeerConnectionClient {
   private connections: PeerConnectionDto[] = [];
 
   async resolve(query: string): Promise<PublicTetiIdentity> {
-    const publicId = query.trim().toLowerCase();
+    const publicId = normalizeTetiPublicIdCode(query);
     const id = `teti_${publicId}`;
     return {
       id,

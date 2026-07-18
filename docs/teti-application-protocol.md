@@ -28,7 +28,7 @@ Application envelopes carry structured AI-to-AI intent after trust exists. They 
   "version": 1,
   "type": "teti.profile.sync",
   "messageId": "uuid",
-  "fromTetiId": "teti_xxx",
+  "fromTetiId": "teti_abc123xyz",
   "createdAt": "2026-07-11T00:00:00.000Z",
   "payload": {}
 }
@@ -42,6 +42,8 @@ Required fields:
 - `fromTetiId`
 - `createdAt`
 - `payload`
+
+`fromTetiId` must match the lowercase canonical format `teti_[a-z0-9]{9}`. Application envelopes do not normalize case and reject non-canonical IDs.
 
 ## Message Types V1
 
