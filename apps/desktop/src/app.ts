@@ -334,7 +334,7 @@ function createConnectionIsland(
   const island = document.createElement("section");
   island.className = "teti-island teti-island--expanded teti-island--connections";
   island.setAttribute("aria-label", "连接其他 Teti");
-  island.append(createConnectionHeader(config, controller, aiStatus));
+  island.append(createConnectionHeader(config, aiStatus));
 
   const face = document.createElement("div");
   face.className = "teti-face teti-face--ready";
@@ -521,13 +521,9 @@ function createConnectionRow(
 
 function createConnectionHeader(
   config: ProvisioningModeConfig,
-  controller: PeerConnectionController,
   aiStatus?: AiStatusController
 ): HTMLElement {
-  const header = createIslandHeader(config, aiStatus);
-  const controls = header.querySelector(".teti-header-controls");
-  controls?.append(iconButton(X, "收起", () => controller.close()));
-  return header;
+  return createIslandHeader(config, aiStatus);
 }
 
 function iconButton(

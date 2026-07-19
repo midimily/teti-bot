@@ -135,7 +135,7 @@ input {
 .teti-header {
   position: absolute;
   top: calc(24px + var(--teti-safe-top-inset));
-  right: 26px;
+  right: 14px;
   left: 28px;
   z-index: 2;
   display: flex;
@@ -198,18 +198,18 @@ input {
   display: block;
   width: 22px;
   height: 22px;
-  object-fit: cover;
+  object-fit: contain;
+  filter: saturate(0.78);
   opacity: 0.82;
   transition: opacity var(--teti-duration-fast) var(--teti-ease), transform var(--teti-duration-fast) var(--teti-ease);
 }
 
 .teti-toolbar-asset-icon.is-ai-tools {
-  border-radius: 6px;
+  border-radius: 0;
 }
 
 .teti-toolbar-asset-icon.is-settings {
   border-radius: 0;
-  filter: saturate(0.78);
 }
 
 .teti-header-icon:hover .teti-toolbar-asset-icon,

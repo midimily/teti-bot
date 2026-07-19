@@ -116,6 +116,10 @@ test("desktop shell exposes Codex status and explicit four-character sharing con
   assert.doesNotMatch(styles, /data-reduced-motion/);
   assert.match(app, /target\.closest\("\.teti-header-panel"\)/);
   assert.match(app, /target\.closest\("\.teti-header-icon\[aria-expanded\]"\)/);
+  assert.doesNotMatch(app, /iconButton\(X, "收起"/);
+  assert.match(styles, /\.teti-header\s*\{[\s\S]*right:\s*14px/);
+  assert.match(styles, /\.teti-toolbar-asset-icon\s*\{[\s\S]*object-fit:\s*contain/);
+  assert.match(styles, /\.teti-toolbar-asset-icon\s*\{[\s\S]*filter:\s*saturate\(0\.78\)/);
   assert.equal(existsSync(join(desktopRoot, "assets", "codex-status.png")), true);
   assert.equal(existsSync(join(desktopRoot, "assets", "ai-tools-btn.png")), true);
   assert.equal(existsSync(join(desktopRoot, "assets", "settings.png")), true);
