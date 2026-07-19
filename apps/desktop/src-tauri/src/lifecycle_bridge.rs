@@ -1,13 +1,14 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
+    collections::HashMap,
     env,
     fs::{create_dir_all, metadata, rename, OpenOptions},
     io::{BufRead, BufReader, Write},
     path::PathBuf,
     process::{Child, ChildStdin, Command, Stdio},
     sync::{
-        mpsc::{self, Receiver},
+        mpsc::{self, Receiver, SyncSender},
         Arc, Mutex,
     },
     thread,
@@ -56,8 +57,10 @@ pub struct LifecycleBridge {
 struct ManagedSidecar {
     child: Child,
     stdin: ChildStdin,
-    stdout_lines: Receiver<String>,
+    pending: PendingResponses,
 }
+
+type PendingResponses = Arc<Mutex<HashMap<String, SyncSender<LifecycleCommandResponse>>>>;
 
 #[tauri::command]
 pub async fn lifecycle_request(
@@ -160,7 +163,29 @@ impl LifecycleBridge {
             );
         }
 
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let pending = process.pending.clone();
+        let registered = match pending.lock() {
+            Ok(mut requests) if !requests.contains_key(&id) => {
+                requests.insert(id.clone(), sender);
+                true
+            }
+            _ => false,
+        };
+        if !registered {
+            return failure(
+                Some(id),
+                bridge_error(
+                    "MALFORMED_REQUEST",
+                    "Lifecycle request id is already pending.",
+                    false,
+                    None,
+                ),
+            );
+        }
+
         if let Err(error) = writeln!(process.stdin, "{line}") {
+            remove_pending_response(&pending, &id);
             let _ = process.child.kill();
             *guard = None;
             return failure(
@@ -175,6 +200,7 @@ impl LifecycleBridge {
         }
 
         if let Err(error) = process.stdin.flush() {
+            remove_pending_response(&pending, &id);
             let _ = process.child.kill();
             *guard = None;
             return failure(
@@ -188,7 +214,9 @@ impl LifecycleBridge {
             );
         }
 
-        receive_matching_response(process, &id, timeout_for_method(&request.method))
+        let timeout = timeout_for_method(&request.method);
+        drop(guard);
+        wait_for_response(receiver, pending, &id, timeout)
     }
 }
 
@@ -255,21 +283,20 @@ fn spawn_sidecar(app: &AppHandle) -> Result<ManagedSidecar, String> {
         });
     }
 
-    let (sender, receiver) = mpsc::channel();
-
+    let pending: PendingResponses = Arc::new(Mutex::new(HashMap::new()));
+    let response_pending = pending.clone();
     thread::spawn(move || {
         let reader = BufReader::new(stdout);
         for line in reader.lines().map_while(Result::ok) {
-            if sender.send(line).is_err() {
-                break;
-            }
+            dispatch_response_line(&response_pending, &line);
         }
+        fail_pending_responses(&response_pending);
     });
 
     Ok(ManagedSidecar {
         child,
         stdin,
-        stdout_lines: receiver,
+        pending,
     })
 }
 
@@ -357,48 +384,88 @@ fn resolve_sidecar_path(app: &AppHandle) -> Result<PathBuf, String> {
     Err("lifecycle sidecar script was not found".to_string())
 }
 
-fn receive_matching_response(
-    process: &mut ManagedSidecar,
+fn wait_for_response(
+    receiver: Receiver<LifecycleCommandResponse>,
+    pending: PendingResponses,
     expected_id: &str,
     timeout: Duration,
 ) -> LifecycleCommandResponse {
-    loop {
-        match process.stdout_lines.recv_timeout(timeout) {
-            Ok(line) => match parse_sidecar_response(expected_id, &line) {
-                Ok(Some(response)) => return response,
-                Ok(None) => continue,
-                Err(error) => return failure(Some(expected_id.to_string()), error),
-            },
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                return failure(
-                    Some(expected_id.to_string()),
-                    bridge_error(
-                        "REQUEST_TIMEOUT",
-                        "Teti took too long to respond.",
-                        true,
-                        Some("lifecycle.health"),
-                    ),
-                )
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                return failure(
-                    Some(expected_id.to_string()),
-                    bridge_error(
-                        "SIDECAR_UNAVAILABLE",
-                        "Teti's local lifecycle service is unavailable.",
-                        true,
-                        Some("lifecycle.health"),
-                    ),
-                )
-            }
+    match receiver.recv_timeout(timeout) {
+        Ok(response) => response,
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            remove_pending_response(&pending, expected_id);
+            failure(
+                Some(expected_id.to_string()),
+                bridge_error(
+                    "REQUEST_TIMEOUT",
+                    "Teti took too long to respond.",
+                    true,
+                    Some("lifecycle.health"),
+                ),
+            )
         }
+        Err(mpsc::RecvTimeoutError::Disconnected) => failure(
+            Some(expected_id.to_string()),
+            bridge_error(
+                "SIDECAR_UNAVAILABLE",
+                "Teti's local lifecycle service is unavailable.",
+                true,
+                Some("lifecycle.health"),
+            ),
+        ),
     }
 }
 
-pub fn parse_sidecar_response(
-    expected_id: &str,
+fn dispatch_response_line(pending: &PendingResponses, line: &str) {
+    let response = match parse_sidecar_response_line(line) {
+        Ok(response) => response,
+        Err(error) => {
+            append_sanitized_log_line(
+                "bridge",
+                &format!("invalid sidecar response: {}", error.code),
+            );
+            return;
+        }
+    };
+    let Some(id) = response.id.clone() else {
+        return;
+    };
+    let sender = pending
+        .lock()
+        .ok()
+        .and_then(|mut requests| requests.remove(&id));
+    if let Some(sender) = sender {
+        let _ = sender.send(response);
+    }
+}
+
+fn remove_pending_response(pending: &PendingResponses, id: &str) {
+    if let Ok(mut requests) = pending.lock() {
+        requests.remove(id);
+    }
+}
+
+fn fail_pending_responses(pending: &PendingResponses) {
+    let requests = pending
+        .lock()
+        .map(|mut requests| requests.drain().collect::<Vec<_>>())
+        .unwrap_or_default();
+    for (id, sender) in requests {
+        let _ = sender.send(failure(
+            Some(id),
+            bridge_error(
+                "SIDECAR_UNAVAILABLE",
+                "Teti's local lifecycle service is unavailable.",
+                true,
+                Some("lifecycle.health"),
+            ),
+        ));
+    }
+}
+
+fn parse_sidecar_response_line(
     line: &str,
-) -> Result<Option<LifecycleCommandResponse>, LifecycleCommandError> {
+) -> Result<LifecycleCommandResponse, LifecycleCommandError> {
     if line.len() > MAX_LINE_BYTES {
         return Err(bridge_error(
             "OVERSIZED_REQUEST",
@@ -425,6 +492,16 @@ pub fn parse_sidecar_response(
             Some("lifecycle.health"),
         ));
     }
+
+    Ok(response)
+}
+
+#[cfg(test)]
+fn parse_sidecar_response(
+    expected_id: &str,
+    line: &str,
+) -> Result<Option<LifecycleCommandResponse>, LifecycleCommandError> {
+    let response = parse_sidecar_response_line(line)?;
 
     if response.id.as_deref() != Some(expected_id) {
         return Ok(None);
@@ -476,8 +553,7 @@ pub fn timeout_for_method(method: &str) -> Duration {
         "lifecycle.health" => 2_000,
         "usage.get" => 2_000,
         "usage.refresh" => 12_000,
-        "sharing.get" => 5_000,
-        "sharing.set" => 30_000,
+        "sharing.get" | "sharing.set" => 2_000,
         "account.status" | "account.load" => 5_000,
         "account.create" => 120_000,
         "discovery.register" | "discovery.retry" => 15_000,
@@ -619,6 +695,10 @@ mod tests {
             timeout_for_method("usage.refresh"),
             Duration::from_millis(12_000)
         );
+        assert_eq!(
+            timeout_for_method("sharing.set"),
+            Duration::from_millis(2_000)
+        );
     }
 
     #[cfg(target_os = "macos")]
@@ -677,6 +757,37 @@ mod tests {
 
         assert_eq!(error.code, "OVERSIZED_REQUEST");
         assert!(!error.recoverable);
+    }
+
+    #[test]
+    fn response_dispatcher_routes_out_of_order_requests_by_id() {
+        let pending: PendingResponses = Arc::new(Mutex::new(HashMap::new()));
+        let (first_sender, first_receiver) = mpsc::sync_channel(1);
+        let (second_sender, second_receiver) = mpsc::sync_channel(1);
+        pending
+            .lock()
+            .unwrap()
+            .insert("first".to_string(), first_sender);
+        pending
+            .lock()
+            .unwrap()
+            .insert("second".to_string(), second_sender);
+
+        dispatch_response_line(
+            &pending,
+            r#"{"version":1,"id":"second","ok":true,"result":{"value":2}}"#,
+        );
+        dispatch_response_line(
+            &pending,
+            r#"{"version":1,"id":"first","ok":true,"result":{"value":1}}"#,
+        );
+
+        assert_eq!(
+            second_receiver.recv().unwrap().id.as_deref(),
+            Some("second")
+        );
+        assert_eq!(first_receiver.recv().unwrap().id.as_deref(), Some("first"));
+        assert!(pending.lock().unwrap().is_empty());
     }
 
     #[test]

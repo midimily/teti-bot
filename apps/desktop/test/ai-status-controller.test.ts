@@ -68,6 +68,53 @@ test("sharing consent updates optimistically while persistence is pending", asyn
   assert.equal(controller.snapshot.sharingBusy, false);
 });
 
+test("rapid sharing changes stay interactive and persist only the latest intent", async () => {
+  let finishFirst!: (settings: AiStatusSharingSettings) => void;
+  const calls: boolean[] = [];
+  const client = new FakeClient();
+  client.setSharing = (enabled) => {
+    calls.push(enabled);
+    if (calls.length === 1) {
+      return new Promise((resolve) => { finishFirst = resolve; });
+    }
+    client.sharing = enabled;
+    return Promise.resolve({ statusSharing: enabled });
+  };
+  const controller = new AiStatusController({ client, onChange: () => undefined });
+
+  const first = controller.setStatusSharing(true);
+  const latest = controller.setStatusSharing(false);
+  assert.equal(controller.snapshot.statusSharing, false);
+  assert.equal(controller.snapshot.sharingBusy, true);
+
+  finishFirst({ statusSharing: true });
+  await Promise.all([first, latest]);
+
+  assert.deepEqual(calls, [true, false]);
+  assert.equal(controller.snapshot.statusSharing, false);
+  assert.equal(controller.snapshot.sharingBusy, false);
+});
+
+test("a late initial settings read cannot overwrite a newer user choice", async () => {
+  let finishRead!: (settings: AiStatusSharingSettings) => void;
+  const client = new FakeClient();
+  client.getSharing = () => new Promise((resolve) => { finishRead = resolve; });
+  const controller = new AiStatusController({
+    client,
+    onChange: () => undefined,
+    schedule: () => 1,
+    cancel: () => undefined
+  });
+
+  controller.start();
+  await controller.setStatusSharing(true);
+  finishRead({ statusSharing: false });
+  await flushPromises();
+
+  assert.equal(controller.snapshot.statusSharing, true);
+  controller.stop();
+});
+
 test("controller preserves the selected toolbar panel across data refreshes", async () => {
   const client = new FakeClient();
   let changes = 0;

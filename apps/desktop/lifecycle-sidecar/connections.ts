@@ -99,6 +99,8 @@ export class PeerConnectionRuntime implements PeerConnectionService {
   private ready = false;
   private queue: Promise<void> = Promise.resolve();
   private settingsQueue: Promise<void> = Promise.resolve();
+  private pendingAiStatusBroadcast: "enabled" | "disabled" | null = null;
+  private aiStatusBroadcastQueued = false;
 
   constructor(options: PeerConnectionRuntimeOptions) {
     this.accountStorage = options.accountStorage;
@@ -224,11 +226,21 @@ export class PeerConnectionRuntime implements PeerConnectionService {
   }
 
   private scheduleAiStatusBroadcast(sharing: "enabled" | "disabled"): void {
+    this.pendingAiStatusBroadcast = sharing;
+    if (this.aiStatusBroadcastQueued) return;
+    this.aiStatusBroadcastQueued = true;
     queueMicrotask(() => {
       void this.serial(async () => {
-        await this.broadcastAiStatus(sharing);
-        if (sharing === "disabled") this.aiStatusSent.clear();
-      }).catch(() => undefined);
+        const latest = this.pendingAiStatusBroadcast;
+        this.pendingAiStatusBroadcast = null;
+        if (!latest) return;
+        await this.broadcastAiStatus(latest);
+        if (latest === "disabled") this.aiStatusSent.clear();
+      }).catch(() => undefined).finally(() => {
+        this.aiStatusBroadcastQueued = false;
+        const latest = this.pendingAiStatusBroadcast;
+        if (latest) this.scheduleAiStatusBroadcast(latest);
+      });
     });
   }
 

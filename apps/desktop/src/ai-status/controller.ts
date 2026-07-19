@@ -26,6 +26,9 @@ export class AiStatusController {
   private readonly cancel: (handle: unknown) => void;
   private active = false;
   private timer: unknown;
+  private sharingRevision = 0;
+  private persistedStatusSharing = false;
+  private sharingWrite: Promise<void> | undefined;
   private snapshotValue: AiStatusControllerSnapshot = {
     usage: unavailableUsage(),
     statusSharing: false,
@@ -74,26 +77,52 @@ export class AiStatusController {
     if (notify) this.onChange();
   }
 
-  async setStatusSharing(enabled: boolean): Promise<void> {
-    if (this.snapshotValue.sharingBusy || this.snapshotValue.statusSharing === enabled) return;
-    const previous = this.snapshotValue.statusSharing;
+  setStatusSharing(enabled: boolean): Promise<void> {
+    if (this.snapshotValue.statusSharing === enabled) {
+      return this.sharingWrite ?? Promise.resolve();
+    }
     this.snapshotValue.statusSharing = enabled;
+    this.sharingRevision += 1;
     this.snapshotValue.sharingBusy = true;
     this.snapshotValue.sharingError = undefined;
     this.onChange();
+
+    if (!this.sharingWrite) {
+      this.sharingWrite = this.flushSharingWrites();
+    }
+    return this.sharingWrite;
+  }
+
+  private async flushSharingWrites(): Promise<void> {
     try {
-      const settings = await this.client.setSharing(enabled);
-      this.snapshotValue.statusSharing = settings.statusSharing;
-    } catch {
-      this.snapshotValue.statusSharing = previous;
-      this.snapshotValue.sharingError = "共享设置暂时无法保存。";
+      while (true) {
+        const revision = this.sharingRevision;
+        const desired = this.snapshotValue.statusSharing;
+        try {
+          const settings = await this.client.setSharing(desired);
+          this.persistedStatusSharing = settings.statusSharing;
+          if (revision === this.sharingRevision) {
+            this.snapshotValue.statusSharing = settings.statusSharing;
+            this.snapshotValue.sharingError = undefined;
+            return;
+          }
+        } catch {
+          if (revision === this.sharingRevision) {
+            this.snapshotValue.statusSharing = this.persistedStatusSharing;
+            this.snapshotValue.sharingError = "共享设置暂时无法保存。";
+            return;
+          }
+        }
+      }
     } finally {
       this.snapshotValue.sharingBusy = false;
+      this.sharingWrite = undefined;
       this.onChange();
     }
   }
 
   private async load(forceUsageRefresh: boolean): Promise<void> {
+    const sharingRevision = this.sharingRevision;
     const [usage, sharing] = await Promise.allSettled([
       forceUsageRefresh ? this.client.refreshUsage() : this.client.getUsage(),
       this.client.getSharing()
@@ -101,10 +130,11 @@ export class AiStatusController {
     if (usage.status === "fulfilled") {
       this.snapshotValue.usage = usage.value;
     }
-    if (sharing.status === "fulfilled") {
+    if (sharing.status === "fulfilled" && sharingRevision === this.sharingRevision) {
+      this.persistedStatusSharing = sharing.value.statusSharing;
       this.snapshotValue.statusSharing = sharing.value.statusSharing;
       this.snapshotValue.sharingError = undefined;
-    } else {
+    } else if (sharing.status === "rejected" && sharingRevision === this.sharingRevision) {
       this.snapshotValue.statusSharing = false;
       this.snapshotValue.sharingError = "共享设置暂时无法读取。";
     }

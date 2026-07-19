@@ -2,6 +2,7 @@ export interface TauriInvoker {
   readonly runtime?: "native" | "preview" | "test";
   invoke<T>(command: string, args?: Record<string, unknown>): Promise<T>;
   onFocusChanged?(handler: (focused: boolean) => void): Promise<() => void>;
+  onDockActivate?(handler: () => void): Promise<() => void>;
 }
 
 export async function createTauriInvoker(): Promise<TauriInvoker> {
@@ -9,21 +10,27 @@ export async function createTauriInvoker(): Promise<TauriInvoker> {
     return new BrowserPreviewTauriInvoker();
   }
 
-  const [api, windowApi] = await Promise.all([
+  const [api, windowApi, eventApi] = await Promise.all([
     import("@tauri-apps/api/core"),
-    import("@tauri-apps/api/window")
+    import("@tauri-apps/api/window"),
+    import("@tauri-apps/api/event")
   ]);
   const currentWindow = windowApi.getCurrentWindow();
   return {
     runtime: "native",
     invoke: api.invoke,
-    onFocusChanged: async (handler) => currentWindow.onFocusChanged(({ payload }) => handler(payload))
+    onFocusChanged: async (handler) => currentWindow.onFocusChanged(({ payload }) => handler(payload)),
+    onDockActivate: async (handler) => eventApi.listen("teti://dock-activate", handler)
   };
 }
 
 class BrowserPreviewTauriInvoker implements TauriInvoker {
   readonly runtime = "preview" as const;
   async onFocusChanged(): Promise<() => void> {
+    return () => undefined;
+  }
+
+  async onDockActivate(): Promise<() => void> {
     return () => undefined;
   }
 
@@ -52,6 +59,7 @@ export class RecordingTauriInvoker implements TauriInvoker {
   readonly calls: Array<{ command: string; args?: Record<string, unknown> }> = [];
   responses = new Map<string, unknown>();
   private readonly focusHandlers = new Set<(focused: boolean) => void>();
+  private readonly dockActivateHandlers = new Set<() => void>();
 
   async onFocusChanged(handler: (focused: boolean) => void): Promise<() => void> {
     this.focusHandlers.add(handler);
@@ -60,6 +68,15 @@ export class RecordingTauriInvoker implements TauriInvoker {
 
   emitFocusChanged(focused: boolean): void {
     for (const handler of this.focusHandlers) handler(focused);
+  }
+
+  async onDockActivate(handler: () => void): Promise<() => void> {
+    this.dockActivateHandlers.add(handler);
+    return () => this.dockActivateHandlers.delete(handler);
+  }
+
+  emitDockActivate(): void {
+    for (const handler of this.dockActivateHandlers) handler();
   }
 
   async invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {

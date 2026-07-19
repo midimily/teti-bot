@@ -6,6 +6,8 @@ export type IslandVisualMode = "hidden" | "idle" | "onboarding" | "processing" |
 
 export class TauriNotchWindowController implements NotchWindowController {
   private readonly tauri: TauriInvoker;
+  private modeQueue: Promise<void> = Promise.resolve();
+  private modeRevision = 0;
 
   constructor(tauri: TauriInvoker) {
     this.tauri = tauri;
@@ -23,8 +25,14 @@ export class TauriNotchWindowController implements NotchWindowController {
     await this.tauri.invoke("position_island", { geometry: sanitizeGeometry(geometry) });
   }
 
-  async setMode(mode: IslandVisualMode, reason: string): Promise<void> {
-    await this.tauri.invoke("set_island_mode", { mode, reason });
+  setMode(mode: IslandVisualMode, reason: string): Promise<void> {
+    const revision = ++this.modeRevision;
+    const pending = this.modeQueue.then(async () => {
+      if (revision !== this.modeRevision) return;
+      await this.tauri.invoke("set_island_mode", { mode, reason });
+    });
+    this.modeQueue = pending.catch(() => undefined);
+    return pending;
   }
 
   async show(reason = "show"): Promise<void> {

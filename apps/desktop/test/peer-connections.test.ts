@@ -5,6 +5,9 @@ import { resolveIdentityQuery } from "../lifecycle-sidecar/connections.ts";
 import type { TetiRegistryReader } from "../../../services/discovery/client.ts";
 import type { DiscoveryIdentity } from "../../../services/discovery/registry-client.ts";
 import {
+  CONNECT_PANEL_CLOSE_MS,
+  CONNECT_PANEL_OPEN_MS,
+  CONNECT_PANEL_SUCCESS_MS,
   PeerConnectionController,
   type PeerConnectionClient
 } from "../src/connections/controller.ts";
@@ -23,6 +26,12 @@ const identity: DiscoveryIdentity = {
   displayName: "Remote",
   publicKey: "-----BEGIN PGP PUBLIC KEY BLOCK-----remote-public-key-material-1234567890",
   publicProfile: { platform: "macOS" }
+};
+
+const emptyResult: PeerConnectionResult = {
+  connections: [],
+  receivedCount: 0,
+  heartbeatCount: 0
 };
 
 test("peer identity input resolves the 9-character ID shown on teti.bot", async () => {
@@ -52,178 +61,287 @@ test("peer identity input rejects unknown public data", async () => {
   );
 });
 
-test("peer identity input folds ASCII uppercase but reports invalid characters without deleting them", () => {
-  const controller = makeController({ connections: [], receivedCount: 0, heartbeatCount: 0 });
+test("controller starts with the connect panel idle and opens it only through the eyes", () => {
+  const { controller, scheduler } = makeHarness();
 
-  controller.updateInput("ABC123XYZ");
+  assert.equal(controller.snapshot.connectPanel.state, "idle");
+  assert.equal(controller.snapshot.input, "");
+  controller.open();
+  assert.equal(controller.snapshot.connectPanel.state, "idle");
+  controller.activateEyes();
+  assert.equal(controller.snapshot.connectPanel.state, "opening");
+  scheduler.runDelay(CONNECT_PANEL_OPEN_MS);
+  assert.equal(controller.snapshot.connectPanel.state, "editing");
+  assert.equal(controller.snapshot.connectPanel.message, "");
+});
+
+test("peer identity input trims pasted-style whitespace, folds case, and caps at 9 characters", () => {
+  const { controller, scheduler } = makeHarness();
+  openEditor(controller, scheduler);
+
+  controller.updateInput("  ABC123XYZ-more  ");
   assert.equal(controller.snapshot.input, "abc123xyz");
-  assert.equal(controller.snapshot.inputError, undefined);
+  assert.equal(controller.snapshot.connectPanel.state, "editing");
 
   controller.updateInput("abc-12345");
   assert.equal(controller.snapshot.input, "abc-12345");
-  assert.equal(controller.snapshot.inputError, "ID 只能包含英文字母和数字。");
-
-  controller.updateInput("abc123xyz!");
-  assert.equal(controller.snapshot.input, "abc123xyz!");
-  assert.equal(controller.snapshot.inputError, "ID 只能包含英文字母和数字。");
+  assert.equal(controller.snapshot.connectPanel.state, "error");
+  assert.equal(controller.snapshot.connectPanel.message, "请输入正确的 9 位 ID");
 });
 
-test("repeating a confirmed peer ID shows explicit feedback and highlights the relationship", async () => {
-  const connection: PeerConnectionDto = {
-    requestId: "confirmed-request",
-    state: "Confirmed",
-    direction: "outgoing",
-    remoteTetiId: identity.id,
-    remoteAddress: identity.address,
-    remoteDisplayName: identity.displayName,
-    createdAt: "2026-07-17T00:00:00.000Z",
-    updatedAt: "2026-07-17T00:00:01.000Z"
-  };
-  const client = new StaticPeerConnectionClient({
-    connections: [connection],
-    receivedCount: 0,
-    heartbeatCount: 0,
-    requestOutcome: {
-      kind: "alreadyConfirmed",
-      requestId: connection.requestId,
-      remoteTetiId: connection.remoteTetiId
-    }
-  });
-  const controller = new PeerConnectionController({
-    client,
-    notchWindow: new TauriNotchWindowController(new RecordingTauriInvoker()),
-    onChange: () => undefined,
-    schedule: () => 0
-  });
+test("an incomplete ID never reaches the real connection client", async () => {
+  const { controller, scheduler, client } = makeHarness();
+  openEditor(controller, scheduler);
+  controller.updateInput("abc123");
 
+  await controller.connect();
+
+  assert.deepEqual(client.requestCalls, []);
+  assert.equal(controller.snapshot.connectPanel.state, "error");
+  assert.equal(controller.snapshot.connectPanel.message, "请输入正确的 9 位 ID");
+});
+
+test("a valid ID enters connecting immediately and duplicate submits are ignored", async () => {
+  const deferred = new DeferredPeerConnectionClient();
+  const { controller, scheduler } = makeHarness(deferred);
+  openEditor(controller, scheduler);
   controller.updateInput("076bm9evq");
+
+  const request = controller.connect();
+  assert.equal(controller.snapshot.connectPanel.state, "connecting");
+  assert.equal(controller.snapshot.connectPanel.message, "正在建立连接…");
+  assert.equal(controller.snapshot.busy, true);
+  void controller.connect();
+  assert.deepEqual(deferred.requestCalls, ["076bm9evq"]);
+
+  deferred.finish(emptyResult);
+  await request;
+  assert.equal(controller.snapshot.connectPanel.state, "success");
+  assert.equal(controller.snapshot.connectPanel.message, "建联请求已发送");
+});
+
+test("connecting cannot be closed by eyes, Escape, or outside focus loss", async () => {
+  const deferred = new DeferredPeerConnectionClient();
+  const { controller, scheduler } = makeHarness(deferred);
+  openEditor(controller, scheduler);
+  controller.updateInput("076bm9evq");
+  const request = controller.connect();
+
+  controller.activateEyes();
+  assert.equal(controller.handleEscape(), true);
+  controller.dismissFromOutside();
+  assert.equal(controller.snapshot.open, true);
+  assert.equal(controller.snapshot.connectPanel.state, "connecting");
+
+  deferred.finish(emptyResult);
+  await request;
+});
+
+test("a mutually confirmed request shows true success then automatically returns to idle", async () => {
+  const connection = confirmedConnection("mutual-request");
+  const result = withOutcome(connection, "mutualConfirmed");
+  const { controller, scheduler } = makeHarness(new StaticPeerConnectionClient(result));
+  openEditor(controller, scheduler);
+  controller.updateInput("076bm9evq");
+
+  await controller.connect();
+
+  assert.equal(controller.snapshot.connectPanel.state, "success");
+  assert.equal(controller.snapshot.connectPanel.message, "已成功建联");
+  assert.equal(controller.snapshot.highlightedRequestId, connection.requestId);
+  assert.equal(controller.snapshot.connections.length, 1);
+  scheduler.runDelay(CONNECT_PANEL_SUCCESS_MS);
+  assert.equal(controller.snapshot.connectPanel.state, "closing");
+  scheduler.runDelay(CONNECT_PANEL_CLOSE_MS);
+  assert.equal(controller.snapshot.connectPanel.state, "idle");
+  assert.equal(controller.snapshot.input, "");
+  assert.equal(controller.snapshot.connectPanel.message, "");
+});
+
+test("success can be closed early with Escape", async () => {
+  const connection = confirmedConnection("success-escape");
+  const { controller, scheduler } = makeHarness(
+    new StaticPeerConnectionClient(withOutcome(connection, "mutualConfirmed"))
+  );
+  openEditor(controller, scheduler);
+  controller.updateInput("076bm9evq");
+  await controller.connect();
+
+  assert.equal(controller.handleEscape(), true);
+  assert.equal(controller.snapshot.connectPanel.state, "closing");
+  assert.equal(scheduler.hasDelay(CONNECT_PANEL_SUCCESS_MS), false);
+  scheduler.runDelay(CONNECT_PANEL_CLOSE_MS);
+  assert.equal(controller.snapshot.connectPanel.state, "idle");
+});
+
+test("failed connection keeps the input, restores editing, and can retry", async () => {
+  const error = new Error("safe unified failure");
+  error.name = "CONNECTION_REQUEST_FAILED";
+  const client = new SequencedPeerConnectionClient([error, emptyResult]);
+  const { controller, scheduler } = makeHarness(client);
+  openEditor(controller, scheduler);
+  controller.updateInput("076bm9evq");
+
+  await controller.connect();
+
+  assert.equal(controller.snapshot.connectPanel.state, "error");
+  assert.equal(controller.snapshot.connectPanel.message, "暂时无法完成建联，请稍后重试");
+  assert.equal(controller.snapshot.input, "076bm9evq");
+  assert.equal(controller.snapshot.busy, false);
+
+  await controller.connect();
+  assert.equal(client.requestCalls.length, 2);
+  assert.equal(controller.snapshot.connectPanel.state, "success");
+});
+
+test("known timeout and lookup errors map only from trustworthy error codes", async () => {
+  for (const [name, expected] of [
+    ["REQUEST_TIMEOUT", "连接超时，请稍后重试"],
+    ["CONNECTION_RESOLVE_FAILED", "没有找到这个 Teti，请检查 ID"]
+  ] as const) {
+    const error = new Error(name);
+    error.name = name;
+    const { controller, scheduler } = makeHarness(new SequencedPeerConnectionClient([error]));
+    openEditor(controller, scheduler);
+    controller.updateInput("076bm9evq");
+
+    await controller.connect();
+
+    assert.equal(controller.snapshot.connectPanel.state, "error");
+    assert.equal(controller.snapshot.connectPanel.message, expected);
+  }
+});
+
+test("an already-confirmed peer stays visible and returns a recoverable scoped error", async () => {
+  const connection = confirmedConnection("confirmed-request");
+  const client = new StaticPeerConnectionClient(withOutcome(connection, "alreadyConfirmed"));
+  const { controller, scheduler } = makeHarness(client);
+  openEditor(controller, scheduler);
+  controller.updateInput("076bm9evq");
+
   await controller.connect();
 
   assert.deepEqual(client.requestCalls, ["076bm9evq"]);
-  assert.equal(controller.snapshot.input, "");
+  assert.equal(controller.snapshot.input, "076bm9evq");
   assert.equal(controller.snapshot.highlightedRequestId, connection.requestId);
-  assert.equal(controller.snapshot.notice, "已经与 Remote 建联，无需再次发送邀请。");
-  assert.equal(controller.snapshot.error, undefined);
-});
-
-test("repeating a pending outgoing request keeps one request and emphasizes the wait state", async () => {
-  const connection: PeerConnectionDto = {
-    requestId: "waiting-request",
-    state: "Requested",
-    direction: "outgoing",
-    remoteTetiId: identity.id,
-    remoteAddress: identity.address,
-    remoteDisplayName: identity.displayName,
-    createdAt: "2026-07-17T00:00:00.000Z",
-    updatedAt: "2026-07-17T00:00:01.000Z"
-  };
-  const controller = makeController({
-    connections: [connection],
-    receivedCount: 0,
-    heartbeatCount: 0,
-    requestOutcome: {
-      kind: "alreadyRequested",
-      requestId: connection.requestId,
-      remoteTetiId: connection.remoteTetiId
-    }
-  });
-
-  controller.updateInput("076bm9evq");
-  await controller.connect();
-
+  assert.equal(controller.snapshot.connectPanel.state, "error");
+  assert.equal(controller.snapshot.connectPanel.message, "你们已经建联");
   assert.equal(controller.snapshot.connections.length, 1);
-  assert.equal(controller.snapshot.highlightedRequestId, connection.requestId);
-  assert.equal(controller.snapshot.notice, "邀请已发送，正在等待 Remote 确认。");
-  assert.equal(controller.snapshot.noticeTone, "attention");
 });
 
-test("mutual invitation shows a concise success state and highlights the confirmed peer", async () => {
+test("an outgoing request is acknowledged without falsely claiming the peer is connected", async () => {
   const connection: PeerConnectionDto = {
-    requestId: "mutual-request",
-    state: "Confirmed",
-    direction: "incoming",
-    remoteTetiId: identity.id,
-    remoteAddress: identity.address,
-    remoteDisplayName: identity.displayName,
-    createdAt: "2026-07-17T00:00:00.000Z",
-    updatedAt: "2026-07-17T00:00:01.000Z"
+    ...confirmedConnection("waiting-request"),
+    state: "Requested"
   };
-  const controller = makeController({
-    connections: [connection],
-    receivedCount: 0,
-    heartbeatCount: 0,
-    requestOutcome: {
-      kind: "mutualConfirmed",
-      requestId: connection.requestId,
-      remoteTetiId: connection.remoteTetiId
-    }
-  });
-
+  const { controller, scheduler } = makeHarness(
+    new StaticPeerConnectionClient(withOutcome(connection, "alreadyRequested"))
+  );
+  openEditor(controller, scheduler);
   controller.updateInput("076bm9evq");
+
   await controller.connect();
 
-  assert.equal(controller.snapshot.highlightedRequestId, connection.requestId);
-  assert.equal(controller.snapshot.notice, "双方均已发起邀请，已与 Remote 建联。");
-  assert.equal(controller.snapshot.noticeTone, "success");
+  assert.equal(controller.snapshot.connectPanel.state, "success");
+  assert.equal(controller.snapshot.connectPanel.message, "建联请求已发送");
+  assert.notEqual(controller.snapshot.connectPanel.message, "已成功建联");
 });
 
-test("outside focus loss collapses an open connection panel even with pending approval", async () => {
-  const pending: PeerConnectionDto = {
-    requestId: "pending-request",
-    state: "PendingApproval",
-    direction: "incoming",
-    remoteTetiId: identity.id,
-    remoteAddress: identity.address,
-    remoteDisplayName: identity.displayName,
-    createdAt: "2026-07-17T00:00:00.000Z",
-    updatedAt: "2026-07-17T00:00:01.000Z"
-  };
+test("editing and error close through the eyes or Escape and clear only after closing", async () => {
+  const { controller, scheduler } = makeHarness();
+  openEditor(controller, scheduler);
+  controller.updateInput("abc123xyz");
+  controller.activateEyes();
+  assert.equal(controller.snapshot.connectPanel.state, "closing");
+  controller.activateEyes();
+  controller.handleEscape();
+  assert.equal(controller.snapshot.connectPanel.state, "closing");
+  scheduler.runDelay(CONNECT_PANEL_CLOSE_MS);
+  assert.equal(controller.snapshot.connectPanel.state, "idle");
+  assert.equal(controller.snapshot.input, "");
+
+  controller.activateEyes();
+  scheduler.runDelay(CONNECT_PANEL_OPEN_MS);
+  controller.updateInput("too-short");
+  await controller.connect();
+  assert.equal(controller.snapshot.connectPanel.state, "error");
+  assert.equal(controller.handleEscape(), true);
+  scheduler.runDelay(CONNECT_PANEL_CLOSE_MS);
+  assert.equal(controller.snapshot.connectPanel.state, "idle");
+});
+
+test("outside focus loss collapses the outer connection island when no request is running", async () => {
   const invoker = new RecordingTauriInvoker();
   const controller = new PeerConnectionController({
-    client: new StaticPeerConnectionClient({ connections: [pending], receivedCount: 1, heartbeatCount: 0 }),
+    client: new StaticPeerConnectionClient(emptyResult),
     notchWindow: new TauriNotchWindowController(invoker),
-    onChange: () => undefined,
-    schedule: () => 0
+    onChange: () => undefined
   });
 
-  await controller.connect();
   controller.open();
   controller.dismissFromOutside();
+  await new Promise<void>((resolve) => setImmediate(resolve));
 
   assert.equal(controller.snapshot.open, false);
   assert.deepEqual(invoker.calls.at(-1), {
     command: "set_island_mode",
     args: { mode: "idle", reason: "peer-panel-focus-lost" }
   });
+  controller.dispose();
 });
 
-test("pending approval no longer disables the inactive auto-collapse timer", async () => {
-  const pending: PeerConnectionDto = {
-    requestId: "pending-timeout",
-    state: "PendingApproval",
-    direction: "incoming",
-    remoteTetiId: identity.id,
-    remoteAddress: identity.address,
-    createdAt: "2026-07-17T00:00:00.000Z",
-    updatedAt: "2026-07-17T00:00:01.000Z"
-  };
-  const scheduled: Array<{ callback: () => void; delayMs: number }> = [];
+test("disposing the controller cancels opening, success, collapse, and polling timers", async () => {
+  const scheduler = new ControlledScheduler();
   const controller = new PeerConnectionController({
-    client: new StaticPeerConnectionClient({ connections: [pending], receivedCount: 1, heartbeatCount: 0 }),
+    client: new StaticPeerConnectionClient(emptyResult),
     notchWindow: new TauriNotchWindowController(new RecordingTauriInvoker()),
     onChange: () => undefined,
-    schedule: (callback, delayMs) => scheduled.push({ callback, delayMs })
+    schedule: scheduler.schedule,
+    cancel: scheduler.cancel
   });
 
-  await controller.connect();
+  await controller.initialize();
   controller.open();
-  scheduled.at(-1)?.callback();
-
-  assert.equal(scheduled.at(-1)?.delayMs, 20_000);
-  assert.equal(controller.snapshot.open, false);
+  controller.activateEyes();
+  assert.ok(scheduler.size > 0);
+  controller.dispose();
+  assert.equal(scheduler.size, 0);
+  scheduler.runAll();
+  assert.equal(controller.snapshot.connectPanel.state, "opening");
 });
 
-test("connection UI renders the complete list inside a bounded vertical scroller", async () => {
+test("connection UI keeps status inside the input and closes on clicks outside its controls", async () => {
+  const [appSource, stateSource, styles] = await Promise.all([
+    readFile(new URL("../src/app.ts", import.meta.url), "utf8"),
+    readFile(new URL("../src/connections/connect-panel-state.ts", import.meta.url), "utf8"),
+    readFile(new URL("../src/styles.css", import.meta.url), "utf8")
+  ]);
+
+  assert.match(appSource, /stage\.append\(face\);\s*\n\s*if \(panelState !== "idle"\)/);
+  assert.doesNotMatch(appSource, /textContent\s*=\s*"连接另一个 Teti"/);
+  assert.doesNotMatch(appSource, /还没有建联记录/);
+  assert.match(appSource, /input\.placeholder = CONNECT_PANEL_PLACEHOLDER/);
+  assert.match(stateSource, /CONNECT_PANEL_PLACEHOLDER = "\*{9}（teti\.bot 社区9位ID）"/);
+  assert.match(appSource, /maxLength = 9/);
+  assert.match(appSource, /pasted\.trim\(\)/);
+  assert.match(appSource, /aria-controls", "teti-connect-panel"/);
+  assert.match(appSource, /aria-expanded/);
+  assert.match(appSource, /aria-label", "建立连接"/);
+  assert.match(appSource, /aria-live", "polite"/);
+  assert.match(appSource, /inlineStatus\.textContent = hasInlineStatus/);
+  assert.match(appSource, /target\.closest\("\.teti-connect-input-shell"\)/);
+  assert.match(appSource, /target\.closest\("\.teti-connect-button"\)/);
+  assert.doesNotMatch(appSource, /cancel\.textContent = "取消"/);
+  assert.match(appSource, /focusAfterPanelExpansion\(input\)/);
+  assert.doesNotMatch(styles, /\.teti-connect-message-slot/);
+  assert.match(styles, /\.teti-connect-inline-status/);
+  assert.match(styles, /@keyframes teti-connect-open/);
+  assert.match(styles, /@keyframes teti-connect-close/);
+  assert.match(styles, /@keyframes teti-connect-search/);
+  assert.match(styles, /@media \(prefers-reduced-motion: reduce\)/);
+});
+
+test("connection UI renders the complete existing card list inside a bounded scroller", async () => {
   const [appSource, styles] = await Promise.all([
     readFile(new URL("../src/app.ts", import.meta.url), "utf8"),
     readFile(new URL("../src/styles.css", import.meta.url), "utf8")
@@ -237,13 +355,99 @@ test("connection UI renders the complete list inside a bounded vertical scroller
   assert.match(styles, /data-has-notch="true"\]\s+\.teti-island--connections\s*\{[\s\S]*safe-top-inset/);
 });
 
-function makeController(result: PeerConnectionResult): PeerConnectionController {
-  return new PeerConnectionController({
-    client: new StaticPeerConnectionClient(result),
+function makeHarness(client: PeerConnectionClient = new StaticPeerConnectionClient(emptyResult)): {
+  controller: PeerConnectionController;
+  scheduler: ControlledScheduler;
+  client: PeerConnectionClient & { requestCalls: string[] };
+} {
+  const scheduler = new ControlledScheduler();
+  const controller = new PeerConnectionController({
+    client,
     notchWindow: new TauriNotchWindowController(new RecordingTauriInvoker()),
     onChange: () => undefined,
-    schedule: () => 0
+    schedule: scheduler.schedule,
+    cancel: scheduler.cancel
   });
+  return {
+    controller,
+    scheduler,
+    client: client as PeerConnectionClient & { requestCalls: string[] }
+  };
+}
+
+function openEditor(controller: PeerConnectionController, scheduler: ControlledScheduler): void {
+  controller.open();
+  controller.activateEyes();
+  assert.equal(controller.snapshot.connectPanel.state, "opening");
+  scheduler.runDelay(CONNECT_PANEL_OPEN_MS);
+  assert.equal(controller.snapshot.connectPanel.state, "editing");
+}
+
+function confirmedConnection(requestId: string): PeerConnectionDto {
+  return {
+    requestId,
+    state: "Confirmed",
+    direction: "outgoing",
+    remoteTetiId: identity.id,
+    remoteAddress: identity.address,
+    remoteDisplayName: identity.displayName,
+    createdAt: "2026-07-17T00:00:00.000Z",
+    updatedAt: "2026-07-17T00:00:01.000Z"
+  };
+}
+
+function withOutcome(
+  connection: PeerConnectionDto,
+  kind: NonNullable<PeerConnectionResult["requestOutcome"]>["kind"]
+): PeerConnectionResult {
+  return {
+    connections: [connection],
+    receivedCount: 0,
+    heartbeatCount: 0,
+    requestOutcome: {
+      kind,
+      requestId: connection.requestId,
+      remoteTetiId: connection.remoteTetiId
+    }
+  };
+}
+
+class ControlledScheduler {
+  private nextId = 1;
+  private readonly tasks = new Map<number, { callback: () => void; delayMs: number }>();
+
+  readonly schedule = (callback: () => void, delayMs: number): number => {
+    const id = this.nextId++;
+    this.tasks.set(id, { callback, delayMs });
+    return id;
+  };
+
+  readonly cancel = (handle: unknown): void => {
+    this.tasks.delete(handle as number);
+  };
+
+  get size(): number {
+    return this.tasks.size;
+  }
+
+  hasDelay(delayMs: number): boolean {
+    return [...this.tasks.values()].some((task) => task.delayMs === delayMs);
+  }
+
+  runDelay(delayMs: number): void {
+    const entry = [...this.tasks.entries()].find(([, task]) => task.delayMs === delayMs);
+    assert.ok(entry, `expected a scheduled ${delayMs}ms task`);
+    const [id, task] = entry;
+    this.tasks.delete(id);
+    task.callback();
+  }
+
+  runAll(): void {
+    for (const [id, task] of [...this.tasks.entries()]) {
+      this.tasks.delete(id);
+      task.callback();
+    }
+  }
 }
 
 class StaticRegistry implements TetiRegistryReader {
@@ -279,12 +483,45 @@ class StaticPeerConnectionClient implements PeerConnectionClient {
     return this.requestResult;
   }
 
-  async list(): Promise<PeerConnectionResult> { return this.emptyResult(); }
-  async poll(): Promise<PeerConnectionResult> { return this.emptyResult(); }
-  async accept(_requestId: string): Promise<PeerConnectionResult> { return this.emptyResult(); }
-  async reject(_requestId: string): Promise<PeerConnectionResult> { return this.emptyResult(); }
+  async list(): Promise<PeerConnectionResult> { return emptyResult; }
+  async poll(): Promise<PeerConnectionResult> { return emptyResult; }
+  async accept(_requestId: string): Promise<PeerConnectionResult> { return emptyResult; }
+  async reject(_requestId: string): Promise<PeerConnectionResult> { return emptyResult; }
+}
 
-  private emptyResult(): PeerConnectionResult {
-    return { connections: [], receivedCount: 0, heartbeatCount: 0 };
+class SequencedPeerConnectionClient extends StaticPeerConnectionClient {
+  private readonly sequence: Array<PeerConnectionResult | Error>;
+
+  constructor(sequence: Array<PeerConnectionResult | Error>) {
+    super(emptyResult);
+    this.sequence = [...sequence];
+  }
+
+  override async request(query: string): Promise<PeerConnectionResult> {
+    this.requestCalls.push(query);
+    const next = this.sequence.shift() ?? emptyResult;
+    if (next instanceof Error) throw next;
+    return next;
+  }
+}
+
+class DeferredPeerConnectionClient extends StaticPeerConnectionClient {
+  private resolveRequest?: (result: PeerConnectionResult) => void;
+
+  constructor() {
+    super(emptyResult);
+  }
+
+  override request(query: string): Promise<PeerConnectionResult> {
+    this.requestCalls.push(query);
+    return new Promise((resolve) => {
+      this.resolveRequest = resolve;
+    });
+  }
+
+  finish(result: PeerConnectionResult): void {
+    assert.ok(this.resolveRequest, "expected a pending request");
+    this.resolveRequest(result);
+    this.resolveRequest = undefined;
   }
 }

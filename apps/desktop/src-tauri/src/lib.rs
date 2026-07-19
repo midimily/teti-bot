@@ -3,12 +3,17 @@ mod lifecycle_bridge;
 mod macos_panel;
 mod window;
 
+#[cfg(target_os = "macos")]
+use tauri::Emitter;
+
 pub fn run() {
-    let builder = tauri::Builder::default().manage(lifecycle_bridge::LifecycleBridge::default());
+    let builder = tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
+        .manage(lifecycle_bridge::LifecycleBridge::default());
     #[cfg(target_os = "macos")]
     let builder = builder.plugin(tauri_nspanel::init());
 
-    builder
+    let app = builder
         .setup(|app| {
             window::create_island_window(app)?;
             Ok(())
@@ -21,6 +26,13 @@ pub fn run() {
             window::hide_island,
             window::current_monitor_info
         ])
-        .run(tauri::generate_context!())
-        .expect("failed to run Teti Desktop");
+        .build(tauri::generate_context!())
+        .expect("failed to build Teti Desktop");
+
+    app.run(|handle, event| {
+        #[cfg(target_os = "macos")]
+        if let tauri::RunEvent::Reopen { .. } = event {
+            let _ = handle.emit("teti://dock-activate", ());
+        }
+    });
 }

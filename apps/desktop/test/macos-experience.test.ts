@@ -116,6 +116,8 @@ test("desktop shell exposes Codex status and explicit four-character sharing con
   assert.doesNotMatch(styles, /data-reduced-motion/);
   assert.match(app, /target\.closest\("\.teti-header-panel"\)/);
   assert.match(app, /target\.closest\("\.teti-header-icon\[aria-expanded\]"\)/);
+  assert.match(app, /options\.tauri\.onDockActivate/);
+  assert.doesNotMatch(aiView, /toggle\.disabled = snapshot\.sharingBusy/);
   assert.doesNotMatch(app, /iconButton\(X, "收起"/);
   assert.match(styles, /\.teti-header\s*\{[\s\S]*right:\s*14px/);
   assert.match(styles, /\.teti-toolbar-asset-icon\s*\{[\s\S]*object-fit:\s*contain/);

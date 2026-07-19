@@ -20,9 +20,19 @@ The former interface-animation setting is removed. macOS's
 position now opens **设置**, whose four-character toggle is **状态共享**.
 Both toolbar entries use dedicated blue image assets with matching sizing and
 interaction treatment. Collapsing the island clears any open toolbar panel, and
-clicking elsewhere inside the expanded island closes it. Sharing consent updates
-optimistically while persistence completes; peer broadcast then continues in
-the serialized background queue so network delivery cannot delay the switch.
+clicking elsewhere inside the expanded island closes it. Activating Teti from
+the macOS Dock reopens the expanded connection island. Native panel mode changes
+are ordered and coalesced, and the idle resize is committed without a separate
+AppKit frame animation so WebKit cannot leave the previous blue surface visible
+during collapse.
+
+Sharing consent updates optimistically while persistence completes. Repeated
+changes remain interactive and use latest-intent-wins persistence; stale reads
+or responses cannot overwrite the current selection. The Rust lifecycle bridge
+routes concurrent sidecar responses by request ID, so a network-bound connection
+poll never blocks the local setting request. Peer broadcasts are coalesced and
+continue in the serialized background queue, so delivery cannot delay the switch
+or create one network send for every rapid click.
 
 ## Consent and privacy boundary
 
@@ -76,7 +86,8 @@ involved.
 
 Automated coverage includes exact plan mapping, sanitized share projection,
 strict protocol validation, private setting persistence, default-off consent,
-sidecar bridge methods, confirmed-peer delivery, revocation, controller refresh
-behavior, and the new desktop copy. Tests use fake usage data and an in-memory
+concurrent sidecar response routing, confirmed-peer delivery, revocation,
+rapid-toggle coalescing, Dock activation, controller refresh behavior, and the
+new desktop copy. Tests use fake usage data and an in-memory
 Chatmail relay; they do not read the real Codex authentication file, contact
 OpenAI, or consume model tokens.

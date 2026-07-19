@@ -118,7 +118,10 @@ fn resize_and_pin_on_main(app: &AppHandle, mode: IslandMode) -> Result<(), Strin
         NSSize::new(base.width, height),
     );
 
-    panel.setFrame_display_animate(target, true, matches!(mode, IslandMode::Idle));
+    // WebKit and AppKit do not commit their resize frames atomically. Animating only the
+    // native panel collapse can briefly stretch the expanded blue surface after the DOM
+    // has already switched to the idle face, so keep the panel resize deterministic.
+    panel.setFrame_display_animate(target, true, false);
     panel.setHasShadow(!matches!(mode, IslandMode::Hidden | IslandMode::Idle));
     let accepts_input = matches!(mode, IslandMode::Onboarding | IslandMode::Error);
     panel.setBecomesKeyOnlyIfNeeded(!accepts_input);

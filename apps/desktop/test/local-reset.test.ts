@@ -47,10 +47,12 @@ test("Alpha local reset removes first-install state locally without remote delet
   }
 });
 
-test("connection input uses a dimmed nine-star example instead of a real ID", async () => {
+test("connection input uses the privacy-safe nine-star community ID placeholder", async () => {
   const appSource = await readFile(new URL("../src/app.ts", import.meta.url), "utf8");
+  const stateSource = await readFile(new URL("../src/connections/connect-panel-state.ts", import.meta.url), "utf8");
   const styles = await readFile(new URL("../src/styles.css", import.meta.url), "utf8");
 
-  assert.match(appSource, /input\.placeholder = "\*{9}"/);
+  assert.match(appSource, /input\.placeholder = CONNECT_PANEL_PLACEHOLDER/);
+  assert.match(stateSource, /CONNECT_PANEL_PLACEHOLDER = "\*{9}（teti\.bot 社区9位ID）"/);
   assert.match(styles, /\.teti-connect-input::placeholder[\s\S]*opacity: 0\.48/);
 });

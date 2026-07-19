@@ -56,12 +56,12 @@ export function createSharingPanel(
   title.textContent = "设置";
   const label = document.createElement("label");
   label.className = "teti-toggle-row";
+  label.setAttribute("aria-busy", String(snapshot.sharingBusy));
   const text = document.createElement("span");
   text.textContent = "状态共享";
   const toggle = document.createElement("input");
   toggle.type = "checkbox";
   toggle.checked = snapshot.statusSharing;
-  toggle.disabled = snapshot.sharingBusy;
   toggle.addEventListener("change", () => void controller?.setStatusSharing(toggle.checked));
   label.append(text, toggle);
   panel.append(title, label);

@@ -150,6 +150,31 @@ test("tauri notch controller maps shell actions to bridge commands", async () =>
   ]);
 });
 
+test("notch mode updates coalesce before native dispatch and keep the latest mode", async () => {
+  const invoker = new RecordingTauriInvoker();
+  const controller = new TauriNotchWindowController(invoker);
+
+  const collapse = controller.setMode("idle", "auto-collapse");
+  const reopen = controller.setMode("onboarding", "dock-activate");
+  await Promise.all([collapse, reopen]);
+
+  assert.deepEqual(invoker.calls, [
+    { command: "set_island_mode", args: { mode: "onboarding", reason: "dock-activate" } }
+  ]);
+});
+
+test("recording Tauri bridge delivers Dock activation events", async () => {
+  const invoker = new RecordingTauriInvoker();
+  let activations = 0;
+  const stop = await invoker.onDockActivate(() => { activations += 1; });
+
+  invoker.emitDockActivate();
+  stop();
+  invoker.emitDockActivate();
+
+  assert.equal(activations, 1);
+});
+
 test("view-model states map to desktop shell window modes", () => {
   assert.equal(visualModeForSnapshot({ state: "idle", nameInput: "", submitting: false }), "idle");
   assert.equal(visualModeForSnapshot({ state: "welcome", nameInput: "", submitting: false }), "onboarding");

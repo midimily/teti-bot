@@ -1,5 +1,5 @@
 import { FirstLaunchCoordinator } from "./first-launch/coordinator.ts";
-import { Check, Link2, Radio, X, createElement } from "lucide";
+import { Check, Link2, X, createElement } from "lucide";
 import { countUnicodeCharacters, truncateTetiDisplayName } from "../../../core/account/display-name.ts";
 import type { FirstLaunchSnapshot } from "./first-launch/state-machine.ts";
 import { toFirstLaunchViewModel, type FirstLaunchViewModel } from "./first-launch/view-model.ts";
@@ -14,8 +14,15 @@ import {
 import {
   BridgePeerConnectionClient,
   MockPeerConnectionClient,
-  PeerConnectionController
+  PeerConnectionController,
+  type PeerConnectionSnapshot
 } from "./connections/controller.ts";
+import { CONNECT_PANEL_PLACEHOLDER } from "./connections/connect-panel-state.ts";
+import {
+  createRemoteTetiAvatar,
+  mapRemoteTetiReachability,
+  remoteTetiReachabilityLabel
+} from "./connections/remote-teti-avatar.ts";
 import {
   DiscoveryHeartbeatController,
   shouldRunDiscoveryHeartbeat
@@ -33,6 +40,11 @@ import {
   createSharingPanel
 } from "./ai-status/view.ts";
 import { presentCodexUsage } from "./codex-usage/presentation.ts";
+import {
+  createTetiBotBrandLink,
+  TETI_BOT_OPENING_EVENT,
+  TETI_BOT_OPEN_SETTLED_EVENT
+} from "./brand/teti-bot-brand-link.ts";
 import "./styles.css";
 
 const aiToolsButtonIconUrl = new URL("../assets/ai-tools-btn.png", import.meta.url).href;
@@ -63,7 +75,35 @@ export async function createDesktopApp(options: DesktopAppOptions): Promise<Desk
   let connectionsInitialized = false;
   let disposed = false;
   let stopFocusListener: (() => void) | undefined;
+  let stopDockActivateListener: (() => void) | undefined;
+  let preserveStateForBrandOpen = false;
+  let brandOpenGuardTimer: number | undefined;
   const baseSchedule = options.schedule ?? ((callback: () => void, delayMs: number) => setTimeout(callback, delayMs));
+  const clearBrandOpenGuard = () => {
+    preserveStateForBrandOpen = false;
+    if (brandOpenGuardTimer !== undefined) {
+      options.root.ownerDocument.defaultView?.clearTimeout(brandOpenGuardTimer);
+      brandOpenGuardTimer = undefined;
+    }
+  };
+  const handleBrandWebsiteOpening = () => {
+    clearBrandOpenGuard();
+    preserveStateForBrandOpen = true;
+  };
+  const handleBrandWebsiteOpenSettled = (event: Event) => {
+    const opened = Boolean((event as CustomEvent<{ opened?: boolean }>).detail?.opened);
+    if (!opened) {
+      clearBrandOpenGuard();
+      return;
+    }
+    if (!preserveStateForBrandOpen) return;
+    brandOpenGuardTimer = options.root.ownerDocument.defaultView?.setTimeout(
+      clearBrandOpenGuard,
+      2_000
+    );
+  };
+  options.root.addEventListener(TETI_BOT_OPENING_EVENT, handleBrandWebsiteOpening);
+  options.root.addEventListener(TETI_BOT_OPEN_SETTLED_EVENT, handleBrandWebsiteOpenSettled);
   const coordinator = new FirstLaunchCoordinator({
     accountLifecycle: selection.lifecycle,
     notchWindow,
@@ -97,9 +137,24 @@ export async function createDesktopApp(options: DesktopAppOptions): Promise<Desk
   if (options.tauri.onFocusChanged) {
     stopFocusListener = await options.tauri.onFocusChanged((focused) => {
       if (!focused) {
+        if (preserveStateForBrandOpen) {
+          clearBrandOpenGuard();
+          return;
+        }
         aiStatus.closePanel();
         connections.dismissFromOutside();
       }
+    });
+  }
+
+  if (options.tauri.onDockActivate) {
+    stopDockActivateListener = await options.tauri.onDockActivate(() => {
+      if (!coordinator.snapshot.account) {
+        void notchWindow.show("dock-activate");
+        return;
+      }
+      aiStatus.closePanel(false);
+      connections.open();
     });
   }
 
@@ -122,8 +177,13 @@ export async function createDesktopApp(options: DesktopAppOptions): Promise<Desk
       if (disposed) return;
       disposed = true;
       stopFocusListener?.();
+      stopDockActivateListener?.();
+      clearBrandOpenGuard();
+      options.root.removeEventListener(TETI_BOT_OPENING_EVENT, handleBrandWebsiteOpening);
+      options.root.removeEventListener(TETI_BOT_OPEN_SETTLED_EVENT, handleBrandWebsiteOpenSettled);
       discoveryHeartbeat?.stop();
       aiStatus.stop();
+      connections.dispose();
     }
   };
 
@@ -336,73 +396,93 @@ function createConnectionIsland(
   island.setAttribute("aria-label", "连接其他 Teti");
   island.append(createConnectionHeader(config, aiStatus));
 
-  const face = document.createElement("div");
-  face.className = "teti-face teti-face--ready";
-  face.setAttribute("aria-hidden", "true");
+  const panelState = snapshot.connectPanel.state;
+  const face = document.createElement("button");
+  face.className = `teti-face teti-face--ready teti-connect-eyes is-${panelState}`;
+  face.type = "button";
+  face.setAttribute("aria-label", connectEyesLabel(panelState));
+  face.setAttribute("aria-controls", "teti-connect-panel");
+  face.setAttribute("aria-expanded", String(!["idle", "closing"].includes(panelState)));
+  face.setAttribute("aria-disabled", String(["opening", "connecting", "closing"].includes(panelState)));
   face.innerHTML = '<div class="teti-eye"></div><div class="teti-eye"></div>';
+  face.addEventListener("click", () => controller.activateEyes());
+  face.addEventListener("pointermove", (event) => updateEyeTracking(face, event));
+  face.addEventListener("pointerleave", () => resetEyeTracking(face));
 
   const content = document.createElement("div");
   content.className = "teti-content teti-connection-content";
-  const title = document.createElement("h1");
-  title.textContent = "连接另一个 Teti";
-  const message = document.createElement("p");
-  message.className = "teti-message teti-connection-message";
-  message.textContent = "输入 teti.bot 信息卡上的 9 位 ID";
+  const stage = document.createElement("div");
+  stage.className = `teti-connect-stage is-${panelState}`;
+  stage.append(face);
 
-  const form = document.createElement("form");
-  form.className = "teti-connect-form";
-  const input = document.createElement("input");
-  input.className = "teti-input teti-connect-input";
-  input.value = snapshot.input;
-  input.placeholder = "*********";
-  input.disabled = snapshot.busy;
-  input.maxLength = 9;
-  input.autocapitalize = "none";
-  input.spellcheck = false;
-  input.setAttribute("aria-label", "Teti 公开身份");
-  input.setAttribute("aria-describedby", "teti-connect-input-error");
-  const inputError = document.createElement("p");
-  inputError.id = "teti-connect-input-error";
-  inputError.className = "teti-error teti-connect-input-error";
-  inputError.setAttribute("role", "alert");
-  inputError.textContent = snapshot.inputError ?? "";
-  inputError.hidden = !snapshot.inputError;
-  input.addEventListener("focus", () => controller.noteActivity());
-  input.addEventListener("input", () => {
-    controller.updateInput(input.value);
-    const current = controller.snapshot;
-    if (input.value !== current.input) input.value = current.input;
-    inputError.textContent = current.inputError ?? "";
-    inputError.hidden = !current.inputError;
-    connect.disabled = current.busy || Boolean(current.inputError) || !/^[a-z0-9]{9}$/.test(current.input);
-  });
-  const connect = document.createElement("button");
-  connect.className = "teti-connect-button";
-  connect.type = "submit";
-  connect.disabled = snapshot.busy || Boolean(snapshot.inputError) || !/^[a-z0-9]{9}$/.test(snapshot.input);
-  connect.setAttribute("title", "发送建联请求");
-  connect.setAttribute("aria-label", "发送建联请求");
-  connect.append(createElement(Link2, { width: 19, height: 19, "stroke-width": 2, "aria-hidden": "true" }));
-  form.append(input, connect);
-  form.addEventListener("submit", (event) => {
-    event.preventDefault();
-    void controller.connect();
-  });
-
-  content.append(title, message, form, inputError);
-  if (snapshot.error) {
-    const error = document.createElement("p");
-    error.className = "teti-error teti-connect-error";
-    error.textContent = snapshot.error;
-    content.append(error);
-  } else if (snapshot.notice) {
-    const notice = document.createElement("p");
-    notice.className = `teti-connect-notice is-${snapshot.noticeTone ?? "info"}`;
-    notice.setAttribute("role", "status");
-    notice.setAttribute("aria-live", "polite");
-    notice.textContent = snapshot.notice;
-    content.append(notice);
+  if (panelState !== "idle") {
+    const panel = document.createElement("div");
+    panel.id = "teti-connect-panel";
+    panel.className = `teti-connect-panel is-${panelState}`;
+    const form = document.createElement("form");
+    form.className = "teti-connect-form";
+    const inputShell = document.createElement("div");
+    inputShell.className = "teti-connect-input-shell";
+    const input = document.createElement("input");
+    input.className = "teti-input teti-connect-input";
+    input.value = snapshot.input;
+    input.placeholder = CONNECT_PANEL_PLACEHOLDER;
+    input.disabled = !["editing", "error"].includes(panelState);
+    input.maxLength = 9;
+    input.autocapitalize = "none";
+    input.spellcheck = false;
+    input.setAttribute("aria-label", "Teti 社区 9 位 ID");
+    input.setAttribute("aria-describedby", "teti-connect-inline-status");
+    const inlineStatus = document.createElement("div");
+    inlineStatus.id = "teti-connect-inline-status";
+    inlineStatus.className = "teti-connect-inline-status";
+    inlineStatus.setAttribute("role", "status");
+    inlineStatus.setAttribute("aria-live", "polite");
+    const connect = document.createElement("button");
+    connect.className = "teti-connect-button";
+    connect.type = "submit";
+    connect.setAttribute("title", "建立连接");
+    connect.setAttribute("aria-label", "建立连接");
+    connect.append(createElement(Link2, { width: 19, height: 19, "stroke-width": 2, "aria-hidden": "true" }));
+    const syncForm = () => syncConnectForm(
+      controller.snapshot,
+      panel,
+      face,
+      inputShell,
+      input,
+      connect,
+      inlineStatus
+    );
+    input.addEventListener("focus", () => controller.noteActivity());
+    input.addEventListener("input", () => {
+      controller.updateInput(input.value);
+      syncForm();
+    });
+    input.addEventListener("pointerdown", () => {
+      if (controller.snapshot.connectPanel.state === "error") {
+        inputShell.classList.add("is-revealing-value");
+      }
+    });
+    input.addEventListener("paste", (event) => {
+      const pasted = event.clipboardData?.getData("text");
+      if (pasted === undefined) return;
+      event.preventDefault();
+      controller.updateInput(pasted.trim());
+      syncForm();
+    });
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      void controller.connect();
+    });
+    inputShell.append(input, inlineStatus);
+    form.append(inputShell, connect);
+    panel.append(form);
+    stage.append(panel);
+    syncForm();
+    if (["editing", "error"].includes(panelState)) focusAfterPanelExpansion(input);
   }
+
+  content.append(stage);
 
   if (snapshot.connections.length > 0) {
     const list = document.createElement("div");
@@ -416,17 +496,61 @@ function createConnectionIsland(
       ));
     }
     content.append(list);
-  } else {
-    const empty = document.createElement("div");
-    empty.className = "teti-connection-empty";
-    empty.textContent = "还没有建联记录";
-    content.append(empty);
   }
 
-  island.append(face, content);
+  island.append(content);
   installConnectionPanelInteractions(island, controller, aiStatus);
-  focusAfterPanelExpansion(input);
   return island;
+}
+
+function syncConnectForm(
+  snapshot: PeerConnectionSnapshot,
+  panel: HTMLElement,
+  face: HTMLButtonElement,
+  inputShell: HTMLElement,
+  input: HTMLInputElement,
+  connect: HTMLButtonElement,
+  inlineStatus: HTMLElement
+): void {
+  const state = snapshot.connectPanel.state;
+  if (input.value !== snapshot.input) input.value = snapshot.input;
+  input.disabled = !["editing", "error"].includes(state);
+  connect.disabled = state !== "editing" && state !== "error"
+    || !/^[a-z0-9]{9}$/.test(snapshot.input);
+  panel.className = `teti-connect-panel is-${state}`;
+  face.className = `teti-face teti-face--ready teti-connect-eyes is-${state}`;
+  face.setAttribute("aria-label", connectEyesLabel(state));
+  face.setAttribute("aria-expanded", String(!["idle", "closing"].includes(state)));
+  face.setAttribute("aria-disabled", String(["opening", "connecting", "closing"].includes(state)));
+  input.setAttribute("aria-invalid", String(state === "error"));
+  const hasInlineStatus = ["connecting", "success", "error"].includes(state);
+  inputShell.classList.toggle("has-inline-status", hasInlineStatus);
+  inputShell.classList.toggle("is-error", state === "error");
+  inputShell.classList.toggle("is-success", state === "success");
+  inputShell.classList.toggle("is-progress", state === "connecting");
+  if (state !== "error") inputShell.classList.remove("is-revealing-value");
+  inlineStatus.textContent = hasInlineStatus ? snapshot.connectPanel.message : "";
+}
+
+function connectEyesLabel(state: string): string {
+  if (state === "idle") return "打开建联输入";
+  if (state === "connecting") return "正在建立连接";
+  if (state === "opening" || state === "closing") return "建联输入正在切换";
+  return "收起建联输入";
+}
+
+function updateEyeTracking(face: HTMLButtonElement, event: PointerEvent): void {
+  if (face.getAttribute("aria-disabled") === "true") return;
+  const bounds = face.getBoundingClientRect();
+  const x = Math.max(-1, Math.min(1, (event.clientX - bounds.left) / bounds.width * 2 - 1));
+  const y = Math.max(-1, Math.min(1, (event.clientY - bounds.top) / bounds.height * 2 - 1));
+  face.style.setProperty("--teti-eye-track-x", `${(x * 2.2).toFixed(2)}px`);
+  face.style.setProperty("--teti-eye-track-y", `${(y * 1.4).toFixed(2)}px`);
+}
+
+function resetEyeTracking(face: HTMLButtonElement): void {
+  face.style.removeProperty("--teti-eye-track-x");
+  face.style.removeProperty("--teti-eye-track-y");
 }
 
 function installConnectionPanelInteractions(
@@ -448,6 +572,14 @@ function installConnectionPanelInteractions(
     island.querySelectorAll<HTMLButtonElement>(".teti-header-icon[aria-expanded='true']")
       .forEach((button) => button.setAttribute("aria-expanded", "false"));
   });
+  island.addEventListener("click", (event) => {
+    const state = controller.snapshot.connectPanel.state;
+    if (!["editing", "error", "success"].includes(state)) return;
+    const target = event.target;
+    if (!(target instanceof Element)) return;
+    if (target.closest(".teti-connect-input-shell") || target.closest(".teti-connect-button")) return;
+    controller.closeConnectPanel();
+  });
   island.addEventListener("keydown", (event) => {
     controller.noteActivity();
     if (event.key !== "Escape") return;
@@ -464,7 +596,7 @@ function installConnectionPanelInteractions(
       }
       return;
     }
-    controller.close("peer-panel-escape");
+    if (!controller.handleEscape()) controller.close("peer-panel-escape");
   });
 }
 
@@ -497,10 +629,18 @@ function createConnectionRow(
   const state = document.createElement("div");
   state.className = "teti-connection-state";
   if (connection.state === "Confirmed") {
+    const reachability = mapRemoteTetiReachability(connection);
+    row.classList.add(`is-${reachability}`);
+    row.prepend(createRemoteTetiAvatar({ reachability, size: 28 }));
     const presence = document.createElement("div");
     presence.className = "teti-connection-presence";
-    presence.append(createElement(Radio, { width: 14, height: 14, "stroke-width": 2, "aria-hidden": "true" }));
-    presence.append(document.createTextNode(isHeartbeatFresh(connection.lastHeartbeatReceivedAt) ? " 心跳在线" : " 已建联"));
+    const relationship = document.createElement("span");
+    relationship.className = "teti-connection-relationship";
+    relationship.textContent = "已建联";
+    const reachabilityText = document.createElement("span");
+    reachabilityText.className = `teti-connection-reachability is-${reachability}`;
+    reachabilityText.textContent = `[对方${remoteTetiReachabilityLabel(reachability)}]`;
+    presence.append(relationship, reachabilityText);
     state.append(presence, createRemoteAiStatus(connection.remoteAiStatus));
   } else if (connection.state === "PendingApproval") {
     const accept = iconButton(Check, "接受建联", () => void controller.accept(connection.requestId));
@@ -541,10 +681,6 @@ function iconButton(
   return button;
 }
 
-function isHeartbeatFresh(timestamp?: string): boolean {
-  return Boolean(timestamp && Date.now() - Date.parse(timestamp) < 15_000);
-}
-
 function updateNameCounter(input: HTMLInputElement, meta: HTMLElement, maxCharacters?: number): void {
   if (!maxCharacters) {
     meta.hidden = true;
@@ -558,9 +694,7 @@ function createIslandHeader(_config: ProvisioningModeConfig, aiStatus?: AiStatus
   const header = document.createElement("header");
   header.className = "teti-header";
 
-  const brand = document.createElement("div");
-  brand.className = "teti-brand";
-  brand.innerHTML = '<span class="teti-brand-dot" aria-hidden="true"></span><span>Teti</span>';
+  const brand = createTetiBotBrandLink({ ownerDocument: header.ownerDocument });
 
   const controls = document.createElement("div");
   controls.className = "teti-header-controls";
