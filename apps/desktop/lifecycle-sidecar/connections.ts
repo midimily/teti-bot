@@ -489,6 +489,15 @@ export function getDefaultPeerConnectionService(): Promise<PeerConnectionService
   return defaultServicePromise;
 }
 
+export async function closeDefaultPeerConnectionService(): Promise<void> {
+  const pendingService = defaultServicePromise;
+  if (pendingService) await pendingService.catch(() => undefined);
+  const client = defaultRpcClient;
+  defaultServicePromise = undefined;
+  defaultRpcClient = undefined;
+  await client?.close();
+}
+
 async function createDefaultPeerConnectionService(): Promise<PeerConnectionService> {
   const profile = await resolveTetiProfile();
   defaultRpcClient = createRuntimeChatmailRpcClient({

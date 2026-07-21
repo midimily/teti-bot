@@ -8,7 +8,6 @@ import { readProvisioningMode, type ProvisioningModeConfig } from "./provisionin
 import { TauriNotchWindowController, visualModeForViewModel } from "./platform/tauri-notch-window.ts";
 import type { TauriInvoker } from "./platform/tauri-api.ts";
 import {
-  BridgeDiscoveryHeartbeatClient,
   LifecycleBridgeClient
 } from "./provisioning/bridge-lifecycle.ts";
 import {
@@ -23,10 +22,6 @@ import {
   mapRemoteTetiReachability,
   remoteTetiReachabilityLabel
 } from "./connections/remote-teti-avatar.ts";
-import {
-  DiscoveryHeartbeatController,
-  shouldRunDiscoveryHeartbeat
-} from "./discovery/heartbeat.ts";
 import {
   AiStatusController,
   BridgeAiStatusClient,
@@ -127,13 +122,6 @@ export async function createDesktopApp(options: DesktopAppOptions): Promise<Desk
       : new MockAiStatusClient(),
     onChange: () => app?.render()
   });
-  const discoveryHeartbeat = selection.config.mode === "real"
-    ? new DiscoveryHeartbeatController({
-        client: new BridgeDiscoveryHeartbeatClient(new LifecycleBridgeClient(options.tauri)),
-        onFailure: () => console.warn("Teti discovery heartbeat failed; retrying on the next interval.")
-      })
-    : undefined;
-
   if (options.tauri.onFocusChanged) {
     stopFocusListener = await options.tauri.onFocusChanged((focused) => {
       if (!focused) {
@@ -168,9 +156,6 @@ export async function createDesktopApp(options: DesktopAppOptions): Promise<Desk
         connectionsInitialized = true;
         void connections.initialize();
       }
-      if (!disposed && shouldRunDiscoveryHeartbeat(coordinator.snapshot, selection.config.mode)) {
-        discoveryHeartbeat?.start();
-      }
       renderSnapshot(options.root, coordinator.snapshot, selection.config, coordinator, connections, aiStatus);
     },
     dispose: () => {
@@ -181,7 +166,6 @@ export async function createDesktopApp(options: DesktopAppOptions): Promise<Desk
       clearBrandOpenGuard();
       options.root.removeEventListener(TETI_BOT_OPENING_EVENT, handleBrandWebsiteOpening);
       options.root.removeEventListener(TETI_BOT_OPEN_SETTLED_EVENT, handleBrandWebsiteOpenSettled);
-      discoveryHeartbeat?.stop();
       aiStatus.stop();
       connections.dispose();
     }

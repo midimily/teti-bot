@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --experimental-strip-types --test apps/desktop/test/*.test.ts core/account/*.test.ts core/ai-status/*.test.ts core/application/*.test.ts core/connection/*.test.ts core/environment/*.test.ts core/identity/*.test.ts integrations/chatmail/*.test.ts services/discovery/*.test.ts services/discovery-worker/test/*.test.js",
+    "test": "node --experimental-strip-types --test apps/desktop/test/*.test.ts core/account/*.test.ts core/ai-status/*.test.ts core/application/*.test.ts core/connection/*.test.ts core/environment/*.test.ts core/identity/*.test.ts core/passport/*.test.ts integrations/chatmail/*.test.ts services/discovery/*.test.ts services/discovery-worker/test/*.test.js",
     "desktop:dev": "npm --prefix apps/desktop run dev",
     "desktop:tauri-dev": "npm --prefix apps/desktop run tauri:dev",
     "desktop:build": "npm --prefix apps/desktop run build",

@@ -5,6 +5,7 @@ mod window;
 
 #[cfg(target_os = "macos")]
 use tauri::Emitter;
+use tauri::Manager;
 
 pub fn run() {
     let builder = tauri::Builder::default()
@@ -30,6 +31,14 @@ pub fn run() {
         .expect("failed to build Teti Desktop");
 
     app.run(|handle, event| {
+        if matches!(
+            &event,
+            tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
+        ) {
+            handle
+                .state::<lifecycle_bridge::LifecycleBridge>()
+                .shutdown();
+        }
         #[cfg(target_os = "macos")]
         if let tauri::RunEvent::Reopen { .. } = event {
             let _ = handle.emit("teti://dock-activate", ());

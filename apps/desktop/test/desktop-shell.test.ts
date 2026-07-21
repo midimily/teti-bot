@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 import type { TetiAccount } from "../../../core/account/model.ts";
 import type { FirstLaunchSnapshot } from "../src/first-launch/state-machine.ts";
@@ -8,11 +9,6 @@ import { TauriNotchWindowController, visualModeForViewModel } from "../src/platf
 import { createDesktopAccountLifecycle } from "../src/provisioning/index.ts";
 import { MockDesktopAccountLifecycle, MOCK_ACCOUNT_STORAGE_KEY } from "../src/provisioning/mock-lifecycle.ts";
 import { readProvisioningMode } from "../src/provisioning/modes.ts";
-import { shouldRunDiscoveryHeartbeat } from "../src/discovery/heartbeat.ts";
-import {
-  BridgeDiscoveryHeartbeatClient,
-  LifecycleBridgeClient
-} from "../src/provisioning/bridge-lifecycle.ts";
 
 test("desktop provisioning defaults to mock mode", () => {
   const config = readProvisioningMode({});
@@ -207,49 +203,17 @@ test("view-model states map to desktop shell window modes", () => {
   );
 });
 
-test("registry heartbeat starts for any local real desktop account", () => {
-  const account = createAccount("Milo");
-  const real = readProvisioningMode({ TETI_PROVISIONING_MODE: "real" });
-  const mock = readProvisioningMode({ TETI_PROVISIONING_MODE: "mock" });
-
-  assert.equal(shouldRunDiscoveryHeartbeat({
-    state: "idle",
-    nameInput: "Milo",
-    submitting: false,
-    account
-  }, real.mode), true);
-  assert.equal(shouldRunDiscoveryHeartbeat({
-    state: "recoverable_error",
-    nameInput: "Milo",
-    submitting: false,
-    account,
-    error: { kind: "discovery_registration_failure", message: "pending", recoverable: true }
-  }, real.mode), true);
-  assert.equal(shouldRunDiscoveryHeartbeat({
-    state: "welcome",
-    nameInput: "",
-    submitting: false
-  }, real.mode), false);
-  assert.equal(shouldRunDiscoveryHeartbeat({
-    state: "idle",
-    nameInput: "Milo",
-    submitting: false,
-    account
-  }, mock.mode), false);
-});
-
-test("desktop heartbeat client calls the bounded discovery heartbeat lifecycle method", async () => {
-  const account = createAccount("Milo");
-  const invoker = new SequencedTauriInvoker([
-    { version: 1, id: "heartbeat", ok: true, result: account }
+test("Desktop is a Runtime consumer and owns no Registry or Codex network refresh schedule", async () => {
+  const [appSource, bridgeSource, aiStatusSource] = await Promise.all([
+    readFile(new URL("../src/app.ts", import.meta.url), "utf8"),
+    readFile(new URL("../src/provisioning/bridge-lifecycle.ts", import.meta.url), "utf8"),
+    readFile(new URL("../src/ai-status/controller.ts", import.meta.url), "utf8")
   ]);
-  const client = new BridgeDiscoveryHeartbeatClient(new LifecycleBridgeClient(invoker));
 
-  assert.deepEqual(await client.heartbeat(), account);
-  assert.equal(
-    (invoker.calls[0]?.args?.request as { method?: string } | undefined)?.method,
-    "discovery.heartbeat"
-  );
+  assert.doesNotMatch(appSource, /DiscoveryHeartbeat|discovery\.heartbeat/);
+  assert.doesNotMatch(bridgeSource, /BridgeDiscoveryHeartbeatClient/);
+  assert.doesNotMatch(aiStatusSource, /usage\.refresh|refreshUsage/);
+  assert.match(aiStatusSource, /usage\.get/);
 });
 
 function visualModeForSnapshot(snapshot: FirstLaunchSnapshot): string {

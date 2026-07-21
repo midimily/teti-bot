@@ -17,7 +17,7 @@ import {
   type ConnectPanelSnapshot
 } from "./connect-panel-state.ts";
 
-const POLL_INTERVAL_MS = 3_000;
+const SNAPSHOT_READ_INTERVAL_MS = 3_000;
 const AUTO_COLLAPSE_MS = 20_000;
 export const CONNECT_PANEL_OPEN_MS = 220;
 export const CONNECT_PANEL_CLOSE_MS = 190;
@@ -27,7 +27,7 @@ export interface PeerConnectionClient {
   resolve(query: string): Promise<PublicTetiIdentity>;
   request(query: string): Promise<PeerConnectionResult>;
   list(): Promise<PeerConnectionResult>;
-  poll(): Promise<PeerConnectionResult>;
+  readSnapshot(): Promise<PeerConnectionResult>;
   accept(requestId: string): Promise<PeerConnectionResult>;
   reject(requestId: string): Promise<PeerConnectionResult>;
 }
@@ -40,7 +40,7 @@ export interface PeerConnectionSnapshot {
   highlightedRequestId?: string;
   resolved?: PublicTetiIdentity;
   connections: PeerConnectionDto[];
-  lastPolledAt?: string;
+  lastSnapshotAt?: string;
 }
 
 export class PeerConnectionController {
@@ -56,7 +56,7 @@ export class PeerConnectionController {
     connectPanel: initialConnectPanelSnapshot(),
     connections: []
   };
-  private polling = false;
+  private readingSnapshot = false;
   private collapseToken = 0;
   private interactionActive = false;
   private disposed = false;
@@ -92,9 +92,9 @@ export class PeerConnectionController {
       const result = await this.client.list();
       if (!this.disposed) this.applyResult(result);
     } catch {
-      // The first background poll will retry without interrupting the desktop shell.
+      // The first local snapshot read will retry without interrupting the desktop shell.
     }
-    this.schedulePoll();
+    this.scheduleSnapshotRead();
   }
 
   open(): void {
@@ -227,33 +227,33 @@ export class PeerConnectionController {
     await this.run(async () => this.applyResult(await this.client.reject(requestId)));
   }
 
-  private async poll(): Promise<void> {
-    if (this.polling || this.disposed) return;
-    this.polling = true;
+  private async refreshSnapshot(): Promise<void> {
+    if (this.readingSnapshot || this.disposed) return;
+    this.readingSnapshot = true;
     try {
-      const result = await this.client.poll();
+      const result = await this.client.readSnapshot();
       if (this.disposed) return;
       const hadPending = this.hasPendingApproval();
       this.applyResult(result);
-      this.snapshotValue.lastPolledAt = new Date().toISOString();
+      this.snapshotValue.lastSnapshotAt = new Date().toISOString();
       if (!hadPending && this.hasPendingApproval() && !this.snapshotValue.open) {
         this.open();
       } else if (this.snapshotValue.open || result.receivedCount > 0 || result.heartbeatCount > 0) {
         this.onChange();
       }
     } catch {
-      // A later background poll retries. Connect-form errors are kept scoped to its message slot.
+      // A later local snapshot read retries. Connect-form errors stay scoped to its message slot.
     } finally {
-      this.polling = false;
-      this.schedulePoll();
+      this.readingSnapshot = false;
+      this.scheduleSnapshotRead();
     }
   }
 
-  private schedulePoll(): void {
+  private scheduleSnapshotRead(): void {
     if (this.disposed) return;
     this.scheduleTask(() => {
-      void this.poll();
-    }, POLL_INTERVAL_MS);
+      void this.refreshSnapshot();
+    }, SNAPSHOT_READ_INTERVAL_MS);
   }
 
   private async run(operation: () => Promise<void>): Promise<void> {
@@ -265,7 +265,7 @@ export class PeerConnectionController {
     try {
       await operation();
     } catch {
-      // Existing cards remain intact; the next poll retries without leaking transport details.
+      // Existing cards remain intact; the next snapshot read retries without leaking transport details.
     } finally {
       if (this.disposed) return;
       this.snapshotValue.busy = false;
@@ -414,7 +414,9 @@ export class BridgePeerConnectionClient implements PeerConnectionClient {
     return this.bridge.request("connection.list") as Promise<PeerConnectionResult>;
   }
 
-  poll(): Promise<PeerConnectionResult> {
+  readSnapshot(): Promise<PeerConnectionResult> {
+    // Task 3 keeps the v1 method name internally, but Runtime serves only its
+    // cached snapshot here and remains the sole owner of Chatmail polling.
     return this.bridge.request("connection.poll") as Promise<PeerConnectionResult>;
   }
 
@@ -471,7 +473,7 @@ export class MockPeerConnectionClient implements PeerConnectionClient {
   }
 
   async list(): Promise<PeerConnectionResult> { return this.result(); }
-  async poll(): Promise<PeerConnectionResult> { return this.result(); }
+  async readSnapshot(): Promise<PeerConnectionResult> { return this.result(); }
   async accept(): Promise<PeerConnectionResult> { return this.result(); }
   async reject(): Promise<PeerConnectionResult> { return this.result(); }
 

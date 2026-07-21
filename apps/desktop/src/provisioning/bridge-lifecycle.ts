@@ -70,18 +70,6 @@ export class BridgeDiscoveryClient {
   }
 }
 
-export class BridgeDiscoveryHeartbeatClient {
-  private readonly bridge: LifecycleBridgeClient;
-
-  constructor(bridge: LifecycleBridgeClient) {
-    this.bridge = bridge;
-  }
-
-  async heartbeat(): Promise<PublicTetiAccount> {
-    return await this.bridge.request("discovery.heartbeat") as PublicTetiAccount;
-  }
-}
-
 export class LifecycleBridgeClient {
   private readonly tauri: TauriInvoker;
 

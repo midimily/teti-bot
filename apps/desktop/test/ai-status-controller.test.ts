@@ -7,7 +7,7 @@ import {
 } from "../src/ai-status/controller.ts";
 import type { CodexUsageState } from "../src/codex-usage/types.ts";
 
-test("controller refreshes once, keeps sharing off, and polls only cached usage every ten minutes", async () => {
+test("controller only consumes cached Runtime usage every ten minutes", async () => {
   const client = new FakeClient();
   let scheduled: (() => void) | undefined;
   let delay = 0;
@@ -25,16 +25,43 @@ test("controller refreshes once, keeps sharing off, and polls only cached usage 
 
   controller.start();
   await flushPromises();
-  assert.equal(client.refreshCalls, 1);
-  assert.equal(client.getCalls, 0);
+  assert.equal(client.getCalls, 1);
   assert.equal(controller.snapshot.statusSharing, false);
   assert.equal(delay, 10 * 60 * 1_000);
   assert.ok(changes > 0);
 
   scheduled?.();
   await flushPromises();
-  assert.equal(client.refreshCalls, 1);
-  assert.equal(client.getCalls, 1);
+  assert.equal(client.getCalls, 2);
+  controller.stop();
+});
+
+test("controller retries only the initial Runtime snapshot while Codex refresh is still starting", async () => {
+  const client = new FakeClient();
+  client.usage = initialUsage();
+  let scheduled: (() => void) | undefined;
+  let delay = 0;
+  const controller = new AiStatusController({
+    client,
+    onChange: () => undefined,
+    schedule(callback, delayMs) {
+      scheduled = callback;
+      delay = delayMs;
+      return 1;
+    },
+    cancel: () => undefined
+  });
+
+  controller.start();
+  await flushPromises();
+  assert.equal(delay, 3_000);
+
+  client.usage = readyUsage();
+  scheduled?.();
+  await flushPromises();
+  assert.equal(controller.snapshot.usage.status, "ready");
+  assert.equal(delay, 10 * 60 * 1_000);
+  assert.equal(client.getCalls, 2);
   controller.stop();
 });
 
@@ -152,20 +179,15 @@ test("a settings read failure stays fail-closed without hiding local usage", asy
 });
 
 class FakeClient implements AiStatusClient {
-  refreshCalls = 0;
   getCalls = 0;
+  usage: CodexUsageState = readyUsage();
   sharing = false;
   failSet = false;
   failGetSharing = false;
 
   async getUsage(): Promise<CodexUsageState> {
     this.getCalls += 1;
-    return readyUsage();
-  }
-
-  async refreshUsage(): Promise<CodexUsageState> {
-    this.refreshCalls += 1;
-    return readyUsage();
+    return structuredClone(this.usage);
   }
 
   async getSharing(): Promise<AiStatusSharingSettings> {
@@ -178,6 +200,17 @@ class FakeClient implements AiStatusClient {
     this.sharing = enabled;
     return { statusSharing: enabled };
   }
+}
+
+function initialUsage(): CodexUsageState {
+  return {
+    status: "unavailable",
+    error: {
+      code: "NOT_STARTED",
+      message: "Runtime refresh is starting.",
+      recoverable: true
+    }
+  };
 }
 
 function readyUsage(): CodexUsageState {

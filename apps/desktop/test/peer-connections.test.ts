@@ -290,7 +290,7 @@ test("outside focus loss collapses the outer connection island when no request i
   controller.dispose();
 });
 
-test("disposing the controller cancels opening, success, collapse, and polling timers", async () => {
+test("disposing the controller cancels opening, success, collapse, and snapshot timers", async () => {
   const scheduler = new ControlledScheduler();
   const controller = new PeerConnectionController({
     client: new StaticPeerConnectionClient(emptyResult),
@@ -484,7 +484,7 @@ class StaticPeerConnectionClient implements PeerConnectionClient {
   }
 
   async list(): Promise<PeerConnectionResult> { return emptyResult; }
-  async poll(): Promise<PeerConnectionResult> { return emptyResult; }
+  async readSnapshot(): Promise<PeerConnectionResult> { return emptyResult; }
   async accept(_requestId: string): Promise<PeerConnectionResult> { return emptyResult; }
   async reject(_requestId: string): Promise<PeerConnectionResult> { return emptyResult; }
 }

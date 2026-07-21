@@ -4,46 +4,88 @@ import {
   LIFECYCLE_PROTOCOL_VERSION,
   type LifecycleResponse
 } from "../src/lifecycle-bridge/protocol.ts";
-import { handleLifecycleLine } from "./handler.ts";
+import {
+  defaultLifecycleSidecarDependencies,
+  handleLifecycleLine,
+  type LifecycleSidecarDependencies
+} from "./handler.ts";
 import { createLifecycleError, redactSecretLikeText } from "./security.ts";
 import { getDefaultCodexUsageService } from "./codex-usage/runtime.ts";
+import { TetiRuntime } from "./runtime/service.ts";
+import { createRuntimeOwnedLifecycleDependencies } from "./runtime/lifecycle-adapter.ts";
+import { SafeProcessWriter } from "./runtime/safe-output.ts";
+import {
+  acquireTetiRuntimeProfileLock,
+  type TetiRuntimeProfileLock
+} from "./runtime/profile-lock.ts";
+import { ensureProfileDirectories, resolveTetiProfile } from "./profile.ts";
+import { closeDefaultPeerConnectionService } from "./connections.ts";
 
+const PROCESS_SHUTDOWN_HARD_LIMIT_MS = 4_000;
 const inFlightRequestIds = new Set<string>();
-const pendingRequests = new Set<Promise<void>>();
-let inputClosed = false;
-const codexUsageService = getDefaultCodexUsageService();
-codexUsageService.start();
-
-const reader = createInterface({
-  input: stdin,
-  crlfDelay: Infinity,
-  terminal: false
-});
-
-reader.on("line", (line) => {
-  const pending = handleLine(line);
-  pendingRequests.add(pending);
-  pending.finally(() => {
-    pendingRequests.delete(pending);
-    exitWhenDrained();
-  });
-});
-
-reader.on("close", () => {
-  inputClosed = true;
-  codexUsageService.stop();
-  exitWhenDrained();
-});
+let runtime: TetiRuntime | undefined;
+let lifecycleDependencies: LifecycleSidecarDependencies | undefined;
+let profileLock: TetiRuntimeProfileLock | undefined;
+let shutdownPromise: Promise<void> | undefined;
+const safeStdout = new SafeProcessWriter(stdout, () => { void beginShutdown(0); });
+const safeStderr = new SafeProcessWriter(stderr, () => { void beginShutdown(0); });
 
 process.on("uncaughtException", (error) => {
-  stderr.write(`teti-lifecycle-sidecar uncaught: ${redactSecretLikeText(error.message)}\n`);
+  safeStderr.write(`teti-lifecycle-sidecar uncaught: ${redactSecretLikeText(error.message)}\n`);
+  void beginShutdown(1);
 });
 
 process.on("unhandledRejection", (reason) => {
-  stderr.write(`teti-lifecycle-sidecar unhandled: ${redactSecretLikeText(String(reason))}\n`);
+  safeStderr.write(`teti-lifecycle-sidecar unhandled: ${redactSecretLikeText(String(reason))}\n`);
+  void beginShutdown(1);
 });
 
+process.once("SIGTERM", () => { void beginShutdown(0); });
+process.once("SIGINT", () => { void beginShutdown(0); });
+
+try {
+  await startSidecar();
+} catch (error) {
+  const message = error instanceof Error ? error.message : String(error);
+  safeStderr.write(`teti-lifecycle-sidecar startup failed: ${redactSecretLikeText(message)}\n`);
+  await beginShutdown(1);
+}
+
+async function startSidecar(): Promise<void> {
+  const profile = await resolveTetiProfile();
+  await ensureProfileDirectories(profile);
+  profileLock = await acquireTetiRuntimeProfileLock(profile);
+  const codexUsageService = getDefaultCodexUsageService();
+  runtime = new TetiRuntime({
+    dependencies: {
+      loadTetiAccount: defaultLifecycleSidecarDependencies.loadTetiAccount,
+      heartbeatDiscovery: defaultLifecycleSidecarDependencies.heartbeatDiscovery,
+      getPeerConnectionService: defaultLifecycleSidecarDependencies.getPeerConnectionService,
+      codexUsageService,
+      dispose: closeDefaultPeerConnectionService
+    },
+    onJobError: ({ jobId, error }) => {
+      const message = error instanceof Error ? error.message : String(error);
+      safeStderr.write(`teti-runtime job=${jobId} failed: ${redactSecretLikeText(message)}\n`);
+    }
+  });
+  lifecycleDependencies = createRuntimeOwnedLifecycleDependencies(
+    defaultLifecycleSidecarDependencies,
+    runtime
+  );
+  runtime.start();
+
+  const reader = createInterface({
+    input: stdin,
+    crlfDelay: Infinity,
+    terminal: false
+  });
+  reader.on("line", (line) => { void handleLine(line); });
+  reader.once("close", () => { void beginShutdown(0); });
+}
+
 async function handleLine(line: string): Promise<void> {
+  if (!lifecycleDependencies || shutdownPromise) return;
   const id = readLineId(line);
   if (id && inFlightRequestIds.has(id)) {
     writeResponse({
@@ -62,7 +104,7 @@ async function handleLine(line: string): Promise<void> {
   }
 
   try {
-    writeResponse(await handleLifecycleLine(line));
+    writeResponse(await handleLifecycleLine(line, lifecycleDependencies));
   } finally {
     if (id) {
       inFlightRequestIds.delete(id);
@@ -71,7 +113,9 @@ async function handleLine(line: string): Promise<void> {
 }
 
 function writeResponse(response: LifecycleResponse): void {
-  stdout.write(`${JSON.stringify(response)}\n`);
+  if (!safeStdout.write(`${JSON.stringify(response)}\n`)) {
+    void beginShutdown(0);
+  }
 }
 
 function readLineId(line: string): string | null {
@@ -83,8 +127,17 @@ function readLineId(line: string): string | null {
   }
 }
 
-function exitWhenDrained(): void {
-  if (inputClosed && pendingRequests.size === 0) {
-    process.exit(0);
-  }
+function beginShutdown(exitCode: number): Promise<void> {
+  if (shutdownPromise) return shutdownPromise;
+  shutdownPromise = (async () => {
+    const hardExit = setTimeout(() => process.exit(exitCode), PROCESS_SHUTDOWN_HARD_LIMIT_MS);
+    const result = await runtime?.stop();
+    if (result?.timedOut) {
+      safeStderr.write("teti-runtime shutdown reached its bounded timeout.\n");
+    }
+    await profileLock?.release().catch(() => undefined);
+    clearTimeout(hardExit);
+    process.exit(exitCode);
+  })();
+  return shutdownPromise;
 }

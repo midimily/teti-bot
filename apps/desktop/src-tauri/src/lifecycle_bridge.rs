@@ -4,7 +4,7 @@ use std::{
     collections::HashMap,
     env,
     fs::{create_dir_all, metadata, rename, OpenOptions},
-    io::{BufRead, BufReader, Write},
+    io::{self, BufRead, BufReader, Write},
     path::PathBuf,
     process::{Child, ChildStdin, Command, Stdio},
     sync::{
@@ -12,13 +12,18 @@ use std::{
         Arc, Mutex,
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tauri::{AppHandle, Manager};
+
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 
 const PROTOCOL_VERSION: u8 = 1;
 const MAX_LINE_BYTES: usize = 64 * 1024;
 const MAX_LOG_BYTES: u64 = 1024 * 1024;
+const SIDECAR_GRACEFUL_SHUTDOWN: Duration = Duration::from_millis(3_000);
+const SIDECAR_TERMINATE_GRACE: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct LifecycleCommandRequest {
@@ -56,7 +61,7 @@ pub struct LifecycleBridge {
 
 struct ManagedSidecar {
     child: Child,
-    stdin: ChildStdin,
+    stdin: Option<ChildStdin>,
     pending: PendingResponses,
 }
 
@@ -184,9 +189,13 @@ impl LifecycleBridge {
             );
         }
 
-        if let Err(error) = writeln!(process.stdin, "{line}") {
+        let write_result = process
+            .stdin
+            .as_mut()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "sidecar stdin is closed"))
+            .and_then(|stdin| writeln!(stdin, "{line}"));
+        if let Err(error) = write_result {
             remove_pending_response(&pending, &id);
-            let _ = process.child.kill();
             *guard = None;
             return failure(
                 Some(id),
@@ -199,9 +208,13 @@ impl LifecycleBridge {
             );
         }
 
-        if let Err(error) = process.stdin.flush() {
+        let flush_result = process
+            .stdin
+            .as_mut()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "sidecar stdin is closed"))
+            .and_then(Write::flush);
+        if let Err(error) = flush_result {
             remove_pending_response(&pending, &id);
-            let _ = process.child.kill();
             *guard = None;
             return failure(
                 Some(id),
@@ -222,16 +235,70 @@ impl LifecycleBridge {
 
 impl Drop for LifecycleBridge {
     fn drop(&mut self) {
-        if Arc::strong_count(&self.process) != 1 {
-            return;
-        }
-        if let Ok(mut guard) = self.process.lock() {
-            if let Some(process) = guard.as_mut() {
-                let _ = process.child.kill();
-            }
+        if Arc::strong_count(&self.process) == 1 {
+            self.shutdown();
         }
     }
 }
+
+impl LifecycleBridge {
+    pub fn shutdown(&self) {
+        let process = self.process.lock().ok().and_then(|mut guard| guard.take());
+        drop(process);
+    }
+}
+
+impl Drop for ManagedSidecar {
+    fn drop(&mut self) {
+        self.terminate();
+    }
+}
+
+impl ManagedSidecar {
+    fn terminate(&mut self) {
+        fail_pending_responses(&self.pending);
+        self.stdin.take();
+        if wait_for_child_exit(&mut self.child, SIDECAR_GRACEFUL_SHUTDOWN) {
+            return;
+        }
+
+        signal_process_group(self.child.id(), 15);
+        if wait_for_child_exit(&mut self.child, SIDECAR_TERMINATE_GRACE) {
+            return;
+        }
+
+        signal_process_group(self.child.id(), 9);
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn wait_for_child_exit(child: &mut Child, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return true,
+            Err(_) => return true,
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(25)),
+            Ok(None) => return false,
+        }
+    }
+}
+
+#[cfg(unix)]
+fn signal_process_group(pid: u32, signal: i32) {
+    extern "C" {
+        fn kill(pid: i32, signal: i32) -> i32;
+    }
+    if let Ok(pid) = i32::try_from(pid) {
+        unsafe {
+            let _ = kill(-pid, signal);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn signal_process_group(_pid: u32, _signal: i32) {}
 
 fn spawn_sidecar(app: &AppHandle) -> Result<ManagedSidecar, String> {
     let sidecar_path = resolve_sidecar_path(app)?;
@@ -260,6 +327,8 @@ fn spawn_sidecar(app: &AppHandle) -> Result<ManagedSidecar, String> {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    #[cfg(unix)]
+    command.process_group(0);
     if env::var_os("TETI_DELTACHAT_RPC_PATH").is_none() && bundled_rpc.exists() {
         command.env("TETI_DELTACHAT_RPC_PATH", bundled_rpc);
     }
@@ -295,7 +364,7 @@ fn spawn_sidecar(app: &AppHandle) -> Result<ManagedSidecar, String> {
 
     Ok(ManagedSidecar {
         child,
-        stdin,
+        stdin: Some(stdin),
         pending,
     })
 }
@@ -813,5 +882,42 @@ mod tests {
         assert!(!redacted.contains("def"));
         assert!(!redacted.contains("ghi"));
         assert!(redacted.contains("[redacted]"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_sidecar_drop_closes_stdin_waits_and_reaps_the_child() {
+        let mut command = Command::new("/bin/cat");
+        command
+            .process_group(0)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut child = command.spawn().expect("test child should start");
+        let pid = child.id();
+        let stdin = child.stdin.take().expect("test child stdin should exist");
+        let pending: PendingResponses = Arc::new(Mutex::new(HashMap::new()));
+        let (sender, receiver) = mpsc::sync_channel(1);
+        pending
+            .lock()
+            .unwrap()
+            .insert("pending".to_string(), sender);
+
+        drop(ManagedSidecar {
+            child,
+            stdin: Some(stdin),
+            pending,
+        });
+
+        assert!(receiver.recv_timeout(Duration::from_secs(1)).is_ok());
+        let alive = Command::new("/bin/kill")
+            .arg("-0")
+            .arg(pid.to_string())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        assert!(!alive, "managed sidecar child must be reaped");
     }
 }

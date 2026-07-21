@@ -3,10 +3,10 @@ import type { CodexUsageState } from "../codex-usage/types.ts";
 import type { LifecycleBridgeClient } from "../provisioning/bridge-lifecycle.ts";
 
 const UI_STATUS_REFRESH_INTERVAL_MS = 10 * 60 * 1_000;
+const UI_STATUS_INITIAL_RETRY_INTERVAL_MS = 3_000;
 
 export interface AiStatusClient {
   getUsage(): Promise<CodexUsageState>;
-  refreshUsage(): Promise<CodexUsageState>;
   getSharing(): Promise<AiStatusSharingSettings>;
   setSharing(enabled: boolean): Promise<AiStatusSharingSettings>;
 }
@@ -55,7 +55,7 @@ export class AiStatusController {
   start(): void {
     if (this.active) return;
     this.active = true;
-    void this.load(true);
+    void this.load();
   }
 
   stop(): void {
@@ -121,10 +121,10 @@ export class AiStatusController {
     }
   }
 
-  private async load(forceUsageRefresh: boolean): Promise<void> {
+  private async load(): Promise<void> {
     const sharingRevision = this.sharingRevision;
     const [usage, sharing] = await Promise.allSettled([
-      forceUsageRefresh ? this.client.refreshUsage() : this.client.getUsage(),
+      this.client.getUsage(),
       this.client.getSharing()
     ]);
     if (usage.status === "fulfilled") {
@@ -142,10 +142,13 @@ export class AiStatusController {
       this.onChange();
     }
     if (this.active) {
+      const delayMs = isRuntimeInitialUsagePending(this.snapshotValue.usage)
+        ? UI_STATUS_INITIAL_RETRY_INTERVAL_MS
+        : UI_STATUS_REFRESH_INTERVAL_MS;
       this.timer = this.schedule(() => {
         this.timer = undefined;
-        void this.load(false);
-      }, UI_STATUS_REFRESH_INTERVAL_MS);
+        void this.load();
+      }, delayMs);
     }
   }
 }
@@ -161,10 +164,6 @@ export class BridgeAiStatusClient implements AiStatusClient {
     return this.bridge.request("usage.get") as Promise<CodexUsageState>;
   }
 
-  refreshUsage(): Promise<CodexUsageState> {
-    return this.bridge.request("usage.refresh") as Promise<CodexUsageState>;
-  }
-
   getSharing(): Promise<AiStatusSharingSettings> {
     return this.bridge.request("sharing.get") as Promise<AiStatusSharingSettings>;
   }
@@ -178,7 +177,6 @@ export class MockAiStatusClient implements AiStatusClient {
   private sharing = false;
 
   async getUsage(): Promise<CodexUsageState> { return unavailableUsage(); }
-  async refreshUsage(): Promise<CodexUsageState> { return unavailableUsage(); }
   async getSharing(): Promise<AiStatusSharingSettings> { return { statusSharing: this.sharing }; }
   async setSharing(enabled: boolean): Promise<AiStatusSharingSettings> {
     this.sharing = enabled;
@@ -195,4 +193,8 @@ function unavailableUsage(): CodexUsageState {
       recoverable: true
     }
   };
+}
+
+function isRuntimeInitialUsagePending(usage: CodexUsageState): boolean {
+  return usage.status === "unavailable" && usage.error.code === "NOT_STARTED";
 }
