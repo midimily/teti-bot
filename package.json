@@ -18,6 +18,7 @@
     "desktop:rust-check": "cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml",
     "desktop:rust-fmt": "cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml",
     "desktop:tauri-build": "npm --prefix apps/desktop run tauri:build",
+    "desktop:package:mac:adhoc": "npm --prefix apps/desktop run package:mac:adhoc",
     "desktop:profile:create": "npm --prefix apps/desktop run profile:create --",
     "desktop:profile:status": "npm --prefix apps/desktop run profile:status --",
     "desktop:profile:preflight": "npm --prefix apps/desktop run profile:preflight --",

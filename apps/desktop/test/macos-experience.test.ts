@@ -24,10 +24,10 @@ test("macOS bundle metadata uses the Teti product identity", () => {
   }>(tauriConfigPath);
 
   assert.equal(config.productName, "Teti");
-  assert.equal(config.identifier, "im.midimily.teti.desktop");
+  assert.equal(config.identifier, "bot.teti.app");
   assert.match(config.version, /^\d+\.\d+\.\d+$/);
   assert.equal(config.bundle.active, true);
-  assert.deepEqual(config.bundle.targets, ["app"]);
+  assert.deepEqual(config.bundle.targets, ["app", "dmg"]);
   assert.equal(config.bundle.category, "Productivity");
   assert.deepEqual(config.app.windows, []);
 });

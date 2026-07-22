@@ -2,7 +2,8 @@ import { readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, isAbsolute, join, resolve, sep } from "node:path";
 
-export const TETI_DESKTOP_BUNDLE_ID = "im.midimily.teti.desktop";
+export const TETI_DESKTOP_BUNDLE_ID = "bot.teti.app";
+export const LEGACY_TETI_DESKTOP_BUNDLE_ID = "im.midimily.teti.desktop";
 export const ALPHA_LOCAL_RESET_CONFIRMATION = "DELETE_LOCAL_TETI";
 
 export interface LocalResetOptions {
@@ -67,15 +68,20 @@ export function defaultLocalResetTargets(
   home: string,
   bundleId = TETI_DESKTOP_BUNDLE_ID
 ): string[] {
+  const bundleIds = bundleId === TETI_DESKTOP_BUNDLE_ID
+    ? [TETI_DESKTOP_BUNDLE_ID, LEGACY_TETI_DESKTOP_BUNDLE_ID]
+    : [bundleId];
   return [
     join(home, ".teti"),
-    join(home, "Library", "WebKit", bundleId),
-    join(home, "Library", "Application Support", bundleId),
-    join(home, "Library", "Caches", bundleId),
-    join(home, "Library", "HTTPStorages", bundleId),
-    join(home, "Library", "Preferences", `${bundleId}.plist`),
-    join(home, "Library", "Saved Application State", `${bundleId}.savedState`),
-    join(home, "Library", "Containers", bundleId)
+    ...bundleIds.flatMap((candidate) => [
+      join(home, "Library", "WebKit", candidate),
+      join(home, "Library", "Application Support", candidate),
+      join(home, "Library", "Caches", candidate),
+      join(home, "Library", "HTTPStorages", candidate),
+      join(home, "Library", "Preferences", `${candidate}.plist`),
+      join(home, "Library", "Saved Application State", `${candidate}.savedState`),
+      join(home, "Library", "Containers", candidate)
+    ])
   ];
 }
 

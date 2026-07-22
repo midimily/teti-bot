@@ -5,6 +5,8 @@ import { join } from "node:path";
 import test from "node:test";
 import {
   ALPHA_LOCAL_RESET_CONFIRMATION,
+  LEGACY_TETI_DESKTOP_BUNDLE_ID,
+  TETI_DESKTOP_BUNDLE_ID,
   assertAlphaLocalResetConfirmed,
   defaultLocalResetTargets,
   resetLocalTeti
@@ -45,6 +47,15 @@ test("Alpha local reset removes first-install state locally without remote delet
   } finally {
     await rm(home, { recursive: true, force: true });
   }
+});
+
+test("Alpha local reset recognizes current and legacy macOS UI containers without moving the Teti profile", () => {
+  const home = "/Users/tester";
+  const targets = defaultLocalResetTargets(home);
+
+  assert.equal(targets[0], join(home, ".teti"));
+  assert.ok(targets.includes(join(home, "Library", "Application Support", TETI_DESKTOP_BUNDLE_ID)));
+  assert.ok(targets.includes(join(home, "Library", "Application Support", LEGACY_TETI_DESKTOP_BUNDLE_ID)));
 });
 
 test("connection input uses the privacy-safe nine-star community ID placeholder", async () => {

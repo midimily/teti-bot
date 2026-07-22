@@ -25,7 +25,10 @@ npm run desktop:alpha-reset-local -- --confirm DELETE_LOCAL_TETI
 The command removes:
 
 - `~/.teti`, including the account record, connection records, creation marker, logs, and local Chatmail account databases;
-- macOS WebKit, Application Support, cache, HTTP storage, preferences, saved-state, and container data for `im.midimily.teti.desktop`.
+- macOS WebKit, Application Support, cache, HTTP storage, preferences, saved-state, and container data for the current `bot.teti.app` Bundle Identifier;
+- the same UI-container locations for the legacy `im.midimily.teti.desktop` identifier, so an explicit Alpha reset does not leave stale pre-freeze WebView state behind.
+
+The production account and Chatmail profile remain rooted at `~/.teti`; changing the Bundle Identifier does not move or recreate them. The command still refuses to delete a detected real `mail.seep.im` account unless the existing explicit orphan-account override is supplied.
 
 Successful output always reports:
 
