@@ -24,7 +24,10 @@ import type {
 import type { TetiRegistryReader } from "../../../services/discovery/client.ts";
 import type { DiscoveryIdentity } from "../../../services/discovery/registry-client.ts";
 import { PeerConnectionRuntime } from "../lifecycle-sidecar/connections.ts";
-import { MemoryAiStatusSettingsStore } from "../lifecycle-sidecar/ai-status/settings.ts";
+import {
+  MemoryPassportSharingStore,
+  resourceSharingPolicy
+} from "../lifecycle-sidecar/runtime/passport/sharing.ts";
 
 test("two Teti runtimes confirm a Chatmail handshake and exchange alpha heartbeats", async () => {
   const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
@@ -166,7 +169,7 @@ test("AI status is opt-in, sent only to confirmed peers, and revoked independent
     registry,
     new MemoryTetiConnectionStorage(),
     {
-      aiStatusSettings: new MemoryAiStatusSettingsStore(),
+      passportSharing: new MemoryPassportSharingStore(),
       getLocalAiTools: () => [localCodexStatus()]
     }
   );
@@ -178,9 +181,9 @@ test("AI status is opt-in, sent only to confirmed peers, and revoked independent
   const confirmed = await runtimeA.poll();
   await runtimeB.poll();
   assert.equal(confirmed.connections[0]?.remoteAiStatus, undefined);
-  assert.deepEqual(await runtimeA.getStatusSharing(), { statusSharing: false });
+  assert.deepEqual(await runtimeA.getPassportSharing(), resourceSharingPolicy(false));
 
-  await runtimeA.setStatusSharing(true);
+  await runtimeA.setPassportSharing(resourceSharingPolicy(true));
   await flushBackgroundWork();
   const shared = await runtimeB.poll();
   assert.equal(shared.connections[0]?.remoteAiStatus?.sharing, "enabled");
@@ -189,7 +192,7 @@ test("AI status is opt-in, sent only to confirmed peers, and revoked independent
   assert.equal(shared.connections[0]?.remoteAiStatus?.tools[0]?.quotas[0]?.remainingPercent, 42);
   assert.doesNotMatch(JSON.stringify(shared.connections[0]?.remoteAiStatus), /token|account|raw|displayName/);
 
-  await runtimeA.setStatusSharing(false);
+  await runtimeA.setPassportSharing(resourceSharingPolicy(false));
   await flushBackgroundWork();
   const revoked = await runtimeB.poll();
   assert.equal(revoked.connections[0]?.remoteAiStatus?.sharing, "disabled");
@@ -208,20 +211,20 @@ test("sharing consent persistence does not wait for a blocked peer network queue
     chatmailAdapter: new MemoryChatmailRelay().adapter(account.address),
     registry: new StaticRegistry([toIdentity(account)]),
     startIo: () => ioBlocked,
-    aiStatusSettings: new MemoryAiStatusSettingsStore()
+    passportSharing: new MemoryPassportSharingStore()
   });
 
   const polling = runtime.poll();
   await flushBackgroundWork();
   const result = await Promise.race([
-    runtime.setStatusSharing(true).then(() => "saved"),
+    runtime.setPassportSharing(resourceSharingPolicy(true)).then(() => "saved"),
     new Promise<string>((resolve) => setTimeout(() => resolve("blocked"), 50))
   ]);
   releaseIo();
   await polling;
 
   assert.equal(result, "saved");
-  assert.deepEqual(await runtime.getStatusSharing(), { statusSharing: true });
+  assert.deepEqual(await runtime.getPassportSharing(), resourceSharingPolicy(true));
 });
 
 async function makeRuntime(
@@ -230,7 +233,7 @@ async function makeRuntime(
   registry: TetiRegistryReader,
   connectionStorage: TetiConnectionStorage = new MemoryTetiConnectionStorage(),
   aiStatus: {
-    aiStatusSettings?: MemoryAiStatusSettingsStore;
+    passportSharing?: MemoryPassportSharingStore;
     getLocalAiTools?: () => AiToolStatusSnapshot[];
   } = {}
 ): Promise<PeerConnectionRuntime> {

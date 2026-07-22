@@ -1,42 +1,35 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-import type { PeerConnectionDto } from "../src/lifecycle-bridge/protocol.ts";
-import {
-  REMOTE_TETI_HEARTBEAT_FRESH_MS,
-  mapRemoteTetiReachability,
-  remoteTetiReachabilityLabel
-} from "../src/connections/remote-teti-avatar.ts";
+import type { PassportConnectionSnapshot } from "../../../core/passport/snapshot.ts";
+import { toConnectionCardViewModel } from "../src/passport/view-model.ts";
 
 const now = Date.parse("2026-07-19T04:00:00.000Z");
+const remoteHeartbeatFreshMs = 15_000;
 
 test("a fresh confirmed peer maps to the blue online presentation", () => {
-  const connection = confirmedPeer(new Date(now - REMOTE_TETI_HEARTBEAT_FRESH_MS + 1).toISOString());
-
-  const reachability = mapRemoteTetiReachability(connection, now);
-
-  assert.equal(reachability, "reachable");
-  assert.equal(remoteTetiReachabilityLabel(reachability), "在线");
+  const connection = confirmedPeer(new Date(now - remoteHeartbeatFreshMs + 1).toISOString());
+  const viewModel = toConnectionCardViewModel(connection, new Date(now));
+  assert.equal(viewModel.reachability, "reachable");
+  assert.equal(viewModel.reachabilityLabel, "在线");
 });
 
 test("a stale confirmed peer maps to the gray offline presentation", () => {
-  const connection = confirmedPeer(new Date(now - REMOTE_TETI_HEARTBEAT_FRESH_MS).toISOString());
-
-  const reachability = mapRemoteTetiReachability(connection, now);
-
-  assert.equal(reachability, "unreachable");
-  assert.equal(remoteTetiReachabilityLabel(reachability), "离线");
+  const connection = confirmedPeer(new Date(now - remoteHeartbeatFreshMs).toISOString());
+  const viewModel = toConnectionCardViewModel(connection, new Date(now));
+  assert.equal(viewModel.reachability, "unreachable");
+  assert.equal(viewModel.reachabilityLabel, "离线");
 });
 
 test("missing, invalid, and non-confirmed heartbeat state fail closed to offline", () => {
   const cases = [
     confirmedPeer(undefined),
     confirmedPeer("not-a-date"),
-    { ...confirmedPeer(new Date(now).toISOString()), state: "Requested" as const }
+    { ...confirmedPeer(new Date(now).toISOString()), connectionState: "Requested" as const }
   ];
 
   for (const connection of cases) {
-    assert.equal(mapRemoteTetiReachability(connection, now), "unreachable");
+    assert.equal(toConnectionCardViewModel(connection, new Date(now)).reachability, "unreachable");
   }
 });
 
@@ -47,7 +40,7 @@ test("different peer cards derive reachability independently", () => {
   ];
 
   assert.deepEqual(
-    peers.map((peer) => mapRemoteTetiReachability(peer, now)),
+    peers.map((peer) => toConnectionCardViewModel(peer, new Date(now)).reachability),
     ["reachable", "unreachable"]
   );
 });
@@ -79,10 +72,10 @@ test("confirmed cards retain relationship and AI status while the brand stays is
     readFile(new URL("../src/styles.css", import.meta.url), "utf8")
   ]);
 
-  assert.match(app, /row\.prepend\(createRemoteTetiAvatar\(\{ reachability, size: 28 \}\)\)/);
+  assert.match(app, /row\.prepend\(createRemoteTetiAvatar\(\{ reachability: connection\.reachability, size: 28 \}\)\)/);
   assert.match(app, /relationship\.textContent = "已建联"/);
-  assert.match(app, /`\[对方\$\{remoteTetiReachabilityLabel\(reachability\)\}\]`/);
-  assert.match(app, /state\.append\(presence, createRemoteAiStatus\(connection\.remoteAiStatus\)\)/);
+  assert.match(app, /`\[对方\$\{connection\.reachabilityLabel\}\]`/);
+  assert.match(app, /state\.append\(presence, createRemotePassport\(connection\.passport\)\)/);
   assert.match(app, /const brand = createTetiBotBrandLink\(\{ ownerDocument: header\.ownerDocument \}\)/);
   assert.doesNotMatch(app, /teti-brand-dot/);
   assert.match(
@@ -92,18 +85,21 @@ test("confirmed cards retain relationship and AI status while the brand stays is
 });
 
 function confirmedPeer(
-  lastHeartbeatReceivedAt?: string,
+  lastSeen?: string,
   requestId = "request-1"
-): PeerConnectionDto {
+): PassportConnectionSnapshot {
   return {
     requestId,
-    state: "Confirmed",
+    connectionState: "Confirmed",
     direction: "outgoing",
-    remoteTetiId: `teti_${requestId.padEnd(9, "0").slice(0, 9)}`,
-    remoteAddress: `${requestId.padEnd(9, "0").slice(0, 9)}@mail.seep.im`,
+    identity: {
+      tetiId: `teti_${requestId.padEnd(9, "0").slice(0, 9)}`,
+      address: `${requestId.padEnd(9, "0").slice(0, 9)}@mail.seep.im`
+    },
     createdAt: "2026-07-19T03:00:00.000Z",
     updatedAt: "2026-07-19T03:00:00.000Z",
-    lastHeartbeatReceivedAt
+    lastSeen: lastSeen ?? null,
+    passport: { state: "unknown", resources: [] }
   };
 }
 

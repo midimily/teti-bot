@@ -1,5 +1,7 @@
 # Teti Codex usage data layer
 
+> The provider adapter remains authoritative, but Desktop no longer reads its DTO through `usage.get`. Runtime maps the cached result to an `AiResource` and exposes it only through `passport.get`.
+
 ## Scope
 
 This beta foundation retrieves the Codex/agentic plan value and weekly usage

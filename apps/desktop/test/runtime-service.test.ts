@@ -14,6 +14,7 @@ import {
   type RuntimeCodexUsageService
 } from "../lifecycle-sidecar/runtime/service.ts";
 import type { LifecycleSidecarDependencies } from "../lifecycle-sidecar/handler.ts";
+import { resourceSharingPolicy } from "../lifecycle-sidecar/runtime/passport/sharing.ts";
 
 test("Runtime owns Registry, Chatmail, peer heartbeat, AI sync, and Codex background scheduling", async () => {
   const clock = fakeClock();
@@ -55,25 +56,18 @@ test("Runtime owns Registry, Chatmail, peer heartbeat, AI sync, and Codex backgr
   assert.equal(peer.pollCalls, 1);
   assert.equal((await runtime.readDiscoveryAccount()).publicProfile.lastSeen, "2026-07-21T10:00:00.000Z");
 
-  const compatibility = runtime.getPeerConnectionFacade();
-  const firstRead = await compatibility.poll();
-  const secondRead = await compatibility.poll();
-  assert.equal(peer.pollCalls, 1, "compatibility polling must not receive Chatmail a second time");
-  assert.equal(firstRead.receivedCount, 2);
-  assert.equal(firstRead.heartbeatCount, 1);
-  assert.equal(firstRead.aiStatusCount, 3);
-  assert.equal(firstRead.connections[0]?.state, "PendingApproval");
-  assert.deepEqual(
-    { receivedCount: secondRead.receivedCount, heartbeatCount: secondRead.heartbeatCount, aiStatusCount: secondRead.aiStatusCount },
-    { receivedCount: 0, heartbeatCount: 0, aiStatusCount: 0 }
-  );
+  const firstRead = await runtime.getPassportSnapshot();
+  const secondRead = await runtime.getPassportSnapshot();
+  assert.equal(peer.pollCalls, 1, "Passport reads must not receive Chatmail a second time");
+  assert.equal(firstRead.connections[0]?.connectionState, "PendingApproval");
+  assert.equal(secondRead.revision, firstRead.revision);
 
   await runtime.stop();
   assert.equal(runtime.snapshot.state, "stopped");
   assert.equal(clock.pending().length, 0);
 });
 
-test("legacy lifecycle methods read Runtime state without duplicating network refreshes", async () => {
+test("Passport reads consume Runtime cache without duplicating network refreshes", async () => {
   const account = createAccount();
   let registryCalls = 0;
   const peer = new FakePeerService();
@@ -95,9 +89,9 @@ test("legacy lifecycle methods read Runtime state without duplicating network re
   assert.equal(peer.pollCalls, 1);
   assert.equal(codex.refreshCalls, 1);
 
-  await dependencies.heartbeatDiscovery();
-  await (await dependencies.getPeerConnectionService()).poll();
-  await dependencies.refreshCodexUsage?.();
+  const passport = await dependencies.getPassportSnapshot?.();
+  assert.equal(passport?.localPassport.resources[0]?.product, "Codex");
+  assert.equal(passport?.connections[0]?.connectionState, "PendingApproval");
   assert.equal(registryCalls, 1);
   assert.equal(peer.pollCalls, 1);
   assert.equal(codex.refreshCalls, 1);
@@ -201,7 +195,7 @@ class FakeCodexUsageService implements RuntimeCodexUsageService {
 class FakePeerService implements PeerConnectionService {
   pollCalls = 0;
   pollResult?: Promise<PeerConnectionResult>;
-  private sharing = false;
+  private sharing = resourceSharingPolicy(false);
   private readonly connection: PeerConnectionDto = {
     requestId: "req-1",
     state: "PendingApproval",
@@ -229,10 +223,10 @@ class FakePeerService implements PeerConnectionService {
   }
   async accept(): Promise<PeerConnectionResult> { return this.empty(); }
   async reject(): Promise<PeerConnectionResult> { return this.empty(); }
-  async getStatusSharing() { return { statusSharing: this.sharing }; }
-  async setStatusSharing(enabled: boolean) {
-    this.sharing = enabled;
-    return { statusSharing: enabled };
+  async getPassportSharing() { return { ...this.sharing }; }
+  async setPassportSharing(policy: ReturnType<typeof resourceSharingPolicy>) {
+    this.sharing = { ...policy };
+    return { ...policy };
   }
 
   private empty(): PeerConnectionResult {
@@ -261,9 +255,7 @@ function fakeLifecycleDependencies(
       if (!account) throw new Error("test account missing");
       return clone(account);
     },
-    async getPeerConnectionService() { return peer; },
-    getCodexUsageState: () => codex.getCurrentState(),
-    refreshCodexUsage: () => codex.refreshNow()
+    async getPeerConnectionService() { return peer; }
   };
 }
 

@@ -1,8 +1,9 @@
 import type {
-  PeerConnectionDto,
   PeerConnectionResult,
+  PeerConnectionRequestOutcome,
   PublicTetiIdentity
 } from "../lifecycle-bridge/protocol.ts";
+import type { PassportConnectionSnapshot } from "../../../../core/passport/snapshot.ts";
 import {
   normalizeTetiPublicIdCode,
   TETI_PUBLIC_ID_CODE_CHARACTERS_PATTERN,
@@ -17,7 +18,6 @@ import {
   type ConnectPanelSnapshot
 } from "./connect-panel-state.ts";
 
-const SNAPSHOT_READ_INTERVAL_MS = 3_000;
 const AUTO_COLLAPSE_MS = 20_000;
 export const CONNECT_PANEL_OPEN_MS = 220;
 export const CONNECT_PANEL_CLOSE_MS = 190;
@@ -25,11 +25,13 @@ export const CONNECT_PANEL_SUCCESS_MS = 1_500;
 
 export interface PeerConnectionClient {
   resolve(query: string): Promise<PublicTetiIdentity>;
-  request(query: string): Promise<PeerConnectionResult>;
-  list(): Promise<PeerConnectionResult>;
-  readSnapshot(): Promise<PeerConnectionResult>;
-  accept(requestId: string): Promise<PeerConnectionResult>;
-  reject(requestId: string): Promise<PeerConnectionResult>;
+  request(query: string): Promise<PeerConnectionCommandResult>;
+  accept(requestId: string): Promise<void>;
+  reject(requestId: string): Promise<void>;
+}
+
+export interface PeerConnectionCommandResult {
+  requestOutcome?: PeerConnectionRequestOutcome;
 }
 
 export interface PeerConnectionSnapshot {
@@ -39,7 +41,7 @@ export interface PeerConnectionSnapshot {
   connectPanel: ConnectPanelSnapshot;
   highlightedRequestId?: string;
   resolved?: PublicTetiIdentity;
-  connections: PeerConnectionDto[];
+  connections: PassportConnectionSnapshot[];
   lastSnapshotAt?: string;
 }
 
@@ -47,6 +49,7 @@ export class PeerConnectionController {
   private readonly client: PeerConnectionClient;
   private readonly notchWindow: TauriNotchWindowController;
   private readonly onChange: () => void;
+  private readonly refreshPassport: () => Promise<void>;
   private readonly schedule: (callback: () => void, delayMs: number) => unknown;
   private readonly cancel: (handle: unknown) => void;
   private snapshotValue: PeerConnectionSnapshot = {
@@ -56,7 +59,6 @@ export class PeerConnectionController {
     connectPanel: initialConnectPanelSnapshot(),
     connections: []
   };
-  private readingSnapshot = false;
   private collapseToken = 0;
   private interactionActive = false;
   private disposed = false;
@@ -67,12 +69,14 @@ export class PeerConnectionController {
     client: PeerConnectionClient;
     notchWindow: TauriNotchWindowController;
     onChange: () => void;
+    refreshPassport?: () => Promise<void>;
     schedule?: (callback: () => void, delayMs: number) => unknown;
     cancel?: (handle: unknown) => void;
   }) {
     this.client = options.client;
     this.notchWindow = options.notchWindow;
     this.onChange = options.onChange;
+    this.refreshPassport = options.refreshPassport ?? (() => Promise.resolve());
     this.schedule = options.schedule ?? ((callback, delayMs) => setTimeout(callback, delayMs));
     this.cancel = options.cancel ?? ((handle) => clearTimeout(handle as ReturnType<typeof setTimeout>));
   }
@@ -87,14 +91,17 @@ export class PeerConnectionController {
     };
   }
 
-  async initialize(): Promise<void> {
-    try {
-      const result = await this.client.list();
-      if (!this.disposed) this.applyResult(result);
-    } catch {
-      // The first local snapshot read will retry without interrupting the desktop shell.
+  syncPassportConnections(connections: readonly PassportConnectionSnapshot[]): void {
+    if (this.disposed) return;
+    const hadPending = this.hasPendingApproval();
+    this.snapshotValue.connections = connections.map((connection) => structuredClone(connection));
+    this.snapshotValue.lastSnapshotAt = new Date().toISOString();
+    if (!hadPending && this.hasPendingApproval() && !this.snapshotValue.open) {
+      this.snapshotValue.open = true;
+      this.resetConnectPanel();
+      this.touch();
+      void this.notchWindow.setMode("onboarding", "incoming-peer-connection").catch(() => undefined);
     }
-    this.scheduleSnapshotRead();
   }
 
   open(): void {
@@ -204,7 +211,7 @@ export class PeerConnectionController {
     try {
       const result = await this.client.request(input);
       if (this.disposed) return;
-      this.applyResult(result);
+      await this.refreshPassport();
       const outcome = this.connectOutcome(result);
       this.snapshotValue.resolved = undefined;
       this.transitionPanel(outcome.event);
@@ -220,40 +227,17 @@ export class PeerConnectionController {
   }
 
   async accept(requestId: string): Promise<void> {
-    await this.run(async () => this.applyResult(await this.client.accept(requestId)));
+    await this.run(async () => {
+      await this.client.accept(requestId);
+      await this.refreshPassport();
+    });
   }
 
   async reject(requestId: string): Promise<void> {
-    await this.run(async () => this.applyResult(await this.client.reject(requestId)));
-  }
-
-  private async refreshSnapshot(): Promise<void> {
-    if (this.readingSnapshot || this.disposed) return;
-    this.readingSnapshot = true;
-    try {
-      const result = await this.client.readSnapshot();
-      if (this.disposed) return;
-      const hadPending = this.hasPendingApproval();
-      this.applyResult(result);
-      this.snapshotValue.lastSnapshotAt = new Date().toISOString();
-      if (!hadPending && this.hasPendingApproval() && !this.snapshotValue.open) {
-        this.open();
-      } else if (this.snapshotValue.open || result.receivedCount > 0 || result.heartbeatCount > 0) {
-        this.onChange();
-      }
-    } catch {
-      // A later local snapshot read retries. Connect-form errors stay scoped to its message slot.
-    } finally {
-      this.readingSnapshot = false;
-      this.scheduleSnapshotRead();
-    }
-  }
-
-  private scheduleSnapshotRead(): void {
-    if (this.disposed) return;
-    this.scheduleTask(() => {
-      void this.refreshSnapshot();
-    }, SNAPSHOT_READ_INTERVAL_MS);
+    await this.run(async () => {
+      await this.client.reject(requestId);
+      await this.refreshPassport();
+    });
   }
 
   private async run(operation: () => Promise<void>): Promise<void> {
@@ -265,7 +249,7 @@ export class PeerConnectionController {
     try {
       await operation();
     } catch {
-      // Existing cards remain intact; the next snapshot read retries without leaking transport details.
+      // Existing cards remain intact; the next Passport read retries without leaking transport details.
     } finally {
       if (this.disposed) return;
       this.snapshotValue.busy = false;
@@ -274,11 +258,7 @@ export class PeerConnectionController {
     }
   }
 
-  private applyResult(result: PeerConnectionResult): void {
-    this.snapshotValue.connections = result.connections.map((connection) => structuredClone(connection));
-  }
-
-  private connectOutcome(result: PeerConnectionResult): {
+  private connectOutcome(result: PeerConnectionCommandResult): {
     event: Extract<ConnectPanelEvent, { type: "CONNECT_SUCCEEDED" | "CONNECT_FAILED" }>;
   } {
     const outcome = result.requestOutcome;
@@ -303,7 +283,7 @@ export class PeerConnectionController {
   }
 
   private hasPendingApproval(): boolean {
-    return this.snapshotValue.connections.some((connection) => connection.state === "PendingApproval");
+    return this.snapshotValue.connections.some((connection) => connection.connectionState === "PendingApproval");
   }
 
   private touch(): void {
@@ -406,31 +386,27 @@ export class BridgePeerConnectionClient implements PeerConnectionClient {
     return this.bridge.request("connection.resolve", { query }) as Promise<PublicTetiIdentity>;
   }
 
-  request(query: string): Promise<PeerConnectionResult> {
-    return this.bridge.request("connection.request", { query }) as Promise<PeerConnectionResult>;
+  async request(query: string): Promise<PeerConnectionCommandResult> {
+    const result = await this.bridge.request("connection.request", { query }) as PeerConnectionResult;
+    return result.requestOutcome ? { requestOutcome: result.requestOutcome } : {};
   }
 
-  list(): Promise<PeerConnectionResult> {
-    return this.bridge.request("connection.list") as Promise<PeerConnectionResult>;
+  async accept(requestId: string): Promise<void> {
+    await this.bridge.request("connection.accept", { requestId });
   }
 
-  readSnapshot(): Promise<PeerConnectionResult> {
-    // Task 3 keeps the v1 method name internally, but Runtime serves only its
-    // cached snapshot here and remains the sole owner of Chatmail polling.
-    return this.bridge.request("connection.poll") as Promise<PeerConnectionResult>;
-  }
-
-  accept(requestId: string): Promise<PeerConnectionResult> {
-    return this.bridge.request("connection.accept", { requestId }) as Promise<PeerConnectionResult>;
-  }
-
-  reject(requestId: string): Promise<PeerConnectionResult> {
-    return this.bridge.request("connection.reject", { requestId }) as Promise<PeerConnectionResult>;
+  async reject(requestId: string): Promise<void> {
+    await this.bridge.request("connection.reject", { requestId });
   }
 }
 
 export class MockPeerConnectionClient implements PeerConnectionClient {
-  private connections: PeerConnectionDto[] = [];
+  private connections: PassportConnectionSnapshot[] = [];
+  private readonly onConnectionsChanged?: (connections: PassportConnectionSnapshot[]) => void;
+
+  constructor(onConnectionsChanged?: (connections: PassportConnectionSnapshot[]) => void) {
+    this.onConnectionsChanged = onConnectionsChanged;
+  }
 
   async resolve(query: string): Promise<PublicTetiIdentity> {
     const publicId = normalizeTetiPublicIdCode(query);
@@ -444,46 +420,43 @@ export class MockPeerConnectionClient implements PeerConnectionClient {
     };
   }
 
-  async request(query: string): Promise<PeerConnectionResult> {
+  async request(query: string): Promise<PeerConnectionCommandResult> {
     const identity = await this.resolve(query);
-    const existing = this.connections.find((connection) => connection.remoteTetiId === identity.id);
+    const existing = this.connections.find((connection) => connection.identity.tetiId === identity.id);
     if (existing) {
-      return this.result({
-        kind: existing.state === "Confirmed" ? "alreadyConfirmed" : "alreadyRequested",
+      return { requestOutcome: {
+        kind: existing.connectionState === "Confirmed" ? "alreadyConfirmed" : "alreadyRequested",
         requestId: existing.requestId,
-        remoteTetiId: existing.remoteTetiId
-      });
+        remoteTetiId: existing.identity.tetiId
+      } };
     }
     const now = new Date().toISOString();
     this.connections = [{
       requestId: `preview_${Date.now()}`,
-      state: "Requested",
+      connectionState: "Requested",
       direction: "outgoing",
-      remoteTetiId: identity.id,
-      remoteAddress: identity.address,
-      remoteDisplayName: identity.displayName,
+      identity: {
+        tetiId: identity.id,
+        address: identity.address,
+        ...(identity.displayName ? { displayName: identity.displayName } : {})
+      },
       createdAt: now,
-      updatedAt: now
+      updatedAt: now,
+      lastSeen: null,
+      passport: { state: "unknown", resources: [] }
     }];
-    return this.result({
+    this.publish();
+    return { requestOutcome: {
       kind: "created",
       requestId: this.connections[0].requestId,
       remoteTetiId: identity.id
-    });
+    } };
   }
 
-  async list(): Promise<PeerConnectionResult> { return this.result(); }
-  async readSnapshot(): Promise<PeerConnectionResult> { return this.result(); }
-  async accept(): Promise<PeerConnectionResult> { return this.result(); }
-  async reject(): Promise<PeerConnectionResult> { return this.result(); }
+  async accept(): Promise<void> { this.publish(); }
+  async reject(): Promise<void> { this.publish(); }
 
-  private result(requestOutcome?: PeerConnectionResult["requestOutcome"]): PeerConnectionResult {
-    const result: PeerConnectionResult = {
-      connections: this.connections.map((item) => ({ ...item })),
-      receivedCount: 0,
-      heartbeatCount: 0
-    };
-    if (requestOutcome) result.requestOutcome = requestOutcome;
-    return result;
+  private publish(): void {
+    this.onConnectionsChanged?.(structuredClone(this.connections));
   }
 }

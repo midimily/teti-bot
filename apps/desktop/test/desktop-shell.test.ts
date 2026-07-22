@@ -203,17 +203,17 @@ test("view-model states map to desktop shell window modes", () => {
   );
 });
 
-test("Desktop is a Runtime consumer and owns no Registry or Codex network refresh schedule", async () => {
-  const [appSource, bridgeSource, aiStatusSource] = await Promise.all([
+test("Desktop consumes only the Runtime Passport read model and owns no network refresh schedule", async () => {
+  const [appSource, bridgeSource, passportSource] = await Promise.all([
     readFile(new URL("../src/app.ts", import.meta.url), "utf8"),
     readFile(new URL("../src/provisioning/bridge-lifecycle.ts", import.meta.url), "utf8"),
-    readFile(new URL("../src/ai-status/controller.ts", import.meta.url), "utf8")
+    readFile(new URL("../src/passport/controller.ts", import.meta.url), "utf8")
   ]);
 
   assert.doesNotMatch(appSource, /DiscoveryHeartbeat|discovery\.heartbeat/);
   assert.doesNotMatch(bridgeSource, /BridgeDiscoveryHeartbeatClient/);
-  assert.doesNotMatch(aiStatusSource, /usage\.refresh|refreshUsage/);
-  assert.match(aiStatusSource, /usage\.get/);
+  assert.doesNotMatch(passportSource, /usage\.(get|refresh)|connection\.poll|sharing\.get/);
+  assert.match(passportSource, /passport\.get/);
 });
 
 function visualModeForSnapshot(snapshot: FirstLaunchSnapshot): string {

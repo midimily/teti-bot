@@ -101,27 +101,28 @@ test("first-launch user copy avoids transport and credential internals", () => {
   }
 });
 
-test("desktop shell exposes Codex status and explicit four-character sharing consent", () => {
+test("desktop shell exposes AI Passport and explicit Passport sharing consent", () => {
   const app = readFileSync(join(desktopRoot, "src", "app.ts"), "utf8");
-  const aiView = readFileSync(join(desktopRoot, "src", "ai-status", "view.ts"), "utf8");
+  const passportView = readFileSync(join(desktopRoot, "src", "passport", "view.ts"), "utf8");
+  const passportViewModel = readFileSync(join(desktopRoot, "src", "passport", "view-model.ts"), "utf8");
   const styles = readFileSync(join(desktopRoot, "src", "styles.css"), "utf8");
 
-  assert.match(aiView, /AI 工具状态/);
-  assert.doesNotMatch(aiView, /本周额度剩余/);
-  assert.match(aiView, /title\.textContent = "设置"/);
-  assert.match(aiView, /状态共享/);
-  assert.doesNotMatch(aiView, /仅向已建联的 Teti 分享 AI 工具计划与剩余额度/);
+  assert.match(passportViewModel, /title: "AI Passport"/);
+  assert.match(passportViewModel, /toggleLabel: "Passport 分享"/);
+  assert.doesNotMatch(passportView, /本周额度剩余/);
   assert.doesNotMatch(app, /界面设置|减少动画|运行状态/);
   assert.match(styles, /@media \(prefers-reduced-motion: reduce\)/);
   assert.doesNotMatch(styles, /data-reduced-motion/);
   assert.match(app, /target\.closest\("\.teti-header-panel"\)/);
   assert.match(app, /target\.closest\("\.teti-header-icon\[aria-expanded\]"\)/);
   assert.match(app, /options\.tauri\.onDockActivate/);
-  assert.doesNotMatch(aiView, /toggle\.disabled = snapshot\.sharingBusy/);
+  assert.doesNotMatch(passportView, /toggle\.disabled/);
   assert.doesNotMatch(app, /iconButton\(X, "收起"/);
   assert.match(styles, /\.teti-header\s*\{[\s\S]*right:\s*14px/);
   assert.match(styles, /\.teti-toolbar-asset-icon\s*\{[\s\S]*object-fit:\s*contain/);
   assert.match(styles, /\.teti-toolbar-asset-icon\s*\{[\s\S]*filter:\s*saturate\(0\.78\)/);
+  assert.match(styles, /\.teti-ai-status-panel,[\s\S]*rgba\(255, 255, 255, 0\.38\)/);
+  assert.match(styles, /\.teti-sharing-panel[\s\S]*backdrop-filter:\s*blur\(28px\)/);
   assert.equal(existsSync(join(desktopRoot, "assets", "codex-status.png")), true);
   assert.equal(existsSync(join(desktopRoot, "assets", "ai-tools-btn.png")), true);
   assert.equal(existsSync(join(desktopRoot, "assets", "settings.png")), true);

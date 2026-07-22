@@ -12,7 +12,8 @@ import {
   type LifecycleSidecarDependencies
 } from "../lifecycle-sidecar/handler.ts";
 import { redactSecretLikeText } from "../lifecycle-sidecar/security.ts";
-import type { CodexUsageState } from "../src/codex-usage/types.ts";
+import type { RuntimePassportSnapshot } from "../../../core/passport/snapshot.ts";
+import { resourceSharingPolicy } from "../lifecycle-sidecar/runtime/passport/sharing.ts";
 
 test("sidecar returns health response", async () => {
   const response = await handleLifecycleRequest(request("lifecycle.health"), fakeDependencies());
@@ -132,59 +133,38 @@ test("sidecar keeps discovery heartbeat failures distinct from registration fail
   assert.equal(!response.ok && response.error.retryTarget, "discovery.heartbeat");
 });
 
-test("sidecar routes peer resolution and connection polling through the bounded bridge", async () => {
+test("sidecar keeps peer commands while rejecting the removed connection polling read", async () => {
   const deps = fakeDependencies({ account: createAccount("Milo") });
   const resolved = await handleLifecycleRequest(request("connection.resolve", { query: "076bm9evq" }), deps);
-  const polled = await handleLifecycleRequest(request("connection.poll"), deps);
+  const polled = await handleLifecycleRequest(
+    { version: 1, id: "removed", method: "connection.poll", params: {} },
+    deps
+  );
 
   assert.equal(resolved.ok, true);
   assert.equal(resolved.ok && resolved.result?.id, "teti_076bm9evq");
-  assert.deepEqual(polled.ok && polled.result, {
-    connections: [],
-    receivedCount: 0,
-    heartbeatCount: 0
-  });
+  assert.equal(polled.ok, false);
+  assert.equal(!polled.ok && polled.error.code, "UNKNOWN_METHOD");
 });
 
-test("sidecar exposes only sanitized Codex usage state through bounded methods", async () => {
+test("sidecar exposes one sanitized Runtime Passport snapshot", async () => {
   const deps = fakeDependencies();
-  const usage: CodexUsageState = {
-    status: "ready",
-    snapshot: {
-      source: "live",
-      planTypeRaw: "plus",
-      planDisplayName: null,
-      membershipVerified: false,
-      weekly: {
-        remainingPercent: 42,
-        usedPercent: 58,
-        resetAt: "2026-07-25T00:00:00.000Z",
-        windowSeconds: 604_800,
-        identification: "exact"
-      },
-      observedAt: "2026-07-18T00:00:00.000Z",
-      fetchedAt: "2026-07-18T00:00:00.000Z",
-      stale: false
-    }
-  };
-  deps.getCodexUsageState = () => usage;
-  deps.refreshCodexUsage = async () => usage;
-
-  const current = await handleLifecycleRequest(request("usage.get"), deps);
-  const refreshed = await handleLifecycleRequest(request("usage.refresh"), deps);
-  assert.deepEqual(current.ok && current.result, usage);
-  assert.deepEqual(refreshed.ok && refreshed.result, usage);
-  assert.equal(JSON.stringify([current, refreshed]).includes("token"), false);
+  const current = await handleLifecycleRequest(request("passport.get"), deps);
+  assert.equal(current.ok, true);
+  assert.equal(current.ok && current.result.localPassport.resources[0]?.product, "Codex");
+  assert.equal(JSON.stringify(current).includes("token"), false);
 });
 
-test("sidecar keeps status sharing off by default and validates explicit changes", async () => {
+test("sidecar validates field-level Passport sharing and returns the updated snapshot", async () => {
   const deps = fakeDependencies();
-  const initial = await handleLifecycleRequest(request("sharing.get"), deps);
-  const enabled = await handleLifecycleRequest(request("sharing.set", { enabled: true }), deps);
-  const invalid = await handleLifecycleRequest(request("sharing.set", { enabled: "yes" }), deps);
+  const enabled = await handleLifecycleRequest(request("passport.sharing.set", {
+    policy: resourceSharingPolicy(true)
+  }), deps);
+  const invalid = await handleLifecycleRequest(request("passport.sharing.set", {
+    policy: { ...resourceSharingPolicy(true), agents: true }
+  }), deps);
 
-  assert.deepEqual(initial.ok && initial.result, { statusSharing: false });
-  assert.deepEqual(enabled.ok && enabled.result, { statusSharing: true });
+  assert.deepEqual(enabled.ok && enabled.result.sharing, resourceSharingPolicy(true));
   assert.equal(invalid.ok, false);
   assert.equal(!invalid.ok && invalid.error.code, "INTERNAL_ERROR");
 });
@@ -206,7 +186,7 @@ function fakeDependencies(options: { account?: TetiAccount | null } = {}): Lifec
   const createCalls: string[] = [];
   const registerCalls: TetiAccount[] = [];
   let account = options.account ?? null;
-  let statusSharing = false;
+  let passport = createPassportSnapshot();
 
   const dependencies: LifecycleSidecarDependencies & {
     createCalls: string[];
@@ -243,6 +223,13 @@ function fakeDependencies(options: { account?: TetiAccount | null } = {}): Lifec
       dependencies.heartbeatCalls += 1;
       return clone(account);
     },
+    async getPassportSnapshot() {
+      return clone(passport);
+    },
+    async setPassportSharing(policy) {
+      passport = { ...passport, revision: passport.revision + 1, sharing: clone(policy) };
+      return clone(passport);
+    },
     async getPeerConnectionService() {
       const empty = { connections: [], receivedCount: 0, heartbeatCount: 0 } as const;
       return {
@@ -259,15 +246,45 @@ function fakeDependencies(options: { account?: TetiAccount | null } = {}): Lifec
         async poll() { return empty; },
         async accept() { return empty; },
         async reject() { return empty; },
-        async getStatusSharing() { return { statusSharing }; },
-        async setStatusSharing(enabled: boolean) {
-          statusSharing = enabled;
-          return { statusSharing };
+        async getPassportSharing() { return clone(passport.sharing); },
+        async setPassportSharing(policy) {
+          passport.sharing = clone(policy);
+          return clone(policy);
         }
       };
     }
   };
   return dependencies;
+}
+
+function createPassportSnapshot(): RuntimePassportSnapshot {
+  const generatedAt = "2026-07-22T00:00:00.000Z";
+  return {
+    schemaVersion: 1,
+    revision: 1,
+    generatedAt,
+    identity: null,
+    localPassport: {
+      schemaVersion: 1,
+      generatedAt,
+      resources: [{
+        id: "openai.codex",
+        provider: "OpenAI",
+        product: "Codex",
+        kind: "subscription",
+        availability: "available",
+        plan: { key: "plus", displayName: "Plus" },
+        quotas: [],
+        assurance: "provider_observed",
+        observedAt: generatedAt
+      }],
+      agents: [],
+      capabilities: [],
+      bindings: []
+    },
+    connections: [],
+    sharing: resourceSharingPolicy(false)
+  };
 }
 
 function createAccount(displayName: string): TetiAccount {

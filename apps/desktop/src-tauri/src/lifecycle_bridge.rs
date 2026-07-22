@@ -620,17 +620,14 @@ fn should_restart(process: Option<&mut ManagedSidecar>) -> bool {
 pub fn timeout_for_method(method: &str) -> Duration {
     Duration::from_millis(match method {
         "lifecycle.health" => 2_000,
-        "usage.get" => 2_000,
-        "usage.refresh" => 12_000,
-        "sharing.get" | "sharing.set" => 2_000,
+        "passport.get" => 2_000,
+        "passport.sharing.set" => 5_000,
         "account.status" | "account.load" => 5_000,
         "account.create" => 120_000,
         "discovery.register" | "discovery.retry" => 15_000,
         "discovery.heartbeat" => 30_000,
         "connection.resolve" => 15_000,
         "connection.request" | "connection.accept" | "connection.reject" => 30_000,
-        "connection.poll" => 20_000,
-        "connection.list" => 5_000,
         _ => 5_000,
     })
 }
@@ -647,14 +644,10 @@ fn is_allowed_method(method: &str) -> bool {
             | "discovery.heartbeat"
             | "connection.resolve"
             | "connection.request"
-            | "connection.list"
-            | "connection.poll"
             | "connection.accept"
             | "connection.reject"
-            | "usage.get"
-            | "usage.refresh"
-            | "sharing.get"
-            | "sharing.set"
+            | "passport.get"
+            | "passport.sharing.set"
     )
 }
 
@@ -739,7 +732,8 @@ mod tests {
     #[test]
     fn timeout_values_are_method_specific() {
         assert!(is_allowed_method("discovery.heartbeat"));
-        assert!(is_allowed_method("usage.get"));
+        assert!(is_allowed_method("passport.get"));
+        assert!(!is_allowed_method("usage.get"));
         assert_eq!(
             timeout_for_method("lifecycle.health"),
             Duration::from_millis(2_000)
@@ -760,13 +754,10 @@ mod tests {
             timeout_for_method("discovery.heartbeat"),
             Duration::from_millis(30_000)
         );
+        assert_eq!(timeout_for_method("passport.get"), Duration::from_millis(2_000));
         assert_eq!(
-            timeout_for_method("usage.refresh"),
-            Duration::from_millis(12_000)
-        );
-        assert_eq!(
-            timeout_for_method("sharing.set"),
-            Duration::from_millis(2_000)
+            timeout_for_method("passport.sharing.set"),
+            Duration::from_millis(5_000)
         );
     }
 

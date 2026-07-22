@@ -84,8 +84,6 @@ function publicMessageForCode(code: LifecycleErrorCode): string {
       return "Teti could not find that public identity.";
     case "CONNECTION_REQUEST_FAILED":
       return "Teti could not complete the connection request.";
-    case "CONNECTION_POLL_FAILED":
-      return "Teti could not check peer messages yet.";
     case "REQUEST_TIMEOUT":
       return "Teti took too long to respond.";
     case "SIDECAR_UNAVAILABLE":
@@ -107,8 +105,6 @@ function retryTargetForCode(code: LifecycleErrorCode): LifecycleMethod | undefin
       return "connection.resolve";
     case "CONNECTION_REQUEST_FAILED":
       return "connection.request";
-    case "CONNECTION_POLL_FAILED":
-      return "connection.poll";
     case "ACCOUNT_LOAD_FAILED":
     case "SIDECAR_UNAVAILABLE":
     case "REQUEST_TIMEOUT":

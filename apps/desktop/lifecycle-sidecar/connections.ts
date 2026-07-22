@@ -25,11 +25,11 @@ import {
 import { parseApplicationEnvelope } from "../../../core/protocol/envelope.ts";
 import type { TetiPresencePayload } from "../../../core/protocol/types.ts";
 import type {
-  AiStatusSharingSettings,
   AiStatusSyncPayload,
   AiToolStatusSnapshot,
   RemoteAiStatusSnapshot
 } from "../../../core/ai-status/types.ts";
+import type { PassportSharingPolicy } from "../../../core/passport/types.ts";
 import { TetiApplicationProtocolError } from "../../../core/protocol/validator.ts";
 import { ChatmailConnectionMessagingAdapter } from "../../../integrations/chatmail/connection-messaging.ts";
 import { createRuntimeChatmailRpcClient, type RuntimeChatmailRpcClient } from "../../../integrations/chatmail/create-runtime-client.ts";
@@ -46,10 +46,11 @@ import type {
 } from "../src/lifecycle-bridge/protocol.ts";
 import { resolveTetiProfile } from "./profile.ts";
 import {
-  FileAiStatusSettingsStore,
-  MemoryAiStatusSettingsStore,
-  type AiStatusSettingsStore
-} from "./ai-status/settings.ts";
+  FilePassportSharingStore,
+  MemoryPassportSharingStore,
+  isResourceSharingEnabled,
+  type PassportSharingStore
+} from "./runtime/passport/sharing.ts";
 import { getDefaultCodexUsageService } from "./codex-usage/runtime.ts";
 import { createShareableCodexStatus } from "../src/codex-usage/presentation.ts";
 
@@ -64,8 +65,8 @@ export interface PeerConnectionService {
   poll(): Promise<PeerConnectionResult>;
   accept(requestId: string): Promise<PeerConnectionResult>;
   reject(requestId: string): Promise<PeerConnectionResult>;
-  getStatusSharing(): Promise<AiStatusSharingSettings>;
-  setStatusSharing(enabled: boolean): Promise<AiStatusSharingSettings>;
+  getPassportSharing(): Promise<PassportSharingPolicy>;
+  setPassportSharing(policy: PassportSharingPolicy): Promise<PassportSharingPolicy>;
 }
 
 interface PeerConnectionRuntimeOptions {
@@ -75,7 +76,7 @@ interface PeerConnectionRuntimeOptions {
   registry: TetiRegistryReader;
   startIo?: (accountId: number) => Promise<void>;
   now?: () => Date;
-  aiStatusSettings?: AiStatusSettingsStore;
+  passportSharing?: PassportSharingStore;
   getLocalAiTools?: () => AiToolStatusSnapshot[];
 }
 
@@ -89,7 +90,7 @@ export class PeerConnectionRuntime implements PeerConnectionService {
   private readonly messagingAdapter: ChatmailConnectionMessagingAdapter;
   private readonly startIo?: (accountId: number) => Promise<void>;
   private readonly now: () => Date;
-  private readonly aiStatusSettings: AiStatusSettingsStore;
+  private readonly passportSharing: PassportSharingStore;
   private readonly getLocalAiTools: () => AiToolStatusSnapshot[];
   private readonly heartbeatSent = new Map<string, string>();
   private readonly heartbeatReceived = new Map<string, string>();
@@ -109,7 +110,7 @@ export class PeerConnectionRuntime implements PeerConnectionService {
     this.registry = options.registry;
     this.startIo = options.startIo;
     this.now = options.now ?? (() => new Date());
-    this.aiStatusSettings = options.aiStatusSettings ?? new MemoryAiStatusSettingsStore();
+    this.passportSharing = options.passportSharing ?? new MemoryPassportSharingStore();
     this.getLocalAiTools = options.getLocalAiTools ?? (() => []);
     this.messagingAdapter = new ChatmailConnectionMessagingAdapter(this.chatmailAdapter);
     this.connectionManager = new TetiConnectionManager({
@@ -212,16 +213,15 @@ export class PeerConnectionRuntime implements PeerConnectionService {
     });
   }
 
-  getStatusSharing(): Promise<AiStatusSharingSettings> {
-    return this.aiStatusSettings.load();
+  getPassportSharing(): Promise<PassportSharingPolicy> {
+    return this.passportSharing.load();
   }
 
-  setStatusSharing(enabled: boolean): Promise<AiStatusSharingSettings> {
+  setPassportSharing(policy: PassportSharingPolicy): Promise<PassportSharingPolicy> {
     return this.serialSettings(async () => {
-      const settings = { statusSharing: enabled };
-      await this.aiStatusSettings.save(settings);
-      this.scheduleAiStatusBroadcast(enabled ? "enabled" : "disabled");
-      return settings;
+      await this.passportSharing.save(policy);
+      this.scheduleAiStatusBroadcast(isResourceSharingEnabled(policy) ? "enabled" : "disabled");
+      return { ...policy };
     });
   }
 
@@ -363,8 +363,8 @@ export class PeerConnectionRuntime implements PeerConnectionService {
   }
 
   private async sendDueAiStatus(force = false): Promise<number> {
-    const sharing = await this.aiStatusSettings.load().then(
-      (settings) => settings.statusSharing,
+    const sharing = await this.passportSharing.load().then(
+      (policy) => isResourceSharingEnabled(policy),
       () => false
     );
     if (!sharing) return 0;
@@ -513,7 +513,7 @@ async function createDefaultPeerConnectionService(): Promise<PeerConnectionServi
     chatmailAdapter,
     registry: new RegistryDiscoveryClient(),
     startIo: (accountId) => defaultRpcClient!.startIo(accountId),
-    aiStatusSettings: new FileAiStatusSettingsStore(join(profile.root, "settings.json")),
+    passportSharing: new FilePassportSharingStore(join(profile.root, "settings.json")),
     getLocalAiTools: () => [createShareableCodexStatus(getDefaultCodexUsageService().getCurrentState())]
   });
 }

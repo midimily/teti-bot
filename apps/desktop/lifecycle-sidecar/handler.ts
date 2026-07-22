@@ -26,8 +26,9 @@ import {
   getDefaultPeerConnectionService,
   type PeerConnectionService
 } from "./connections.ts";
-import { getDefaultCodexUsageService } from "./codex-usage/runtime.ts";
-import type { CodexUsageState } from "../src/codex-usage/types.ts";
+import type { RuntimePassportSnapshot } from "../../../core/passport/snapshot.ts";
+import type { PassportSharingPolicy } from "../../../core/passport/types.ts";
+import { validatePolicy } from "./runtime/passport/sharing.ts";
 
 export interface LifecycleSidecarDependencies {
   loadTetiAccount(): Promise<TetiAccount | null>;
@@ -36,8 +37,8 @@ export interface LifecycleSidecarDependencies {
   registerDiscovery(account: TetiAccount): Promise<unknown>;
   heartbeatDiscovery(): Promise<TetiAccount>;
   getPeerConnectionService(): Promise<PeerConnectionService>;
-  getCodexUsageState?(): CodexUsageState;
-  refreshCodexUsage?(): Promise<CodexUsageState>;
+  getPassportSnapshot?(): Promise<RuntimePassportSnapshot>;
+  setPassportSharing?(policy: PassportSharingPolicy): Promise<RuntimePassportSnapshot>;
 }
 
 export const defaultLifecycleSidecarDependencies: LifecycleSidecarDependencies = {
@@ -53,9 +54,7 @@ export const defaultLifecycleSidecarDependencies: LifecycleSidecarDependencies =
     await markDiscoveryRegistrationComplete(account);
   },
   heartbeatDiscovery: async () => (await getDefaultAccountManager()).refreshTetiEnvironment(),
-  getPeerConnectionService: getDefaultPeerConnectionService,
-  getCodexUsageState: () => getDefaultCodexUsageService().getCurrentState(),
-  refreshCodexUsage: () => getDefaultCodexUsageService().refreshNow()
+  getPeerConnectionService: getDefaultPeerConnectionService
 };
 
 export async function handleLifecycleRequest(
@@ -144,31 +143,19 @@ async function dispatchLifecycleRequest(
     case "connection.request":
       return (await dependencies.getPeerConnectionService()).request(validateConnectionQuery(request.params?.query));
 
-    case "connection.list":
-      return (await dependencies.getPeerConnectionService()).list();
-
-    case "connection.poll":
-      return (await dependencies.getPeerConnectionService()).poll();
-
     case "connection.accept":
       return (await dependencies.getPeerConnectionService()).accept(validateRequestId(request.params?.requestId));
 
     case "connection.reject":
       return (await dependencies.getPeerConnectionService()).reject(validateRequestId(request.params?.requestId));
 
-    case "usage.get":
-      return (dependencies.getCodexUsageState ?? (() => getDefaultCodexUsageService().getCurrentState()))();
+    case "passport.get":
+      if (!dependencies.getPassportSnapshot) throw new Error("Runtime Passport service is unavailable.");
+      return await dependencies.getPassportSnapshot();
 
-    case "usage.refresh":
-      return await (dependencies.refreshCodexUsage ?? (() => getDefaultCodexUsageService().refreshNow()))();
-
-    case "sharing.get":
-      return await (await dependencies.getPeerConnectionService()).getStatusSharing();
-
-    case "sharing.set":
-      return await (await dependencies.getPeerConnectionService()).setStatusSharing(
-        validateSharingEnabled(request.params?.enabled)
-      );
+    case "passport.sharing.set":
+      if (!dependencies.setPassportSharing) throw new Error("Runtime Passport service is unavailable.");
+      return await dependencies.setPassportSharing(validatePolicy(request.params?.policy));
   }
 }
 
@@ -256,13 +243,6 @@ function validateRequestId(value: unknown): string {
   return value.trim();
 }
 
-function validateSharingEnabled(value: unknown): boolean {
-  if (typeof value !== "boolean") {
-    throw new Error("Status sharing setting must be boolean.");
-  }
-  return value;
-}
-
 function statusToDto(status: TetiStatus, account: TetiAccount | null): LifecycleStatusResult {
   const result: LifecycleStatusResult = {
     exists: status.exists,
@@ -319,16 +299,11 @@ function fallbackCodeForMethod(method: LifecycleRequest["method"]) {
     case "connection.accept":
     case "connection.reject":
       return "CONNECTION_REQUEST_FAILED";
-    case "connection.list":
-    case "connection.poll":
-      return "CONNECTION_POLL_FAILED";
     case "account.load":
     case "account.status":
       return "ACCOUNT_LOAD_FAILED";
-    case "usage.get":
-    case "usage.refresh":
-    case "sharing.get":
-    case "sharing.set":
+    case "passport.get":
+    case "passport.sharing.set":
       return "INTERNAL_ERROR";
     default:
       return "INTERNAL_ERROR";

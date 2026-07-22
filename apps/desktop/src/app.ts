@@ -18,23 +18,24 @@ import {
 } from "./connections/controller.ts";
 import { CONNECT_PANEL_PLACEHOLDER } from "./connections/connect-panel-state.ts";
 import {
-  createRemoteTetiAvatar,
-  mapRemoteTetiReachability,
-  remoteTetiReachabilityLabel
+  createRemoteTetiAvatar
 } from "./connections/remote-teti-avatar.ts";
 import {
-  AiStatusController,
-  BridgeAiStatusClient,
-  MockAiStatusClient,
-  type AiStatusControllerSnapshot
-} from "./ai-status/controller.ts";
+  BridgePassportClient,
+  MockPassportClient,
+  PassportController,
+  emptyPassportSnapshot,
+  type PassportControllerSnapshot
+} from "./passport/controller.ts";
 import {
-  createCodexMark,
-  createCodexStatusPanel,
-  createRemoteAiStatus,
-  createSharingPanel
-} from "./ai-status/view.ts";
-import { presentCodexUsage } from "./codex-usage/presentation.ts";
+  createAiPassportPanel,
+  createPassportSettingsPanel,
+  createRemotePassport
+} from "./passport/view.ts";
+import {
+  toPassportViewModel,
+  type ConnectionCardViewModel
+} from "./passport/view-model.ts";
 import {
   createTetiBotBrandLink,
   TETI_BOT_OPENING_EVENT,
@@ -55,7 +56,7 @@ export interface DesktopAppOptions {
 export interface DesktopApp {
   coordinator: FirstLaunchCoordinator;
   connections: PeerConnectionController;
-  aiStatus: AiStatusController;
+  passport: PassportController;
   config: ProvisioningModeConfig;
   render(): void;
   dispose(): void;
@@ -67,7 +68,6 @@ export async function createDesktopApp(options: DesktopAppOptions): Promise<Desk
   const selection = await createDesktopAccountLifecycle(options.env, options.tauri);
   const notchWindow = new TauriNotchWindowController(options.tauri);
   let app: DesktopApp;
-  let connectionsInitialized = false;
   let disposed = false;
   let stopFocusListener: (() => void) | undefined;
   let stopDockActivateListener: (() => void) | undefined;
@@ -109,18 +109,26 @@ export async function createDesktopApp(options: DesktopAppOptions): Promise<Desk
         app?.render();
       }, delayMs)
   });
-  const connections = new PeerConnectionController({
-    client: selection.config.mode === "real"
-      ? new BridgePeerConnectionClient(new LifecycleBridgeClient(options.tauri))
-      : new MockPeerConnectionClient(),
-    notchWindow,
-    onChange: () => app?.render()
+  const bridge = selection.config.mode === "real" ? new LifecycleBridgeClient(options.tauri) : undefined;
+  const mockPassportClient = selection.config.mode === "mock" ? new MockPassportClient() : undefined;
+  let connections: PeerConnectionController;
+  const passport = new PassportController({
+    client: bridge ? new BridgePassportClient(bridge) : mockPassportClient!,
+    onChange: () => {
+      connections?.syncPassportConnections(passport.snapshot.passport.connections);
+      app?.render();
+    },
+    schedule: baseSchedule
   });
-  const aiStatus = new AiStatusController({
-    client: selection.config.mode === "real"
-      ? new BridgeAiStatusClient(new LifecycleBridgeClient(options.tauri))
-      : new MockAiStatusClient(),
-    onChange: () => app?.render()
+  connections = new PeerConnectionController({
+    client: bridge
+      ? new BridgePeerConnectionClient(bridge)
+      : new MockPeerConnectionClient((items) => {
+          mockPassportClient?.setConnections(items);
+        }),
+    notchWindow,
+    onChange: () => app?.render(),
+    refreshPassport: () => passport.refreshAfterMutation()
   });
   if (options.tauri.onFocusChanged) {
     stopFocusListener = await options.tauri.onFocusChanged((focused) => {
@@ -129,7 +137,7 @@ export async function createDesktopApp(options: DesktopAppOptions): Promise<Desk
           clearBrandOpenGuard();
           return;
         }
-        aiStatus.closePanel();
+        passport.closePanel();
         connections.dismissFromOutside();
       }
     });
@@ -141,7 +149,7 @@ export async function createDesktopApp(options: DesktopAppOptions): Promise<Desk
         void notchWindow.show("dock-activate");
         return;
       }
-      aiStatus.closePanel(false);
+      passport.closePanel(false);
       connections.open();
     });
   }
@@ -149,14 +157,10 @@ export async function createDesktopApp(options: DesktopAppOptions): Promise<Desk
   app = {
     coordinator,
     connections,
-    aiStatus,
+    passport,
     config: selection.config,
     render: () => {
-      if (coordinator.snapshot.account && !connectionsInitialized) {
-        connectionsInitialized = true;
-        void connections.initialize();
-      }
-      renderSnapshot(options.root, coordinator.snapshot, selection.config, coordinator, connections, aiStatus);
+      renderSnapshot(options.root, coordinator.snapshot, selection.config, coordinator, connections, passport);
     },
     dispose: () => {
       if (disposed) return;
@@ -166,13 +170,13 @@ export async function createDesktopApp(options: DesktopAppOptions): Promise<Desk
       clearBrandOpenGuard();
       options.root.removeEventListener(TETI_BOT_OPENING_EVENT, handleBrandWebsiteOpening);
       options.root.removeEventListener(TETI_BOT_OPEN_SETTLED_EVENT, handleBrandWebsiteOpenSettled);
-      aiStatus.stop();
+      passport.stop();
       connections.dispose();
     }
   };
 
-  aiStatus.start();
   await coordinator.initialize();
+  passport.start();
   app.render();
   await notchWindow.setMode(visualModeForViewModel(toFirstLaunchViewModel(coordinator.snapshot)), "initial-render");
 
@@ -185,15 +189,15 @@ export function renderSnapshot(
   config: ProvisioningModeConfig = readProvisioningMode({}),
   coordinator?: FirstLaunchCoordinator,
   connections?: PeerConnectionController,
-  aiStatus?: AiStatusController
+  passport?: PassportController
 ): void {
   const viewModel = toFirstLaunchViewModel(snapshot);
   const peerPanelOpen = viewModel.panel === "collapsed" && connections?.snapshot.open;
   root.className = `teti-shell teti-shell--${peerPanelOpen ? "expanded" : viewModel.panel}`;
   root.replaceChildren(
     peerPanelOpen
-      ? createConnectionIsland(config, connections, aiStatus)
-      : createIsland(viewModel, config, coordinator, connections, aiStatus)
+      ? createConnectionIsland(config, connections, passport)
+      : createIsland(viewModel, config, coordinator, connections, passport)
   );
 }
 
@@ -202,14 +206,14 @@ function createIsland(
   config: ProvisioningModeConfig,
   coordinator?: FirstLaunchCoordinator,
   connections?: PeerConnectionController,
-  aiStatus?: AiStatusController
+  passport?: PassportController
 ): HTMLElement {
   const island = document.createElement("section");
   island.className = `teti-island teti-island--${viewModel.panel} teti-island--${viewModel.character}`;
   island.setAttribute("aria-label", viewModel.title);
 
   if (viewModel.panel === "expanded") {
-    island.append(createIslandHeader(config, aiStatus));
+    island.append(createIslandHeader(config, passport));
   }
 
   const face = document.createElement(viewModel.panel === "collapsed" && connections ? "button" : "div");
@@ -218,7 +222,7 @@ function createIsland(
   if (face instanceof HTMLButtonElement) {
     face.type = "button";
     const pendingCount = connections?.snapshot.connections.filter(
-      (connection) => connection.state === "PendingApproval"
+      (connection) => connection.connectionState === "PendingApproval"
     ).length ?? 0;
     const openLabel = pendingCount > 0 ? `打开 Teti 建联，${pendingCount} 个请求待确认` : "打开 Teti 建联";
     face.setAttribute("aria-label", openLabel);
@@ -231,7 +235,7 @@ function createIsland(
       face.append(indicator);
     }
     face.addEventListener("click", () => {
-      aiStatus?.closePanel();
+      passport?.closePanel();
       connections?.open();
     });
   } else {
@@ -274,7 +278,7 @@ function createIsland(
     input.addEventListener("keydown", (event) => {
       if (event.key === "Enter" && coordinator && !viewModel.input?.disabled) {
         event.preventDefault();
-        void submitAndRender(coordinator, island.ownerDocument.getElementById("app"), config, connections, aiStatus);
+        void submitAndRender(coordinator, island.ownerDocument.getElementById("app"), config, connections, passport);
       }
     });
     content.append(input);
@@ -325,7 +329,7 @@ function createIsland(
           config,
           coordinator,
           connections,
-          aiStatus
+          passport
         );
         return;
       }
@@ -338,7 +342,7 @@ function createIsland(
           config,
           coordinator,
           connections,
-          aiStatus
+          passport
         );
         return;
       }
@@ -349,7 +353,7 @@ function createIsland(
           island.ownerDocument.getElementById("app"),
           config,
           connections,
-          aiStatus
+          passport
         );
         return;
       }
@@ -359,7 +363,7 @@ function createIsland(
         island.ownerDocument.getElementById("app"),
         config,
         connections,
-        aiStatus
+        passport
       );
     });
     content.append(button);
@@ -372,13 +376,14 @@ function createIsland(
 function createConnectionIsland(
   config: ProvisioningModeConfig,
   controller: PeerConnectionController,
-  aiStatus?: AiStatusController
+  passport?: PassportController
 ): HTMLElement {
   const snapshot = controller.snapshot;
+  const passportViewModel = toPassportViewModel(passport?.snapshot ?? defaultPassportSnapshot());
   const island = document.createElement("section");
   island.className = "teti-island teti-island--expanded teti-island--connections";
   island.setAttribute("aria-label", "连接其他 Teti");
-  island.append(createConnectionHeader(config, aiStatus));
+  island.append(createConnectionHeader(config, passport));
 
   const panelState = snapshot.connectPanel.state;
   const face = document.createElement("button");
@@ -468,10 +473,10 @@ function createConnectionIsland(
 
   content.append(stage);
 
-  if (snapshot.connections.length > 0) {
+  if (passportViewModel.connections.length > 0) {
     const list = document.createElement("div");
     list.className = "teti-connection-list";
-    for (const connection of snapshot.connections) {
+    for (const connection of passportViewModel.connections) {
       list.append(createConnectionRow(
         connection,
         snapshot.busy,
@@ -483,7 +488,7 @@ function createConnectionIsland(
   }
 
   island.append(content);
-  installConnectionPanelInteractions(island, controller, aiStatus);
+  installConnectionPanelInteractions(island, controller, passport);
   return island;
 }
 
@@ -540,7 +545,7 @@ function resetEyeTracking(face: HTMLButtonElement): void {
 function installConnectionPanelInteractions(
   island: HTMLElement,
   controller: PeerConnectionController,
-  aiStatus?: AiStatusController
+  passport?: PassportController
 ): void {
   island.addEventListener("pointerenter", () => controller.beginInteraction());
   island.addEventListener("pointerleave", () => controller.endInteraction());
@@ -551,7 +556,7 @@ function installConnectionPanelInteractions(
     if (target.closest(".teti-header-panel") || target.closest(".teti-header-icon[aria-expanded]")) return;
     const openHeaderPanel = island.querySelector<HTMLElement>(".teti-header-panel:not([hidden])");
     if (!openHeaderPanel) return;
-    aiStatus?.closePanel(false);
+    passport?.closePanel(false);
     openHeaderPanel.hidden = true;
     island.querySelectorAll<HTMLButtonElement>(".teti-header-icon[aria-expanded='true']")
       .forEach((button) => button.setAttribute("aria-expanded", "false"));
@@ -571,8 +576,8 @@ function installConnectionPanelInteractions(
     event.stopPropagation();
     const openHeaderPanel = island.querySelector<HTMLElement>(".teti-header-panel:not([hidden])");
     if (openHeaderPanel) {
-      if (aiStatus) {
-        aiStatus.closePanel();
+      if (passport) {
+        passport.closePanel();
       } else {
         openHeaderPanel.hidden = true;
         island.querySelectorAll<HTMLButtonElement>(".teti-header-icon[aria-expanded='true']")
@@ -595,7 +600,7 @@ function focusAfterPanelExpansion(input: HTMLInputElement): void {
 }
 
 function createConnectionRow(
-  connection: import("./lifecycle-bridge/protocol.ts").PeerConnectionDto,
+  connection: ConnectionCardViewModel,
   busy: boolean,
   highlighted: boolean,
   controller: PeerConnectionController
@@ -605,27 +610,26 @@ function createConnectionRow(
   const identity = document.createElement("div");
   identity.className = "teti-connection-identity";
   const name = document.createElement("strong");
-  name.textContent = connection.remoteDisplayName || connection.remoteTetiId;
+  name.textContent = connection.displayName;
   const address = document.createElement("small");
-  address.textContent = connection.remoteAddress;
+  address.textContent = connection.address;
   identity.append(name, address);
 
   const state = document.createElement("div");
   state.className = "teti-connection-state";
   if (connection.state === "Confirmed") {
-    const reachability = mapRemoteTetiReachability(connection);
-    row.classList.add(`is-${reachability}`);
-    row.prepend(createRemoteTetiAvatar({ reachability, size: 28 }));
+    row.classList.add(`is-${connection.reachability}`);
+    row.prepend(createRemoteTetiAvatar({ reachability: connection.reachability, size: 28 }));
     const presence = document.createElement("div");
     presence.className = "teti-connection-presence";
     const relationship = document.createElement("span");
     relationship.className = "teti-connection-relationship";
     relationship.textContent = "已建联";
     const reachabilityText = document.createElement("span");
-    reachabilityText.className = `teti-connection-reachability is-${reachability}`;
-    reachabilityText.textContent = `[对方${remoteTetiReachabilityLabel(reachability)}]`;
+    reachabilityText.className = `teti-connection-reachability is-${connection.reachability}`;
+    reachabilityText.textContent = `[对方${connection.reachabilityLabel}]`;
     presence.append(relationship, reachabilityText);
-    state.append(presence, createRemoteAiStatus(connection.remoteAiStatus));
+    state.append(presence, createRemotePassport(connection.passport));
   } else if (connection.state === "PendingApproval") {
     const accept = iconButton(Check, "接受建联", () => void controller.accept(connection.requestId));
     const reject = iconButton(X, "拒绝建联", () => void controller.reject(connection.requestId));
@@ -645,9 +649,9 @@ function createConnectionRow(
 
 function createConnectionHeader(
   config: ProvisioningModeConfig,
-  aiStatus?: AiStatusController
+  passport?: PassportController
 ): HTMLElement {
-  return createIslandHeader(config, aiStatus);
+  return createIslandHeader(config, passport);
 }
 
 function iconButton(
@@ -674,7 +678,7 @@ function updateNameCounter(input: HTMLInputElement, meta: HTMLElement, maxCharac
   meta.textContent = `${countUnicodeCharacters(input.value)} / ${maxCharacters}`;
 }
 
-function createIslandHeader(_config: ProvisioningModeConfig, aiStatus?: AiStatusController): HTMLElement {
+function createIslandHeader(_config: ProvisioningModeConfig, passport?: PassportController): HTMLElement {
   const header = document.createElement("header");
   header.className = "teti-header";
 
@@ -682,29 +686,29 @@ function createIslandHeader(_config: ProvisioningModeConfig, aiStatus?: AiStatus
 
   const controls = document.createElement("div");
   controls.className = "teti-header-controls";
-  const snapshot = aiStatus?.snapshot ?? defaultAiStatusSnapshot();
-  const presentation = presentCodexUsage(snapshot.usage);
-  const statusPanel = createCodexStatusPanel(snapshot);
-  const sharingPanel = createSharingPanel(snapshot, aiStatus);
+  const snapshot = passport?.snapshot ?? defaultPassportSnapshot();
+  const viewModel = toPassportViewModel(snapshot);
+  const statusPanel = createAiPassportPanel(viewModel.aiPanel);
+  const sharingPanel = createPassportSettingsPanel(viewModel.settings, passport);
   const statusButton = createHeaderButton(
     null,
-    `查看 Codex 状态：${presentation.planLabel}`,
+    `查看 AI Passport：${viewModel.aiPanel.resources[0]?.planLabel ?? "暂时无法确认"}`,
     statusPanel,
     controls,
     createToolbarAssetIcon(aiToolsButtonIconUrl, "ai-tools"),
-    snapshot.openPanel === "status",
-    aiStatus ? () => aiStatus.togglePanel("status") : undefined
+    snapshot.openPanel === "passport",
+    passport ? () => passport.togglePanel("passport") : undefined
   );
   const sharingButton = createHeaderButton(
     null,
-    snapshot.statusSharing ? "状态共享已开启" : "打开共享设置",
+    viewModel.settings.enabled ? "Passport 分享已开启" : "打开 Passport 设置",
     sharingPanel,
     controls,
     createToolbarAssetIcon(settingsButtonIconUrl, "settings"),
     snapshot.openPanel === "sharing",
-    aiStatus ? () => aiStatus.togglePanel("sharing") : undefined
+    passport ? () => passport.togglePanel("sharing") : undefined
   );
-  sharingButton.classList.toggle("is-sharing-enabled", snapshot.statusSharing);
+  sharingButton.classList.toggle("is-sharing-enabled", viewModel.settings.enabled);
   controls.append(statusButton, sharingButton, statusPanel, sharingPanel);
 
   header.append(brand, controls);
@@ -754,17 +758,9 @@ function createToolbarAssetIcon(source: string, kind: "ai-tools" | "settings"): 
   return image;
 }
 
-function defaultAiStatusSnapshot(): AiStatusControllerSnapshot {
+function defaultPassportSnapshot(): PassportControllerSnapshot {
   return {
-    usage: {
-      status: "unavailable",
-      error: {
-        code: "NOT_STARTED",
-        message: "Codex usage has not been refreshed yet.",
-        recoverable: true
-      }
-    },
-    statusSharing: false,
+    passport: emptyPassportSnapshot(),
     sharingBusy: false,
     openPanel: null
   };
@@ -811,16 +807,16 @@ async function submitAndRender(
   root: HTMLElement | null,
   config: ProvisioningModeConfig,
   connections?: PeerConnectionController,
-  aiStatus?: AiStatusController
+  passport?: PassportController
 ): Promise<void> {
   const pending = coordinator.submitName();
   if (root) {
-    renderSnapshot(root, coordinator.snapshot, config, coordinator, connections, aiStatus);
+    renderSnapshot(root, coordinator.snapshot, config, coordinator, connections, passport);
   }
 
   await pending;
   if (root) {
-    renderSnapshot(root, coordinator.snapshot, config, coordinator, connections, aiStatus);
+    renderSnapshot(root, coordinator.snapshot, config, coordinator, connections, passport);
   }
 }
 
@@ -829,16 +825,16 @@ async function retryDiscoveryAndRender(
   root: HTMLElement | null,
   config: ProvisioningModeConfig,
   connections?: PeerConnectionController,
-  aiStatus?: AiStatusController
+  passport?: PassportController
 ): Promise<void> {
   const pending = coordinator.retryDiscoveryRegistration();
   if (root) {
-    renderSnapshot(root, coordinator.snapshot, config, coordinator, connections, aiStatus);
+    renderSnapshot(root, coordinator.snapshot, config, coordinator, connections, passport);
   }
 
   await pending;
   if (root) {
-    renderSnapshot(root, coordinator.snapshot, config, coordinator, connections, aiStatus);
+    renderSnapshot(root, coordinator.snapshot, config, coordinator, connections, passport);
   }
 }
 

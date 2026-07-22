@@ -1,6 +1,6 @@
 # Teti Beta MVP 1.0 Architecture Freeze
 
-Status: Accepted for Task 1; Task 2 Runtime ownership implemented
+Status: Accepted; Tasks 1–4 implemented
 Scope: Product boundary, local runtime boundary, domain model, privacy boundary, and migration constraints
 Implementation baseline: `05de174824374738690793361bec849b49ea4d0a`
 
@@ -204,22 +204,23 @@ This preserves existing Codex sharing consent without silently exposing new data
 
 The current Registry public profile and `aiEnvironment` fields remain backward-compatible during Runtime convergence, but they are not the authoritative store for the new Agent or Capability inventory.
 
-## Internal IPC and network compatibility
+## Internal IPC and network boundary
 
 The Rust-to-Runtime JSON Lines interface is private implementation IPC, not a Teti network protocol.
 
-Task 1 preserved the original execution paths. Tasks 2 and 3 keep the same private IPC method names and apply these compatibility rules:
+Task 4 replaces the fragmented Desktop read surface with:
 
-- no lifecycle method is removed or renamed;
-- `discovery.heartbeat` reads the last Runtime-owned account snapshot and never sends a second Registry request;
-- production Desktop no longer schedules or calls `discovery.heartbeat`; the method remains only for private IPC compatibility and diagnostics;
-- `connection.poll` reads the latest Runtime-owned peer snapshot and consumes accumulated event counters without receiving Chatmail a second time;
-- the Desktop connection controller names this operation `readSnapshot` and reads it every 3 seconds only to update cards, presence, and pending-request UI;
-- `connection.list` can initialize the cache from the existing local service before the first Runtime poll completes;
-- `usage.get`, `usage.refresh`, `sharing.get`, and `sharing.set` keep their existing method names and payload shapes;
-- production `usage.refresh` joins an in-flight Runtime refresh or returns the current sanitized state rather than creating a second Codex schedule;
-- production Desktop no longer calls `usage.refresh`; it reads `usage.get` every 10 minutes, with a 3-second local retry only while Runtime still reports the initial `NOT_STARTED` snapshot;
+- `passport.get`, which returns one Runtime-owned `RuntimePassportSnapshot` without network or provider I/O;
+- `passport.sharing.set`, which persists the field-level resource policy and returns the updated Snapshot;
+- the existing account and connection command methods for explicit user operations.
+
+There was no released Desktop/Runtime pair before this migration, so Task 4 does not preserve cross-version private IPC. The obsolete `connection.list`, `connection.poll`, `usage.get`, `usage.refresh`, `sharing.get`, and `sharing.set` reads are removed from the allowed Desktop IPC surface.
+
+This private IPC cutover does not change the Teti network boundary:
+
 - `teti.ai.status.sync` remains unchanged;
+- existing AI-status TTL behavior remains unchanged;
+- Chatmail, Registry, connection, and presence payloads remain unchanged;
 - `teti.capability.offer` is not expanded.
 
 Runtime uses one process-local scheduler with these frozen Beta intervals:
@@ -252,6 +253,15 @@ Implementation status: complete locally. The production sidecar entrypoint start
 
 Implementation status: complete locally. The obsolete Desktop Discovery heartbeat scheduler and bridge client are removed. Connection and AI-status controllers are Runtime snapshot consumers; account creation, Registry retry, connection request/accept/reject, and sharing changes remain explicit user operations.
 
+### Task 4: Passport Domain Integration
+
+- adapt the existing account, connection, Codex, sharing, and remote AI-status caches into the frozen Passport contracts;
+- make `RuntimePassportSnapshot` the only Desktop read model;
+- add Passport ViewModels for connection cards, the AI panel, and settings;
+- retain the existing Teti network payload and privacy boundary.
+
+Implementation status: complete locally. Runtime owns Passport aggregation, Desktop has one Passport controller, and Renderer no longer consumes Codex usage, remote AI-status, Chatmail, Registry, or `statusSharing` DTOs.
+
 ## Task 1 acceptance criteria
 
 - no production entrypoint imports or starts `TetiRuntimeHost`;
@@ -278,7 +288,7 @@ Implementation status: complete locally. The obsolete Desktop Discovery heartbea
 - Runtime shutdown is bounded and actively closes Chatmail RPC;
 - the Rust host reaps Runtime and its child process group on application exit;
 - a second Runtime cannot use the same local profile concurrently;
-- existing wire payloads, TTLs, storage formats, lifecycle method names, and UI behavior remain compatible;
+- existing wire payloads, TTLs, storage formats, lifecycle method names, and UI behavior remain compatible through Task 3; Task 4 separately replaces unreleased private read methods;
 - Task 3 is implemented and verified separately from the Runtime ownership migration.
 
 ## Task 3 acceptance criteria
@@ -290,6 +300,19 @@ Implementation status: complete locally. The obsolete Desktop Discovery heartbea
 - UI snapshot timers exist only to make Runtime-owned state visible to the user;
 - pending connection requests still open the connection island and remain actionable;
 - connection request, accept, reject, sharing changes, account creation, and Registry retry remain explicit user operations;
-- the v1 private IPC method set and all network payloads remain compatible;
+- Task 3 preserves the v1 private IPC method set; Task 4 later supersedes only the unreleased private read surface while preserving all network payloads;
 - Desktop disposal cancels only UI animation, auto-collapse, and snapshot-read timers;
 - Runtime remains healthy when the island is collapsed, hidden, or unfocused.
+
+## Task 4 acceptance criteria
+
+- `passport.get` performs local aggregation only and triggers no Registry, Chatmail, heartbeat, AI sync, or provider request;
+- Snapshot identity may be null before account creation;
+- local resources use the frozen `AiResource` contract and Agent/Capability/Binding arrays remain empty;
+- remote Passport state is exactly `fresh`, `stale`, `disabled`, or `unknown`;
+- expiry remains resource- or remote-Passport-scoped rather than invalidating the whole Snapshot;
+- sharing persists as `PassportSharingPolicy`, defaults off, and migrates the previous boolean once without broadening consent;
+- Desktop has one three-second local Passport reader and no connection, usage, or sharing read controller;
+- connection request, accept, reject, account creation, and Registry retry remain explicit commands;
+- Renderer receives Passport ViewModels and contains no legacy AI-status interpretation;
+- all existing Teti network payloads and TTLs remain unchanged.

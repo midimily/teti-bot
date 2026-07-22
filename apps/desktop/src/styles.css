@@ -339,6 +339,15 @@ input {
 .teti-ai-status-panel,
 .teti-sharing-panel {
   gap: 9px;
+  border-color: rgba(80, 157, 219, 0.24);
+  background: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.38),
+    rgba(226, 245, 255, 0.26)
+  );
+  box-shadow: 0 14px 34px rgba(32, 81, 122, 0.12);
+  -webkit-backdrop-filter: blur(28px) saturate(1.16);
+  backdrop-filter: blur(28px) saturate(1.16);
 }
 
 .teti-ai-tool-row {
@@ -466,6 +475,26 @@ input {
 .teti-sharing-panel .teti-toggle-row {
   color: var(--teti-text-primary);
   font-weight: 700;
+}
+
+.teti-settings-identity-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  color: var(--teti-text-primary);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.teti-settings-identity-value {
+  overflow: hidden;
+  color: var(--teti-text-secondary);
+  font-size: 10px;
+  font-weight: 600;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .teti-sharing-error {

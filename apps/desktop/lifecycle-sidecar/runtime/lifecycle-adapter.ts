@@ -2,9 +2,8 @@ import type { LifecycleSidecarDependencies } from "../handler.ts";
 import type { TetiRuntime } from "./service.ts";
 
 /**
- * Keeps the v1 Desktop IPC surface compatible while Runtime is the only owner
- * of periodic network work. Task 3 may later remove the obsolete UI timers,
- * but it does not need to change this private IPC contract.
+ * Routes explicit Desktop commands and Passport reads into the single Runtime
+ * owner. The unreleased fragmented read methods were removed in Task 4.
  */
 export function createRuntimeOwnedLifecycleDependencies(
   base: LifecycleSidecarDependencies,
@@ -23,7 +22,7 @@ export function createRuntimeOwnedLifecycleDependencies(
     },
     heartbeatDiscovery: () => runtime.readDiscoveryAccount(),
     getPeerConnectionService: async () => runtime.getPeerConnectionFacade(),
-    getCodexUsageState: () => runtime.getCodexUsageState(),
-    refreshCodexUsage: () => runtime.waitForCodexUsageState()
+    getPassportSnapshot: () => runtime.getPassportSnapshot(),
+    setPassportSharing: (policy) => runtime.setPassportSharing(policy)
   };
 }

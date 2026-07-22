@@ -9,11 +9,11 @@ import {
   CONNECT_PANEL_OPEN_MS,
   CONNECT_PANEL_SUCCESS_MS,
   PeerConnectionController,
-  type PeerConnectionClient
+  type PeerConnectionClient,
+  type PeerConnectionCommandResult
 } from "../src/connections/controller.ts";
+import type { PassportConnectionSnapshot } from "../../../core/passport/snapshot.ts";
 import type {
-  PeerConnectionDto,
-  PeerConnectionResult,
   PublicTetiIdentity
 } from "../src/lifecycle-bridge/protocol.ts";
 import { RecordingTauriInvoker } from "../src/platform/tauri-api.ts";
@@ -28,11 +28,7 @@ const identity: DiscoveryIdentity = {
   publicProfile: { platform: "macOS" }
 };
 
-const emptyResult: PeerConnectionResult = {
-  connections: [],
-  receivedCount: 0,
-  heartbeatCount: 0
-};
+const emptyResult: TestCommandResult = { connections: [] };
 
 test("peer identity input resolves the 9-character ID shown on teti.bot", async () => {
   const registry = new StaticRegistry([identity]);
@@ -230,9 +226,9 @@ test("an already-confirmed peer stays visible and returns a recoverable scoped e
 });
 
 test("an outgoing request is acknowledged without falsely claiming the peer is connected", async () => {
-  const connection: PeerConnectionDto = {
+  const connection: PassportConnectionSnapshot = {
     ...confirmedConnection("waiting-request"),
-    state: "Requested"
+    connectionState: "Requested"
   };
   const { controller, scheduler } = makeHarness(
     new StaticPeerConnectionClient(withOutcome(connection, "alreadyRequested"))
@@ -290,7 +286,7 @@ test("outside focus loss collapses the outer connection island when no request i
   controller.dispose();
 });
 
-test("disposing the controller cancels opening, success, collapse, and snapshot timers", async () => {
+test("disposing the controller cancels opening, success, and collapse timers", async () => {
   const scheduler = new ControlledScheduler();
   const controller = new PeerConnectionController({
     client: new StaticPeerConnectionClient(emptyResult),
@@ -300,7 +296,6 @@ test("disposing the controller cancels opening, success, collapse, and snapshot 
     cancel: scheduler.cancel
   });
 
-  await controller.initialize();
   controller.open();
   controller.activateEyes();
   assert.ok(scheduler.size > 0);
@@ -361,10 +356,15 @@ function makeHarness(client: PeerConnectionClient = new StaticPeerConnectionClie
   client: PeerConnectionClient & { requestCalls: string[] };
 } {
   const scheduler = new ControlledScheduler();
-  const controller = new PeerConnectionController({
+  let controller: PeerConnectionController;
+  controller = new PeerConnectionController({
     client,
     notchWindow: new TauriNotchWindowController(new RecordingTauriInvoker()),
     onChange: () => undefined,
+    refreshPassport: async () => {
+      const connections = (client as Partial<TestPeerConnectionClient>).connections ?? [];
+      controller.syncPassportConnections(connections);
+    },
     schedule: scheduler.schedule,
     cancel: scheduler.cancel
   });
@@ -383,31 +383,33 @@ function openEditor(controller: PeerConnectionController, scheduler: ControlledS
   assert.equal(controller.snapshot.connectPanel.state, "editing");
 }
 
-function confirmedConnection(requestId: string): PeerConnectionDto {
+function confirmedConnection(requestId: string): PassportConnectionSnapshot {
   return {
     requestId,
-    state: "Confirmed",
+    connectionState: "Confirmed",
     direction: "outgoing",
-    remoteTetiId: identity.id,
-    remoteAddress: identity.address,
-    remoteDisplayName: identity.displayName,
+    identity: {
+      tetiId: identity.id,
+      address: identity.address,
+      displayName: identity.displayName
+    },
     createdAt: "2026-07-17T00:00:00.000Z",
-    updatedAt: "2026-07-17T00:00:01.000Z"
+    updatedAt: "2026-07-17T00:00:01.000Z",
+    lastSeen: null,
+    passport: { state: "unknown", resources: [] }
   };
 }
 
 function withOutcome(
-  connection: PeerConnectionDto,
-  kind: NonNullable<PeerConnectionResult["requestOutcome"]>["kind"]
-): PeerConnectionResult {
+  connection: PassportConnectionSnapshot,
+  kind: NonNullable<PeerConnectionCommandResult["requestOutcome"]>["kind"]
+): TestCommandResult {
   return {
     connections: [connection],
-    receivedCount: 0,
-    heartbeatCount: 0,
     requestOutcome: {
       kind,
       requestId: connection.requestId,
-      remoteTetiId: connection.remoteTetiId
+      remoteTetiId: connection.identity.tetiId
     }
   };
 }
@@ -466,38 +468,46 @@ class StaticRegistry implements TetiRegistryReader {
   }
 }
 
-class StaticPeerConnectionClient implements PeerConnectionClient {
-  readonly requestCalls: string[] = [];
-  private readonly requestResult: PeerConnectionResult;
+interface TestCommandResult extends PeerConnectionCommandResult {
+  connections: PassportConnectionSnapshot[];
+}
 
-  constructor(requestResult: PeerConnectionResult) {
+interface TestPeerConnectionClient extends PeerConnectionClient {
+  connections: PassportConnectionSnapshot[];
+}
+
+class StaticPeerConnectionClient implements TestPeerConnectionClient {
+  readonly requestCalls: string[] = [];
+  readonly connections: PassportConnectionSnapshot[];
+  private readonly requestResult: TestCommandResult;
+
+  constructor(requestResult: TestCommandResult) {
     this.requestResult = requestResult;
+    this.connections = structuredClone(requestResult.connections);
   }
 
   async resolve(_query: string): Promise<PublicTetiIdentity> {
     return identity;
   }
 
-  async request(query: string): Promise<PeerConnectionResult> {
+  async request(query: string): Promise<PeerConnectionCommandResult> {
     this.requestCalls.push(query);
     return this.requestResult;
   }
 
-  async list(): Promise<PeerConnectionResult> { return emptyResult; }
-  async readSnapshot(): Promise<PeerConnectionResult> { return emptyResult; }
-  async accept(_requestId: string): Promise<PeerConnectionResult> { return emptyResult; }
-  async reject(_requestId: string): Promise<PeerConnectionResult> { return emptyResult; }
+  async accept(_requestId: string): Promise<void> { return undefined; }
+  async reject(_requestId: string): Promise<void> { return undefined; }
 }
 
 class SequencedPeerConnectionClient extends StaticPeerConnectionClient {
-  private readonly sequence: Array<PeerConnectionResult | Error>;
+  private readonly sequence: Array<TestCommandResult | Error>;
 
-  constructor(sequence: Array<PeerConnectionResult | Error>) {
+  constructor(sequence: Array<TestCommandResult | Error>) {
     super(emptyResult);
     this.sequence = [...sequence];
   }
 
-  override async request(query: string): Promise<PeerConnectionResult> {
+  override async request(query: string): Promise<PeerConnectionCommandResult> {
     this.requestCalls.push(query);
     const next = this.sequence.shift() ?? emptyResult;
     if (next instanceof Error) throw next;
@@ -506,20 +516,20 @@ class SequencedPeerConnectionClient extends StaticPeerConnectionClient {
 }
 
 class DeferredPeerConnectionClient extends StaticPeerConnectionClient {
-  private resolveRequest?: (result: PeerConnectionResult) => void;
+  private resolveRequest?: (result: PeerConnectionCommandResult) => void;
 
   constructor() {
     super(emptyResult);
   }
 
-  override request(query: string): Promise<PeerConnectionResult> {
+  override request(query: string): Promise<PeerConnectionCommandResult> {
     this.requestCalls.push(query);
     return new Promise((resolve) => {
       this.resolveRequest = resolve;
     });
   }
 
-  finish(result: PeerConnectionResult): void {
+  finish(result: PeerConnectionCommandResult): void {
     assert.ok(this.resolveRequest, "expected a pending request");
     this.resolveRequest(result);
     this.resolveRequest = undefined;

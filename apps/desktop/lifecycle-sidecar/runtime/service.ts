@@ -1,5 +1,6 @@
 import type { TetiAccount } from "../../../../core/account/model.ts";
-import type { AiStatusSharingSettings } from "../../../../core/ai-status/types.ts";
+import type { RuntimePassportSnapshot } from "../../../../core/passport/snapshot.ts";
+import type { PassportSharingPolicy } from "../../../../core/passport/types.ts";
 import type { CodexUsageState } from "../../src/codex-usage/types.ts";
 import type {
   PeerConnectionResult,
@@ -11,6 +12,7 @@ import {
   type TetiRuntimeHostOptions,
   type TetiRuntimeHostSnapshot
 } from "./host.ts";
+import { RuntimePassportService } from "./passport/service.ts";
 
 export const TETI_RUNTIME_JOB_IDS = {
   registryHeartbeat: "registry-heartbeat",
@@ -55,20 +57,18 @@ export interface TetiRuntimeStopResult {
 
 /**
  * Owns process-local background work for the existing lifecycle sidecar.
- * Compatibility IPC reads the snapshots maintained here; it does not invoke
- * Registry or Chatmail network polling a second time.
+ * Passport reads consume the snapshots maintained here; they do not invoke
+ * Registry, Chatmail, or provider network work a second time.
  */
 export class TetiRuntime {
   private readonly dependencies: TetiRuntimeDependencies;
   private readonly host: TetiRuntimeHost;
   private readonly peerFacade: PeerConnectionService;
+  private readonly passportService: RuntimePassportService;
   private discoveryAccount: TetiAccount | null = null;
   private peerConnections: PeerConnectionResult["connections"] | null = null;
-  private pendingReceivedCount = 0;
-  private pendingHeartbeatCount = 0;
-  private pendingAiStatusCount = 0;
-  private codexRefreshInFlight: Promise<CodexUsageState> | null = null;
   private accountLoadInFlight: Promise<TetiAccount | null> | null = null;
+  private peerServicePromise: Promise<PeerConnectionService> | null = null;
   private readonly shutdownTimeoutMs: number;
   private stopPromise: Promise<TetiRuntimeStopResult> | null = null;
 
@@ -80,6 +80,15 @@ export class TetiRuntime {
     }
     const intervals = { ...TETI_RUNTIME_INTERVALS, ...options.intervals };
     this.peerFacade = new RuntimePeerConnectionFacade(this);
+    this.passportService = new RuntimePassportService({
+      sources: {
+        loadAccount: () => this.loadAccount(),
+        getConnections: () => this.peerConnections ?? [],
+        getCodexUsage: () => this.getCodexUsageState(),
+        getSharing: async () => (await this.rawPeerService()).getPassportSharing()
+      },
+      now: options.now
+    });
     this.host = new TetiRuntimeHost({
       jobs: [
         {
@@ -97,23 +106,15 @@ export class TetiRuntime {
           runOnStart: true,
           shouldRun: () => this.hasLocalAccount(),
           run: async () => {
-            const service = await this.dependencies.getPeerConnectionService();
-            this.capturePeerResult(await service.poll(), true);
+            const service = await this.rawPeerService();
+            this.capturePeerResult(await service.poll());
           }
         },
         {
           id: TETI_RUNTIME_JOB_IDS.codexRefresh,
           intervalMs: intervals.codexRefreshMs,
           runOnStart: true,
-          run: async () => {
-            const refresh = this.dependencies.codexUsageService.refreshNow();
-            this.codexRefreshInFlight = refresh;
-            try {
-              await refresh;
-            } finally {
-              if (this.codexRefreshInFlight === refresh) this.codexRefreshInFlight = null;
-            }
-          }
+          run: async () => { await this.dependencies.codexUsageService.refreshNow(); }
         }
       ],
       schedule: options.schedule,
@@ -155,13 +156,17 @@ export class TetiRuntime {
     return this.dependencies.codexUsageService.getCurrentState();
   }
 
-  async waitForCodexUsageState(): Promise<CodexUsageState> {
-    await this.codexRefreshInFlight;
-    return this.getCodexUsageState();
-  }
-
   getPeerConnectionFacade(): PeerConnectionService {
     return this.peerFacade;
+  }
+
+  getPassportSnapshot(): Promise<RuntimePassportSnapshot> {
+    return this.passportService.getSnapshot();
+  }
+
+  async setPassportSharing(policy: PassportSharingPolicy): Promise<RuntimePassportSnapshot> {
+    await (await this.rawPeerService()).setPassportSharing(policy);
+    return this.passportService.getSnapshot();
   }
 
   private async hasLocalAccount(): Promise<boolean> {
@@ -183,42 +188,33 @@ export class TetiRuntime {
   }
 
   private async rawPeerService(): Promise<PeerConnectionService> {
-    return this.dependencies.getPeerConnectionService();
+    this.peerServicePromise ??= this.dependencies.getPeerConnectionService();
+    return this.peerServicePromise;
   }
 
-  private capturePeerResult(result: PeerConnectionResult, publishEvents: boolean): void {
+  private capturePeerResult(result: PeerConnectionResult): void {
     this.peerConnections = clone(result.connections);
-    if (!publishEvents) return;
-    this.pendingReceivedCount += result.receivedCount;
-    this.pendingHeartbeatCount += result.heartbeatCount;
-    this.pendingAiStatusCount += result.aiStatusCount ?? 0;
   }
 
-  private async readPeerResult(consumeEvents: boolean): Promise<PeerConnectionResult> {
+  private async readPeerResult(): Promise<PeerConnectionResult> {
     if (!this.peerConnections) {
       const result = await (await this.rawPeerService()).list();
-      this.capturePeerResult(result, false);
+      this.capturePeerResult(result);
     }
 
-    const result: PeerConnectionResult = {
+    return {
       connections: clone(this.peerConnections ?? []),
-      receivedCount: this.pendingReceivedCount,
-      heartbeatCount: this.pendingHeartbeatCount,
-      aiStatusCount: this.pendingAiStatusCount
+      receivedCount: 0,
+      heartbeatCount: 0,
+      aiStatusCount: 0
     };
-    if (consumeEvents) {
-      this.pendingReceivedCount = 0;
-      this.pendingHeartbeatCount = 0;
-      this.pendingAiStatusCount = 0;
-    }
-    return result;
   }
 
   private async captureUserPeerOperation(
     operation: (service: PeerConnectionService) => Promise<PeerConnectionResult>
   ): Promise<PeerConnectionResult> {
     const result = await operation(await this.rawPeerService());
-    this.capturePeerResult(result, false);
+    this.capturePeerResult(result);
     return clone(result);
   }
 
@@ -231,11 +227,11 @@ export class TetiRuntime {
   }
 
   async listPeers(): Promise<PeerConnectionResult> {
-    return this.readPeerResult(false);
+    return this.readPeerResult();
   }
 
   async pollPeers(): Promise<PeerConnectionResult> {
-    return this.readPeerResult(true);
+    return this.readPeerResult();
   }
 
   async acceptPeer(requestId: string): Promise<PeerConnectionResult> {
@@ -246,12 +242,12 @@ export class TetiRuntime {
     return this.captureUserPeerOperation((service) => service.reject(requestId));
   }
 
-  async getStatusSharing(): Promise<AiStatusSharingSettings> {
-    return clone(await (await this.rawPeerService()).getStatusSharing());
+  async getPassportSharing(): Promise<PassportSharingPolicy> {
+    return clone(await (await this.rawPeerService()).getPassportSharing());
   }
 
-  async setStatusSharing(enabled: boolean): Promise<AiStatusSharingSettings> {
-    return clone(await (await this.rawPeerService()).setStatusSharing(enabled));
+  async updatePassportSharing(policy: PassportSharingPolicy): Promise<PassportSharingPolicy> {
+    return clone(await (await this.rawPeerService()).setPassportSharing(policy));
   }
 }
 
@@ -286,12 +282,12 @@ class RuntimePeerConnectionFacade implements PeerConnectionService {
     return this.runtime.rejectPeer(requestId);
   }
 
-  getStatusSharing(): Promise<AiStatusSharingSettings> {
-    return this.runtime.getStatusSharing();
+  getPassportSharing(): Promise<PassportSharingPolicy> {
+    return this.runtime.getPassportSharing();
   }
 
-  setStatusSharing(enabled: boolean): Promise<AiStatusSharingSettings> {
-    return this.runtime.setStatusSharing(enabled);
+  setPassportSharing(policy: PassportSharingPolicy): Promise<PassportSharingPolicy> {
+    return this.runtime.updatePassportSharing(policy);
   }
 }
 

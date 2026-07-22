@@ -1,5 +1,7 @@
 # Teti AI status UI and sharing protocol
 
+> Historical network-adapter note. Desktop presentation and settings now consume the Passport domain described in `docs/TETI_BETA_MVP_1_0_PASSPORT_DOMAIN_INTEGRATION.md`. The `teti.ai.status.sync` payload documented here remains unchanged as the current wire adapter.
+
 ## Product behavior
 
 The desktop toolbar's former run-status entry now opens **AI 工具状态**. The

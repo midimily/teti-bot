@@ -1,5 +1,5 @@
-import type { CodexUsageState } from "../codex-usage/types.ts";
-import type { AiStatusSharingSettings, RemoteAiStatusSnapshot } from "../../../../core/ai-status/types.ts";
+import type { RemoteAiStatusSnapshot } from "../../../../core/ai-status/types.ts";
+import type { RuntimePassportSnapshot } from "../../../../core/passport/snapshot.ts";
 
 export const LIFECYCLE_PROTOCOL_VERSION = 1;
 export const LIFECYCLE_MAX_LINE_BYTES = 64 * 1024;
@@ -14,14 +14,10 @@ export type LifecycleMethod =
   | "discovery.heartbeat"
   | "connection.resolve"
   | "connection.request"
-  | "connection.list"
-  | "connection.poll"
   | "connection.accept"
   | "connection.reject"
-  | "usage.get"
-  | "usage.refresh"
-  | "sharing.get"
-  | "sharing.set";
+  | "passport.get"
+  | "passport.sharing.set";
 
 export const LIFECYCLE_METHODS: readonly LifecycleMethod[] = [
   "lifecycle.health",
@@ -33,14 +29,10 @@ export const LIFECYCLE_METHODS: readonly LifecycleMethod[] = [
   "discovery.heartbeat",
   "connection.resolve",
   "connection.request",
-  "connection.list",
-  "connection.poll",
   "connection.accept",
   "connection.reject",
-  "usage.get",
-  "usage.refresh",
-  "sharing.get",
-  "sharing.set"
+  "passport.get",
+  "passport.sharing.set"
 ];
 
 export interface LifecycleRequest {
@@ -70,8 +62,7 @@ export type LifecycleResult =
   | PublicTetiAccount
   | PublicTetiIdentity
   | PeerConnectionResult
-  | CodexUsageState
-  | AiStatusSharingSettings
+  | RuntimePassportSnapshot
   | null;
 
 export interface LifecycleHealthResult {
@@ -164,7 +155,6 @@ export type LifecycleErrorCode =
   | "DISCOVERY_HEARTBEAT_FAILED"
   | "CONNECTION_RESOLVE_FAILED"
   | "CONNECTION_REQUEST_FAILED"
-  | "CONNECTION_POLL_FAILED"
   | "SIDECAR_UNAVAILABLE"
   | "REQUEST_TIMEOUT"
   | "INTERNAL_ERROR";
@@ -179,14 +169,10 @@ export const LIFECYCLE_TIMEOUT_MS: Record<LifecycleMethod, number> = {
   "discovery.heartbeat": 30_000,
   "connection.resolve": 15_000,
   "connection.request": 30_000,
-  "connection.list": 5_000,
-  "connection.poll": 20_000,
   "connection.accept": 30_000,
   "connection.reject": 30_000,
-  "usage.get": 2_000,
-  "usage.refresh": 12_000,
-  "sharing.get": 5_000,
-  "sharing.set": 30_000
+  "passport.get": 2_000,
+  "passport.sharing.set": 5_000
 };
 
 export function isLifecycleMethod(value: unknown): value is LifecycleMethod {
