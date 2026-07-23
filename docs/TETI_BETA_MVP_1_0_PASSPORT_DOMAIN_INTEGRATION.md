@@ -15,12 +15,14 @@ Explicit account, Registry retry, connection request, accept, reject, and sharin
 flowchart LR
   subgraph Runtime["Teti Runtime"]
     Account["Account cache"]
+    Registry["Registry status cache"]
     Peers["Peer cache"]
     Codex["Codex cache"]
     Sharing["Passport policy"]
     Legacy["Legacy network adapter"]
     Service["Passport Service"]
     Account --> Service
+    Registry --> Service
     Peers --> Service
     Codex --> Service
     Sharing --> Service
@@ -47,7 +49,7 @@ sequenceDiagram
   Jobs->>Cache: Refresh Registry / Chatmail / Codex
   Desktop->>Passport: passport.get
   Passport->>Cache: Read current local snapshots
-  Cache-->>Passport: Account + peers + Codex + policy
+  Cache-->>Passport: Account + Registry + peers + Codex + policy
   Passport-->>Desktop: RuntimePassportSnapshot
   Desktop->>UI: Connection / AI Panel / Settings ViewModels
   Note over Desktop,Passport: No provider or network I/O during passport.get
@@ -79,6 +81,7 @@ flowchart TB
 `RuntimePassportSnapshot` contains:
 
 - nullable local identity;
+- the current structured Registry state and privacy-safe diagnostic code;
 - one frozen `TetiCapabilityPassport` containing current resources and empty Agent, Capability, and Binding arrays;
 - connection projections with identity, relationship state, last seen time, and remote Passport;
 - `PassportSharingPolicy`;

@@ -30,7 +30,7 @@ test("sidecar reports missing account without creating one", async () => {
   assert.equal(response.ok, true);
   assert.deepEqual(response.ok && response.result, {
     exists: false,
-    registered: false,
+    registry: { state: "unknown" },
     onlineStatus: "unknown"
   });
   assert.equal(deps.createCalls.length, 0);
@@ -207,7 +207,13 @@ function fakeDependencies(options: { account?: TetiAccount | null } = {}): Lifec
     async getTetiStatus(): Promise<TetiStatus> {
       return {
         exists: account !== null,
-        registered: account !== null && registerCalls.length > 0,
+        registry: {
+          state: account === null
+            ? "unknown"
+            : registerCalls.length > 0
+              ? "registered"
+              : "not_registered"
+        },
         onlineStatus: "unknown"
       };
     },
@@ -260,10 +266,11 @@ function fakeDependencies(options: { account?: TetiAccount | null } = {}): Lifec
 function createPassportSnapshot(): RuntimePassportSnapshot {
   const generatedAt = "2026-07-22T00:00:00.000Z";
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     revision: 1,
     generatedAt,
     identity: null,
+    registry: { state: "unknown" },
     localPassport: {
       schemaVersion: 1,
       generatedAt,

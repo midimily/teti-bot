@@ -10,6 +10,7 @@ import {
 } from "../../../integrations/chatmail/relay-config.ts";
 import type { LifecycleErrorDto } from "../src/lifecycle-bridge/protocol.ts";
 import { createLifecycleError } from "./security.ts";
+import { writeRuntimeDiagnostic } from "./diagnostics.ts";
 
 export const TETI_PROFILE_DIR = "TETI_PROFILE_DIR";
 export const TETI_ALLOW_REAL_PROVISIONING = "TETI_ALLOW_REAL_PROVISIONING";
@@ -84,9 +85,17 @@ export function createProfiledAccountManager(
           ...process.env,
           DC_ACCOUNTS_PATH: profile.chatmailAccountsPath
         }
+      },
+      transport: {
+        requestTimeoutMs: 50_000,
+        onStderr: (line) => writeRuntimeDiagnostic("chatmail.rpc.stderr", { line })
       }
     }, {
-      accountQr: relay.accountQr
+      accountQr: relay.accountQr,
+      onStage: (stage) => writeRuntimeDiagnostic("chatmail.provision", {
+        stage,
+        result: "started"
+      })
     }),
     expectedAddressSuffix: relay.expectedAddressSuffix,
     onCreationStage: options.onCreationStage

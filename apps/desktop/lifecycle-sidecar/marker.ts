@@ -22,6 +22,8 @@ export interface CreationMarker {
   publicAddress?: string;
   errorCode?: string;
   errorMessage?: string;
+  failureDomain?: "chatmail" | "registry" | "local";
+  failureStage?: string;
 }
 
 export async function readCreationMarker(profile: TetiProfile): Promise<CreationMarker | null> {

@@ -51,8 +51,23 @@ export interface CreateTetiAccountInput {
 export interface TetiStatus {
   exists: boolean;
   address?: string;
-  registered: boolean;
+  registry: RegistryStatus;
   onlineStatus: "unknown" | "offline" | "online";
+}
+
+export type RegistryState =
+  | "unknown"
+  | "registered"
+  | "not_registered"
+  | "unreachable"
+  | "rejected"
+  | "conflict";
+
+export interface RegistryStatus {
+  state: RegistryState;
+  checkedAt?: string;
+  errorCode?: string;
+  retryable?: boolean;
 }
 
 export interface DiscoveryRegistrationPayload {

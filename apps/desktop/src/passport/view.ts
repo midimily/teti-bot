@@ -38,6 +38,14 @@ export function createPassportSettingsPanel(
   identityValue.textContent = viewModel.identityLabel;
   identityValue.title = viewModel.identityLabel;
   identity.append(identityKey, identityValue);
+  const registry = document.createElement("div");
+  registry.className = "teti-settings-identity-row";
+  const registryKey = document.createElement("span");
+  registryKey.textContent = "公开状态";
+  const registryValue = document.createElement("span");
+  registryValue.className = `teti-settings-identity-value is-${viewModel.registryTone}`;
+  registryValue.textContent = viewModel.registryLabel;
+  registry.append(registryKey, registryValue);
   const label = document.createElement("label");
   label.className = "teti-toggle-row";
   label.setAttribute("aria-busy", String(viewModel.busy));
@@ -48,7 +56,7 @@ export function createPassportSettingsPanel(
   toggle.checked = viewModel.enabled;
   toggle.addEventListener("change", () => void controller?.setResourceSharing(toggle.checked));
   label.append(text, toggle);
-  panel.append(title, identity, label);
+  panel.append(title, identity, registry, label);
   if (viewModel.error) {
     const error = document.createElement("small");
     error.className = "teti-sharing-error";

@@ -207,10 +207,11 @@ export class MockPassportClient implements PassportClient {
 export function emptyPassportSnapshot(now = new Date(0)): RuntimePassportSnapshot {
   const generatedAt = now.toISOString();
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     revision: 0,
     generatedAt,
     identity: null,
+    registry: { state: "unknown" },
     localPassport: {
       schemaVersion: 1,
       generatedAt,

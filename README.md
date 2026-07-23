@@ -50,3 +50,7 @@ Task 1 froze the Capability Passport model and introduced the Runtime Host. Task
 existing lifecycle sidecar so Registry heartbeat, Chatmail polling, peer presence and AI-status sync,
 and Codex refresh are Runtime-owned background work. Task 3 makes Desktop a pure Runtime consumer:
 its periodic reads update UI snapshots only and never drive Registry, Chatmail, or provider network work.
+
+To regression-test first launch on a development Mac while preserving the
+local Chatmail account store, follow
+[`docs/testing/TETI_FIRST_LAUNCH_REGRESSION.md`](docs/testing/TETI_FIRST_LAUNCH_REGRESSION.md).

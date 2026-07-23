@@ -231,6 +231,31 @@ Runtime uses one process-local scheduler with these frozen Beta intervals:
 
 Account-bound jobs remain idle before first account creation and are triggered after a successful creation or Registry retry. One failed job is logged with secret-like text redacted and does not stop the other jobs. Runtime stops scheduling and drains in-flight jobs when the lifecycle sidecar exits.
 
+### Local account and Registry recovery boundary
+
+The local Chatmail identity and atomically persisted `account.json` are the Teti
+initialization boundary. Registry reachability is not part of first-launch
+success:
+
+- account creation owns one temporary Delta Chat RPC process and is single-flight;
+- Peer RPC, Passport polling, and Codex refresh remain idle until the local
+  account exists;
+- after local persistence completes, Runtime is notified and starts the
+  account-bound jobs immediately;
+- Passport sharing reads and writes use the local sharing store directly and
+  cannot create Peer RPC as a side effect;
+- Registry synchronization runs in Runtime with bounded requests and adaptive
+  retry at 5s, 15s, 30s, 60s, then 5m;
+- Registry state is `registered`, `not_registered`, `unreachable`, `rejected`,
+  or `conflict`; only HTTP 404 maps to `not_registered`;
+- Registry state and error codes are included in `RuntimePassportSnapshot` and
+  written to the existing `teti-desktop.log` diagnostic stream.
+
+Chatmail provisioning has bounded `rpc_account`, `relay_config`, `io_start`,
+`identity_read`, and `cleanup` stages. Failures carry privacy-safe `CM_*`
+diagnostic codes; the first-launch UI shows only the compact stage family such
+as `[CM-RPC]`, `[CM-CFG]`, `[CM-IO]`, or `[CM-ID]`.
+
 ## Approved implementation sequence
 
 ### Task 1: Architecture Freeze and Runtime Host Skeleton

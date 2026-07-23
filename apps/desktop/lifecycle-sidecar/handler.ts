@@ -29,6 +29,7 @@ import {
 import type { RuntimePassportSnapshot } from "../../../core/passport/snapshot.ts";
 import type { PassportSharingPolicy } from "../../../core/passport/types.ts";
 import { validatePolicy } from "./runtime/passport/sharing.ts";
+import { writeRuntimeDiagnostic } from "./diagnostics.ts";
 
 export interface LifecycleSidecarDependencies {
   loadTetiAccount(): Promise<TetiAccount | null>;
@@ -53,7 +54,7 @@ export const defaultLifecycleSidecarDependencies: LifecycleSidecarDependencies =
     await new RegistryDiscoveryClient().registerIdentity(toDiscoveryRegistrationPayload(account));
     await markDiscoveryRegistrationComplete(account);
   },
-  heartbeatDiscovery: async () => (await getDefaultAccountManager()).refreshTetiEnvironment(),
+  heartbeatDiscovery: async () => (await getDefaultAccountManager()).ensureTetiRegistration(),
   getPeerConnectionService: getDefaultPeerConnectionService
 };
 
@@ -246,7 +247,7 @@ function validateRequestId(value: unknown): string {
 function statusToDto(status: TetiStatus, account: TetiAccount | null): LifecycleStatusResult {
   const result: LifecycleStatusResult = {
     exists: status.exists,
-    registered: status.registered,
+    registry: { ...status.registry },
     onlineStatus: status.onlineStatus
   };
 
@@ -327,7 +328,20 @@ function failure(id: string | null, error: ReturnType<typeof createLifecycleErro
   };
 }
 
+let accountCreationInFlight: Promise<TetiAccount> | null = null;
+
 async function createGuardedRealTetiAccount(input: { name: string }): Promise<TetiAccount> {
+  if (accountCreationInFlight) return accountCreationInFlight;
+  const creation = performGuardedRealTetiAccountCreation(input);
+  accountCreationInFlight = creation;
+  try {
+    return await creation;
+  } finally {
+    if (accountCreationInFlight === creation) accountCreationInFlight = null;
+  }
+}
+
+async function performGuardedRealTetiAccountCreation(input: { name: string }): Promise<TetiAccount> {
   const report = await validateAuthorizedProvisioningProfile();
   if (!report.ok || !report.profile) {
     throw new Error(report.errors.map((error) => error.message).join(" "));
@@ -337,19 +351,28 @@ async function createGuardedRealTetiAccount(input: { name: string }): Promise<Te
   await ensureProfileDirectories(profile);
   const startedAt = new Date().toISOString();
   const transaction: {
-    stage: "provisioning" | "identity_created" | "persisting" | "persisted" | "registering_discovery" | "complete";
+    stage: "provisioning" | "identity_created" | "persisting" | "persisted" | "complete";
     account?: TetiAccount;
   } = { stage: "provisioning" };
   const manager = createProfiledAccountManager(profile, {
     onCreationStage: async (stage, account) => {
       transaction.stage = stage;
       transaction.account = account;
-      await writeCreationMarker(profile, {
-        stage,
-        startedAt,
-        publicTetiId: account?.id,
-        publicAddress: account?.address
-      });
+      try {
+        await writeCreationMarker(profile, {
+          stage,
+          startedAt,
+          publicTetiId: account?.id,
+          publicAddress: account?.address
+        });
+      } catch (error) {
+        if (stage !== "persisted" && stage !== "complete") throw error;
+        writeRuntimeDiagnostic("account.local_metadata", {
+          result: "failed_after_account_save",
+          stage,
+          message: error instanceof Error ? error.message : String(error)
+        });
+      }
     }
   });
   const existing = await manager.loadTetiAccount();
@@ -369,28 +392,53 @@ async function createGuardedRealTetiAccount(input: { name: string }): Promise<Te
 
   try {
     const account = await manager.createTetiAccount(input);
-    await writeCreationMarker(profile, {
-      stage: "complete",
-      startedAt,
-      completedAt: new Date().toISOString(),
-      publicTetiId: account.id,
-      publicAddress: account.address
+    try {
+      await writeCreationMarker(profile, {
+        stage: "complete",
+        startedAt,
+        completedAt: new Date().toISOString(),
+        publicTetiId: account.id,
+        publicAddress: account.address
+      });
+      await writeManifest(profile, manifestFromAccount(profile, publicAccount(account)));
+    } catch (error) {
+      writeRuntimeDiagnostic("account.local_metadata", {
+        result: "failed_after_account_save",
+        stage: "complete",
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+    writeRuntimeDiagnostic("account.create", {
+      result: "local_ready"
     });
-    await writeManifest(profile, manifestFromAccount(profile, publicAccount(account)));
     return account;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    const discoveryPending = ["persisted", "registering_discovery"].includes(transaction.stage);
+    const diagnostic = readProvisioningDiagnostic(error);
+    writeRuntimeDiagnostic("account.create", {
+      result: "failed",
+      code: diagnostic.code,
+      stage: diagnostic.stage
+    });
     await writeCreationMarker(profile, {
       stage: /storage|persist|write|rename|EACCES|EPERM|ENOSPC/i.test(message) ? "failed_fatal" : "failed_recoverable",
       startedAt,
       publicTetiId: transaction.account?.id,
       publicAddress: transaction.account?.address,
-      errorCode: discoveryPending ? "DISCOVERY_REGISTRATION_FAILED" : "ACCOUNT_CREATE_FAILED",
-      errorMessage: message.slice(0, 180)
+      errorCode: diagnostic.code ?? "ACCOUNT_CREATE_FAILED",
+      errorMessage: message.slice(0, 180),
+      failureDomain: diagnostic.code?.startsWith("CM_") ? "chatmail" : "local",
+      failureStage: diagnostic.stage
     });
     throw error;
   }
+}
+
+function readProvisioningDiagnostic(error: unknown): { code?: string; stage?: string } {
+  if (typeof error !== "object" || error === null) return {};
+  const code = "code" in error && typeof error.code === "string" ? error.code : undefined;
+  const stage = "stage" in error && typeof error.stage === "string" ? error.stage : undefined;
+  return { code, stage };
 }
 
 async function markDiscoveryRegistrationComplete(account: TetiAccount): Promise<void> {
@@ -404,7 +452,10 @@ async function markDiscoveryRegistrationComplete(account: TetiAccount): Promise<
     publicTetiId: account.id,
     publicAddress: account.address
   });
-  await writeManifest(profile, manifestFromAccount(profile, publicAccount(account)));
+  await writeManifest(
+    profile,
+    manifestFromAccount(profile, publicAccount(account), "succeeded")
+  );
 }
 
 async function backfillCreationMarkerIdentity(account: TetiAccount): Promise<void> {

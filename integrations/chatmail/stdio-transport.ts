@@ -11,6 +11,24 @@ export interface StdioTransportOptions {
   onStderr?: (line: string) => void;
 }
 
+export type ChatmailTransportErrorCode =
+  | "CM_RPC_NOT_FOUND"
+  | "CM_RPC_DENIED"
+  | "CM_RPC_INCOMPATIBLE"
+  | "CM_RPC_LOCKED"
+  | "CM_RPC_EXIT"
+  | "CM_RPC_TIMEOUT"
+  | "CM_RPC_IO";
+
+export class ChatmailTransportError extends Error {
+  readonly code: ChatmailTransportErrorCode;
+
+  constructor(code: ChatmailTransportErrorCode, message: string) {
+    super(message);
+    this.code = code;
+  }
+}
+
 interface PendingRequest {
   resolve: (response: JsonRpcResponse) => void;
   reject: (error: Error) => void;
@@ -24,7 +42,9 @@ export class StdioJsonRpcTransport implements JsonRpcConnection {
   private readonly pending = new Map<number | string, PendingRequest>();
   private stdoutBuffer = "";
   private stderrBuffer = "";
+  private readonly recentStderr: string[] = [];
   private closed = false;
+  private terminalError?: ChatmailTransportError;
   private closePromise?: Promise<void>;
 
   private constructor(
@@ -39,12 +59,21 @@ export class StdioJsonRpcTransport implements JsonRpcConnection {
     this.child.stderr.setEncoding("utf8");
     this.child.stdout.on("data", (chunk: string) => this.handleStdout(chunk));
     this.child.stderr.on("data", (chunk: string) => this.handleStderr(chunk));
-    this.child.once("error", (error) => this.rejectAll(error));
+    this.child.once("error", (error) => {
+      this.closed = true;
+      this.terminalError = transportSpawnError(error);
+      this.rejectAll(this.terminalError);
+    });
     this.child.once("exit", (code, signal) => {
       this.closed = true;
-      this.rejectAll(
-        new Error(`deltachat-rpc-server exited with code ${code ?? "null"} and signal ${signal ?? "null"}.`)
+      const locked = this.recentStderr.some((line) => /accounts\.lock|already running|already locked/i.test(line));
+      this.terminalError = new ChatmailTransportError(
+        locked ? "CM_RPC_LOCKED" : "CM_RPC_EXIT",
+        locked
+          ? "Chatmail account storage is already owned by another local process."
+          : `deltachat-rpc-server exited with code ${code ?? "null"} and signal ${signal ?? "null"}.`
       );
+      this.rejectAll(this.terminalError);
     });
   }
 
@@ -67,7 +96,8 @@ export class StdioJsonRpcTransport implements JsonRpcConnection {
 
   async send(payload: JsonRpcRequest): Promise<JsonRpcResponse> {
     if (this.closed) {
-      throw new Error("deltachat-rpc-server transport is closed.");
+      throw this.terminalError
+        ?? new ChatmailTransportError("CM_RPC_IO", "deltachat-rpc-server transport is closed.");
     }
 
     return new Promise<JsonRpcResponse>((resolve, reject) => {
@@ -75,7 +105,7 @@ export class StdioJsonRpcTransport implements JsonRpcConnection {
       if (this.requestTimeoutMs && this.requestTimeoutMs > 0) {
         pending.timeout = setTimeout(() => {
           this.pending.delete(payload.id);
-          reject(new Error(`JSON-RPC request ${payload.id} timed out.`));
+          reject(new ChatmailTransportError("CM_RPC_TIMEOUT", "Chatmail JSON-RPC request timed out."));
         }, this.requestTimeoutMs);
       }
 
@@ -87,7 +117,7 @@ export class StdioJsonRpcTransport implements JsonRpcConnection {
 
         this.pending.delete(payload.id);
         this.clearPendingTimeout(pending);
-        reject(error);
+        reject(new ChatmailTransportError("CM_RPC_IO", `Chatmail JSON-RPC write failed: ${error.message}`));
       });
     });
   }
@@ -154,6 +184,8 @@ export class StdioJsonRpcTransport implements JsonRpcConnection {
     this.stderrBuffer += chunk;
     this.stderrBuffer = this.drainLines(this.stderrBuffer, (line) => {
       if (line.trim()) {
+        this.recentStderr.push(line.trim().slice(0, 300));
+        if (this.recentStderr.length > 8) this.recentStderr.shift();
         this.onStderr?.(line);
       }
     });
@@ -188,3 +220,16 @@ export class StdioJsonRpcTransport implements JsonRpcConnection {
   }
 }
 
+function transportSpawnError(error: Error): ChatmailTransportError {
+  const code = (error as NodeJS.ErrnoException).code;
+  if (code === "ENOENT") {
+    return new ChatmailTransportError("CM_RPC_NOT_FOUND", "deltachat-rpc-server was not found.");
+  }
+  if (code === "EACCES" || code === "EPERM") {
+    return new ChatmailTransportError("CM_RPC_DENIED", "macOS denied execution of deltachat-rpc-server.");
+  }
+  if (code === "ENOEXEC") {
+    return new ChatmailTransportError("CM_RPC_INCOMPATIBLE", "deltachat-rpc-server is not executable on this Mac.");
+  }
+  return new ChatmailTransportError("CM_RPC_IO", `deltachat-rpc-server could not start: ${error.message}`);
+}

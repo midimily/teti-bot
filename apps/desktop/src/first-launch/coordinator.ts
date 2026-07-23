@@ -63,19 +63,6 @@ export class FirstLaunchCoordinator {
     try {
       const account = await this.accountLifecycle.loadTetiAccount();
       if (account) {
-        const registered = await this.isExistingAccountRegistered();
-        if (!registered) {
-          const snapshot = this.stateMachine.transition({
-            type: "account_registration_pending",
-            account,
-            error: createFirstLaunchError(
-              "discovery_registration_failure",
-              "通讯账号已创建，正在等待完成公开身份同步。"
-            )
-          });
-          await this.notchWindow.expand("existing-account-registration-pending");
-          return snapshot;
-        }
         const snapshot = this.stateMachine.transition({ type: "account_loaded", account });
         await this.notchWindow.collapse("existing-account");
         return snapshot;
@@ -179,12 +166,16 @@ export class FirstLaunchCoordinator {
       return snapshot;
     } catch (error) {
       const persistedAccount = await this.tryLoadPersistedAccountAfterFailure(error);
-      const firstLaunchError = persistedAccount
-        ? createFirstLaunchError(
-            "discovery_registration_failure",
-            "Teti was created, but could not finish connecting yet."
-          )
-        : classifyCreationError(error);
+      if (persistedAccount && !isFirstLaunchError(error)) {
+        this.diagnostics.warn("first_launch_recovered_from_post_save_failure", sanitizeError(error));
+        const snapshot = this.stateMachine.transition({
+          type: "creation_succeeded",
+          account: persistedAccount
+        });
+        this.scheduleReadyCollapse();
+        return snapshot;
+      }
+      const firstLaunchError = classifyCreationError(error);
 
       this.diagnostics.error("first_launch_create_failed", {
         ...sanitizeError(error),
@@ -197,16 +188,6 @@ export class FirstLaunchCoordinator {
         error: firstLaunchError,
         account: persistedAccount ?? undefined
       });
-    }
-  }
-
-  private async isExistingAccountRegistered(): Promise<boolean> {
-    if (!this.accountLifecycle.getTetiStatus) return true;
-    try {
-      return (await this.accountLifecycle.getTetiStatus()).registered;
-    } catch (error) {
-      this.diagnostics.warn("first_launch_registry_status_failed", sanitizeError(error));
-      return false;
     }
   }
 
@@ -290,7 +271,8 @@ export function sanitizeError(error: unknown): Record<string, unknown> {
     return {
       kind: error.kind,
       message: error.message,
-      recoverable: error.recoverable
+      recoverable: error.recoverable,
+      diagnosticCode: error.diagnosticCode
     };
   }
 
@@ -328,6 +310,23 @@ function classifyCreationError(error: unknown): FirstLaunchError {
   }
 
   const message = error instanceof Error ? error.message : String(error);
+  const diagnosticCode = readDiagnosticCode(error);
+  if (diagnosticCode?.startsWith("CM_")) {
+    return createFirstLaunchError(
+      "chatmail_provisioning_failure",
+      "Chatmail 身份初始化未完成。",
+      true,
+      diagnosticCode
+    );
+  }
+  if (diagnosticCode?.startsWith("LOC_")) {
+    return createFirstLaunchError(
+      "local_persistence_failure",
+      "Teti 无法安全保存本机身份。",
+      false,
+      diagnosticCode
+    );
+  }
   if (/(save|persist|storage|write|rename|EACCES|EPERM|ENOSPC)/i.test(message)) {
     return createFirstLaunchError(
       "local_persistence_failure",
@@ -347,6 +346,12 @@ function classifyCreationError(error: unknown): FirstLaunchError {
     "chatmail_provisioning_failure",
     "Teti could not finish setting up."
   );
+}
+
+function readDiagnosticCode(error: unknown): string | undefined {
+  if (typeof error !== "object" || error === null || !("diagnosticCode" in error)) return undefined;
+  const code = error.diagnosticCode;
+  return typeof code === "string" ? code : undefined;
 }
 
 function isFirstLaunchError(error: unknown): error is FirstLaunchError {

@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   DEFAULT_TETI_REGISTRY_URL,
   RegistryDiscoveryClient,
+  RegistryClientError,
   resolveTetiRegistryUrl
 } from "./registry-client.ts";
 
@@ -90,4 +91,106 @@ test("registration rejects a success response that did not persist the display n
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test("registry lookup treats only 404 as not registered", async () => {
+  const client = new RegistryDiscoveryClient("https://registry.teti.example", {
+    fetchImpl: async () => Response.json(
+      { success: false, error: "NOT_FOUND" },
+      { status: 404 }
+    )
+  });
+
+  assert.equal(await client.getIdentity("teti_ukouq6gz8"), null);
+});
+
+test("registry classifies DNS failures as unreachable", async () => {
+  const client = new RegistryDiscoveryClient("https://registry.teti.example", {
+    fetchImpl: async () => {
+      throw Object.assign(new TypeError("fetch failed"), {
+        cause: Object.assign(new Error("getaddrinfo ENOTFOUND"), {
+          code: "ENOTFOUND"
+        })
+      });
+    }
+  });
+
+  await assert.rejects(
+    () => client.getIdentity("teti_ukouq6gz8"),
+    (error) => {
+      assert.equal(error instanceof RegistryClientError, true);
+      assert.equal((error as RegistryClientError).kind, "unreachable");
+      assert.equal((error as RegistryClientError).code, "REG_DNS");
+      assert.equal((error as RegistryClientError).retryable, true);
+      return true;
+    }
+  );
+});
+
+test("registry enforces a bounded request timeout", async () => {
+  const client = new RegistryDiscoveryClient("https://registry.teti.example", {
+    timeoutMs: 5,
+    fetchImpl: async (_input, init) => {
+      await new Promise<void>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => {
+          reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
+        });
+      });
+      return Response.json({});
+    }
+  });
+
+  await assert.rejects(
+    () => client.getIdentity("teti_ukouq6gz8"),
+    (error) => {
+      assert.equal(error instanceof RegistryClientError, true);
+      assert.equal((error as RegistryClientError).kind, "unreachable");
+      assert.equal((error as RegistryClientError).code, "REG_TIMEOUT");
+      return true;
+    }
+  );
+});
+
+test("registry distinguishes a rejected request from an unreachable service", async () => {
+  const client = new RegistryDiscoveryClient("https://registry.teti.example", {
+    fetchImpl: async () => Response.json(
+      { success: false, error: "INVALID_IDENTITY" },
+      { status: 400 }
+    )
+  });
+
+  await assert.rejects(
+    () => client.registerIdentity({
+      version: 1,
+      id: "teti_ukouq6gz8",
+      address: "ukouq6gz8@mail.seep.im",
+      displayName: "Milo",
+      publicProfile: { platform: "macOS", category: [], aiEnvironment: [] }
+    }),
+    (error) => {
+      assert.equal(error instanceof RegistryClientError, true);
+      assert.equal((error as RegistryClientError).kind, "rejected");
+      assert.equal((error as RegistryClientError).retryable, false);
+      return true;
+    }
+  );
+});
+
+test("registry treats rate limiting as retryable unreachability", async () => {
+  const client = new RegistryDiscoveryClient("https://registry.teti.example", {
+    fetchImpl: async () => Response.json(
+      { success: false, error: "RATE_LIMITED" },
+      { status: 429 }
+    )
+  });
+
+  await assert.rejects(
+    () => client.getIdentity("teti_ukouq6gz8"),
+    (error) => {
+      assert.equal(error instanceof RegistryClientError, true);
+      assert.equal((error as RegistryClientError).kind, "unreachable");
+      assert.equal((error as RegistryClientError).retryable, true);
+      return true;
+    }
+  );
 });

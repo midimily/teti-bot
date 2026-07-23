@@ -48,7 +48,16 @@ export class MockDesktopAccountLifecycle implements FirstLaunchAccountLifecycle 
   async getTetiStatus(): Promise<TetiStatus> {
     return {
       exists: this.account !== null,
-      registered: this.account !== null && this.options.scenario !== "discovery_failure",
+      registry: {
+        state: this.account === null
+          ? "unknown"
+          : this.options.scenario === "discovery_failure"
+            ? "unreachable"
+            : "registered",
+        ...(this.options.scenario === "discovery_failure"
+          ? { errorCode: "REG_NETWORK", retryable: true }
+          : {})
+      },
       onlineStatus: "unknown"
     };
   }

@@ -7,6 +7,7 @@ export interface TetiRuntimeScheduledJob {
   runOnStart?: boolean;
   shouldRun?: () => boolean | Promise<boolean>;
   run: () => void | Promise<void>;
+  nextDelayMs?: (snapshot: Readonly<TetiRuntimeJobSnapshot>) => number;
 }
 
 export interface TetiRuntimeJobSnapshot {
@@ -16,6 +17,7 @@ export interface TetiRuntimeJobSnapshot {
   lastSkippedAt?: string;
   lastSucceededAt?: string;
   lastFailedAt?: string;
+  consecutiveFailures: number;
 }
 
 export interface TetiRuntimeHostSnapshot {
@@ -59,7 +61,7 @@ export class TetiRuntimeHost {
     this.now = options.now ?? (() => new Date());
     this.onJobError = options.onJobError ?? (() => undefined);
     for (const job of this.jobs) {
-      this.jobSnapshots.set(job.id, { id: job.id, state: "idle" });
+      this.jobSnapshots.set(job.id, { id: job.id, state: "idle", consecutiveFailures: 0 });
     }
   }
 
@@ -125,10 +127,12 @@ export class TetiRuntimeHost {
 
   private scheduleNext(job: TetiRuntimeScheduledJob, generation: number): void {
     if (this.stateValue !== "running" || generation !== this.generation) return;
+    const snapshot = this.jobSnapshots.get(job.id)!;
+    const delayMs = job.nextDelayMs?.({ ...snapshot }) ?? job.intervalMs;
     const handle = this.schedule(() => {
       this.timers.delete(job.id);
       void this.execute(job, generation);
-    }, job.intervalMs);
+    }, delayMs);
     this.timers.set(job.id, handle);
     this.updateJobSnapshot(job.id, { state: "scheduled" });
   }
@@ -154,9 +158,16 @@ export class TetiRuntimeHost {
         return;
       }
       await job.run();
-      this.updateJobSnapshot(job.id, { lastSucceededAt: this.now().toISOString() });
+      this.updateJobSnapshot(job.id, {
+        lastSucceededAt: this.now().toISOString(),
+        consecutiveFailures: 0
+      });
     } catch (error) {
-      this.updateJobSnapshot(job.id, { lastFailedAt: this.now().toISOString() });
+      const consecutiveFailures = (this.jobSnapshots.get(job.id)?.consecutiveFailures ?? 0) + 1;
+      this.updateJobSnapshot(job.id, {
+        lastFailedAt: this.now().toISOString(),
+        consecutiveFailures
+      });
       try {
         this.onJobError({ jobId: job.id, error });
       } catch {
@@ -195,6 +206,16 @@ function validateJobs(jobs: readonly TetiRuntimeScheduledJob[]): void {
     ids.add(job.id);
     if (!Number.isFinite(job.intervalMs) || job.intervalMs <= 0) {
       throw new Error(`Teti Runtime job ${job.id} must use a positive interval.`);
+    }
+    if (job.nextDelayMs) {
+      const nextDelay = job.nextDelayMs({ ...({
+        id: job.id,
+        state: "idle",
+        consecutiveFailures: 0
+      } satisfies TetiRuntimeJobSnapshot) });
+      if (!Number.isFinite(nextDelay) || nextDelay <= 0) {
+        throw new Error(`Teti Runtime job ${job.id} must calculate a positive next delay.`);
+      }
     }
   }
 }

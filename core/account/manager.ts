@@ -8,7 +8,10 @@ import {
 } from "../../integrations/chatmail/provisioner.ts";
 import { UnconfiguredChatmailRpcClient } from "../../integrations/chatmail/rpc-client.ts";
 import type { DiscoveryClient } from "../../services/discovery/registry-client.ts";
-import { RegistryDiscoveryClient } from "../../services/discovery/registry-client.ts";
+import {
+  RegistryClientError,
+  RegistryDiscoveryClient
+} from "../../services/discovery/registry-client.ts";
 import {
   environmentScanToPublicProfile,
   scanEnvironment
@@ -22,6 +25,7 @@ import {
   getTetiIdFromAddress,
   type CreateTetiAccountInput,
   type DiscoveryRegistrationPayload,
+  type RegistryStatus,
   type TetiAccount,
   type TetiStatus
 } from "./model.ts";
@@ -44,7 +48,6 @@ export type TetiAccountCreationStage =
   | "identity_created"
   | "persisting"
   | "persisted"
-  | "registering_discovery"
   | "complete";
 
 export class TetiAccountManager {
@@ -120,10 +123,12 @@ export class TetiAccountManager {
 
     await this.reportCreationStage("identity_created", account);
     await this.reportCreationStage("persisting", account);
-    await this.storage.save(account);
+    try {
+      await this.storage.save(account);
+    } catch (error) {
+      throw new LocalAccountPersistenceError("Teti could not persist its local identity.", { cause: error });
+    }
     await this.reportCreationStage("persisted", account);
-    await this.reportCreationStage("registering_discovery", account);
-    await this.discoveryClient.registerIdentity(toDiscoveryRegistrationPayload(account));
     await this.reportCreationStage("complete", account);
 
     return account;
@@ -138,28 +143,38 @@ export class TetiAccountManager {
     if (!account) {
       return {
         exists: false,
-        registered: false,
+        registry: { state: "unknown" },
         onlineStatus: "unknown"
       };
-    }
-
-    let registered = false;
-    try {
-      const identity = await this.discoveryClient.getIdentity(getTetiId(account));
-      registered =
-        identity !== null &&
-        identity.address === account.address &&
-        identity.displayName === account.displayName;
-    } catch {
-      registered = false;
     }
 
     return {
       exists: true,
       address: account.address,
-      registered,
+      registry: await this.readRegistryStatus(account),
       onlineStatus: "unknown"
     };
+  }
+
+  async ensureTetiRegistration(): Promise<TetiAccount> {
+    const account = await this.storage.load();
+    if (!account) {
+      throw new Error("A local Teti account is required before synchronizing discovery.");
+    }
+
+    const status = await this.readRegistryStatus(account);
+    if (status.state === "registered") {
+      return this.refreshTetiEnvironment();
+    }
+    if (status.state === "not_registered") {
+      try {
+        await this.discoveryClient.registerIdentity(toDiscoveryRegistrationPayload(account));
+      } catch (error) {
+        throw new RegistryStatusError(registryStatusForError(error));
+      }
+      return account;
+    }
+    throw new RegistryStatusError(status);
   }
 
   async deleteTetiAccount(): Promise<void> {
@@ -205,6 +220,70 @@ export class TetiAccountManager {
 
   private async reportCreationStage(stage: TetiAccountCreationStage, account: TetiAccount): Promise<void> {
     await this.onCreationStage?.(stage, account);
+  }
+
+  private async readRegistryStatus(account: TetiAccount): Promise<RegistryStatus> {
+    const checkedAt = new Date().toISOString();
+    try {
+      const identity = await this.discoveryClient.getIdentity(getTetiId(account));
+      if (!identity) return { state: "not_registered", checkedAt };
+      if (
+        identity.address !== account.address
+        || identity.publicKey !== account.publicKey
+        || identity.displayName !== account.displayName
+      ) {
+        return {
+          state: "conflict",
+          checkedAt,
+          errorCode: "REG_IDENTITY_MISMATCH",
+          retryable: false
+        };
+      }
+      return { state: "registered", checkedAt };
+    } catch (error) {
+      return registryStatusForError(error, checkedAt);
+    }
+  }
+}
+
+function registryStatusForError(
+  error: unknown,
+  checkedAt = new Date().toISOString()
+): RegistryStatus {
+  if (error instanceof RegistryClientError) {
+    return {
+      state: error.kind === "conflict"
+        ? "conflict"
+        : error.kind === "rejected"
+          ? "rejected"
+          : "unreachable",
+      checkedAt,
+      errorCode: error.code,
+      retryable: error.retryable
+    };
+  }
+  return {
+    state: "unreachable",
+    checkedAt,
+    errorCode: "REG_UNKNOWN",
+    retryable: true
+  };
+}
+
+export class RegistryStatusError extends Error {
+  readonly registry: RegistryStatus;
+
+  constructor(registry: RegistryStatus) {
+    super(`Registry synchronization failed with state ${registry.state} (${registry.errorCode ?? "unknown"}).`);
+    this.registry = { ...registry };
+  }
+}
+
+export class LocalAccountPersistenceError extends Error {
+  readonly code = "LOC_SAVE";
+
+  constructor(message: string, options: { cause?: unknown } = {}) {
+    super(message, options);
   }
 }
 

@@ -1,4 +1,5 @@
 import type { TetiAccount } from "../../../../../core/account/model.ts";
+import type { RegistryStatus } from "../../../../../core/account/model.ts";
 import {
   RUNTIME_PASSPORT_SNAPSHOT_SCHEMA_VERSION,
   type RuntimePassportSnapshot
@@ -16,6 +17,7 @@ export interface RuntimePassportSources {
   loadAccount(): Promise<TetiAccount | null>;
   getConnections(): readonly PeerConnectionDto[];
   getCodexUsage(): CodexUsageState;
+  getRegistry(): RegistryStatus;
   getSharing(): Promise<PassportSharingPolicy>;
 }
 
@@ -41,6 +43,7 @@ export class RuntimePassportService {
     ]);
     const content = {
       identity: mapAccountIdentity(account),
+      registry: this.sources.getRegistry(),
       resources: [mapCodexUsageResource(this.sources.getCodexUsage(), this.fallbackObservedAt)],
       connections: this.sources.getConnections().map((connection) => mapPeerConnection(connection, now)),
       sharing
@@ -54,6 +57,7 @@ export class RuntimePassportService {
       revision: ++this.revision,
       generatedAt,
       identity: content.identity,
+      registry: content.registry,
       localPassport: {
         schemaVersion: TETI_CAPABILITY_PASSPORT_SCHEMA_VERSION,
         generatedAt,

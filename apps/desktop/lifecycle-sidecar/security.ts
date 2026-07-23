@@ -24,10 +24,13 @@ export function createLifecycleError(
 export function sanitizeUnknownError(error: unknown, fallbackCode: LifecycleErrorCode): LifecycleErrorDto {
   const message = error instanceof Error ? error.message : String(error);
   const code = classifyError(message, fallbackCode);
-  return createLifecycleError(code, publicMessageForCode(code), {
+  const result = createLifecycleError(code, publicMessageForCode(code), {
     recoverable: isRecoverableCode(code),
     retryTarget: retryTargetForCode(code)
   });
+  const diagnosticCode = readDiagnosticCode(error);
+  if (diagnosticCode) result.diagnosticCode = diagnosticCode;
+  return result;
 }
 
 export function redactSecretLikeText(text: string): string {
@@ -122,4 +125,12 @@ function isRecoverableCode(code: LifecycleErrorCode): boolean {
     "OVERSIZED_REQUEST",
     "INTERNAL_ERROR"
   ].includes(code);
+}
+
+function readDiagnosticCode(error: unknown): string | undefined {
+  if (typeof error !== "object" || error === null || !("code" in error)) return undefined;
+  const code = error.code;
+  return typeof code === "string" && /^(CM|REG|LOC)_[A-Z0-9_]+$/.test(code)
+    ? code
+    : undefined;
 }

@@ -35,7 +35,7 @@ export class BridgeDesktopAccountLifecycle implements FirstLaunchAccountLifecycl
     const result = (await this.bridge.request("account.status")) as LifecycleStatusResult;
     return {
       exists: result.exists,
-      registered: result.registered,
+      registry: { ...result.registry },
       onlineStatus: result.onlineStatus,
       address: result.account?.address
     };
@@ -125,6 +125,9 @@ function accountFromDto(dto: PublicTetiAccount): TetiAccount {
 function lifecycleError(error: LifecycleErrorDto): Error {
   const instance = new Error(error.message);
   instance.name = error.code;
+  if (error.diagnosticCode) {
+    Object.assign(instance, { diagnosticCode: error.diagnosticCode });
+  }
   return instance;
 }
 

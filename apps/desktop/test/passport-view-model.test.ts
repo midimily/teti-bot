@@ -31,6 +31,28 @@ test("Passport settings show the local Teti name and nine-character ID", () => {
   assert.equal(viewModel.settings.identityLabel, "Max0717（abc123xyz）");
 });
 
+test("Passport settings distinguish Registry network recovery from missing registration", () => {
+  const passport = emptyPassportSnapshot();
+  passport.registry = {
+    state: "unreachable",
+    checkedAt: "2026-07-23T10:00:00.000Z",
+    errorCode: "REG_DNS",
+    retryable: true
+  };
+
+  let viewModel = toPassportViewModel({ passport, sharingBusy: false, openPanel: "sharing" });
+  assert.equal(viewModel.settings.registryLabel, "待同步 [REG-DNS]");
+  assert.equal(viewModel.settings.registryTone, "pending");
+
+  passport.registry = {
+    state: "not_registered",
+    checkedAt: "2026-07-23T10:01:00.000Z",
+    retryable: true
+  };
+  viewModel = toPassportViewModel({ passport, sharingBusy: false, openPanel: "sharing" });
+  assert.equal(viewModel.settings.registryLabel, "待同步 [REG-NF]");
+});
+
 test("unknown, disabled, and stale remote Passport states use truthful product copy", () => {
   const passport = emptyPassportSnapshot();
   passport.connections = ["unknown", "disabled", "stale"].map((state, index) => ({

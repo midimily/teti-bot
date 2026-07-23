@@ -19,7 +19,11 @@ import {
   type TetiRuntimeProfileLock
 } from "./runtime/profile-lock.ts";
 import { ensureProfileDirectories, resolveTetiProfile } from "./profile.ts";
-import { closeDefaultPeerConnectionService } from "./connections.ts";
+import {
+  closeDefaultPeerConnectionService,
+  getDefaultPassportSharingStore
+} from "./connections.ts";
+import { writeRuntimeDiagnostic } from "./diagnostics.ts";
 
 const PROCESS_SHUTDOWN_HARD_LIMIT_MS = 4_000;
 const inFlightRequestIds = new Set<string>();
@@ -61,12 +65,27 @@ async function startSidecar(): Promise<void> {
       loadTetiAccount: defaultLifecycleSidecarDependencies.loadTetiAccount,
       heartbeatDiscovery: defaultLifecycleSidecarDependencies.heartbeatDiscovery,
       getPeerConnectionService: defaultLifecycleSidecarDependencies.getPeerConnectionService,
+      passportSharingStore: await getDefaultPassportSharingStore(),
       codexUsageService,
       dispose: closeDefaultPeerConnectionService
     },
     onJobError: ({ jobId, error }) => {
       const message = error instanceof Error ? error.message : String(error);
-      safeStderr.write(`teti-runtime job=${jobId} failed: ${redactSecretLikeText(message)}\n`);
+      writeRuntimeDiagnostic("runtime.job", {
+        job: jobId,
+        result: "failed",
+        code: readErrorCode(error),
+        message: redactSecretLikeText(message)
+      });
+    },
+    onRegistryStatusChange: ({ status, attempt, nextRetryMs }) => {
+      writeRuntimeDiagnostic("registry.sync", {
+        state: status.state,
+        code: status.errorCode,
+        retryable: status.retryable,
+        attempt,
+        nextRetryMs
+      });
     }
   });
   lifecycleDependencies = createRuntimeOwnedLifecycleDependencies(
@@ -82,6 +101,11 @@ async function startSidecar(): Promise<void> {
   });
   reader.on("line", (line) => { void handleLine(line); });
   reader.once("close", () => { void beginShutdown(0); });
+}
+
+function readErrorCode(error: unknown): string | undefined {
+  if (typeof error !== "object" || error === null || !("code" in error)) return undefined;
+  return typeof error.code === "string" ? error.code : undefined;
 }
 
 async function handleLine(line: string): Promise<void> {

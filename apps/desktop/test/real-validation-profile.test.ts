@@ -133,6 +133,7 @@ test("manifest writes sanitized public account data", async () => {
     const raw = await import("node:fs/promises").then((fs) => fs.readFile(profile.manifestPath, "utf8"));
 
     assert.equal(raw.includes("teti_milo00000"), true);
+    assert.equal(raw.includes('"discoveryRegistrationStatus": "not_attempted"'), true);
     assert.equal(/password|privateKey|token|credential/i.test(raw), false);
   } finally {
     await rm(profile.root, { recursive: true, force: true });

@@ -483,10 +483,18 @@ export class PeerConnectionRuntime implements PeerConnectionService {
 
 let defaultServicePromise: Promise<PeerConnectionService> | undefined;
 let defaultRpcClient: RuntimeChatmailRpcClient | undefined;
+let defaultPassportSharingStorePromise: Promise<FilePassportSharingStore> | undefined;
 
 export function getDefaultPeerConnectionService(): Promise<PeerConnectionService> {
   defaultServicePromise ??= createDefaultPeerConnectionService();
   return defaultServicePromise;
+}
+
+export function getDefaultPassportSharingStore(): Promise<FilePassportSharingStore> {
+  defaultPassportSharingStorePromise ??= resolveTetiProfile().then(
+    (profile) => new FilePassportSharingStore(join(profile.root, "settings.json"))
+  );
+  return defaultPassportSharingStorePromise;
 }
 
 export async function closeDefaultPeerConnectionService(): Promise<void> {
@@ -495,6 +503,7 @@ export async function closeDefaultPeerConnectionService(): Promise<void> {
   const client = defaultRpcClient;
   defaultServicePromise = undefined;
   defaultRpcClient = undefined;
+  defaultPassportSharingStorePromise = undefined;
   await client?.close();
 }
 
@@ -513,7 +522,7 @@ async function createDefaultPeerConnectionService(): Promise<PeerConnectionServi
     chatmailAdapter,
     registry: new RegistryDiscoveryClient(),
     startIo: (accountId) => defaultRpcClient!.startIo(accountId),
-    passportSharing: new FilePassportSharingStore(join(profile.root, "settings.json")),
+    passportSharing: await getDefaultPassportSharingStore(),
     getLocalAiTools: () => [createShareableCodexStatus(getDefaultCodexUsageService().getCurrentState())]
   });
 }

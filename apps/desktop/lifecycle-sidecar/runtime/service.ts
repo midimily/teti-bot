@@ -1,4 +1,8 @@
-import type { TetiAccount } from "../../../../core/account/model.ts";
+import type {
+  RegistryStatus,
+  TetiAccount,
+  TetiStatus
+} from "../../../../core/account/model.ts";
 import type { RuntimePassportSnapshot } from "../../../../core/passport/snapshot.ts";
 import type { PassportSharingPolicy } from "../../../../core/passport/types.ts";
 import type { CodexUsageState } from "../../src/codex-usage/types.ts";
@@ -7,6 +11,7 @@ import type {
   PublicTetiIdentity
 } from "../../src/lifecycle-bridge/protocol.ts";
 import type { PeerConnectionService } from "../connections.ts";
+import type { PassportSharingStore } from "./passport/sharing.ts";
 import {
   TetiRuntimeHost,
   type TetiRuntimeHostOptions,
@@ -27,6 +32,13 @@ export const TETI_RUNTIME_INTERVALS = {
 } as const;
 
 export const TETI_RUNTIME_SHUTDOWN_TIMEOUT_MS = 2_500;
+export const TETI_REGISTRY_RETRY_DELAYS_MS = [
+  5_000,
+  15_000,
+  30_000,
+  60_000,
+  5 * 60_000
+] as const;
 
 export interface RuntimeCodexUsageService {
   getCurrentState(): CodexUsageState;
@@ -37,6 +49,7 @@ export interface TetiRuntimeDependencies {
   loadTetiAccount(): Promise<TetiAccount | null>;
   heartbeatDiscovery(): Promise<TetiAccount>;
   getPeerConnectionService(): Promise<PeerConnectionService>;
+  passportSharingStore: PassportSharingStore;
   codexUsageService: RuntimeCodexUsageService;
   dispose?(): Promise<void>;
 }
@@ -48,6 +61,11 @@ export interface TetiRuntimeOptions {
   cancel?: TetiRuntimeHostOptions["cancel"];
   now?: TetiRuntimeHostOptions["now"];
   onJobError?: TetiRuntimeHostOptions["onJobError"];
+  onRegistryStatusChange?: (input: {
+    status: RegistryStatus;
+    attempt: number;
+    nextRetryMs?: number;
+  }) => void;
   shutdownTimeoutMs?: number;
 }
 
@@ -66,6 +84,9 @@ export class TetiRuntime {
   private readonly peerFacade: PeerConnectionService;
   private readonly passportService: RuntimePassportService;
   private discoveryAccount: TetiAccount | null = null;
+  private registryStatus: RegistryStatus = { state: "unknown" };
+  private registryAttempt = 0;
+  private readonly onRegistryStatusChange: NonNullable<TetiRuntimeOptions["onRegistryStatusChange"]>;
   private peerConnections: PeerConnectionResult["connections"] | null = null;
   private accountLoadInFlight: Promise<TetiAccount | null> | null = null;
   private peerServicePromise: Promise<PeerConnectionService> | null = null;
@@ -74,6 +95,7 @@ export class TetiRuntime {
 
   constructor(options: TetiRuntimeOptions) {
     this.dependencies = options.dependencies;
+    this.onRegistryStatusChange = options.onRegistryStatusChange ?? (() => undefined);
     this.shutdownTimeoutMs = options.shutdownTimeoutMs ?? TETI_RUNTIME_SHUTDOWN_TIMEOUT_MS;
     if (!Number.isFinite(this.shutdownTimeoutMs) || this.shutdownTimeoutMs <= 0) {
       throw new Error("Teti Runtime shutdown timeout must be positive.");
@@ -85,7 +107,8 @@ export class TetiRuntime {
         loadAccount: () => this.loadAccount(),
         getConnections: () => this.peerConnections ?? [],
         getCodexUsage: () => this.getCodexUsageState(),
-        getSharing: async () => (await this.rawPeerService()).getPassportSharing()
+        getRegistry: () => clone(this.registryStatus),
+        getSharing: () => this.dependencies.passportSharingStore.load()
       },
       now: options.now
     });
@@ -97,8 +120,32 @@ export class TetiRuntime {
           runOnStart: true,
           shouldRun: () => this.hasLocalAccount(),
           run: async () => {
-            this.discoveryAccount = clone(await this.dependencies.heartbeatDiscovery());
-          }
+            this.registryAttempt += 1;
+            try {
+              this.discoveryAccount = clone(await this.dependencies.heartbeatDiscovery());
+              this.setRegistryStatus({
+                state: "registered",
+                checkedAt: new Date().toISOString()
+              });
+            } catch (error) {
+              const status = registryStatusFromError(error);
+              const failures = (this.host?.snapshot.jobs.find(
+                (job) => job.id === TETI_RUNTIME_JOB_IDS.registryHeartbeat
+              )?.consecutiveFailures ?? 0) + 1;
+              this.setRegistryStatus(
+                status,
+                TETI_REGISTRY_RETRY_DELAYS_MS[
+                  Math.min(failures - 1, TETI_REGISTRY_RETRY_DELAYS_MS.length - 1)
+                ]
+              );
+              throw error;
+            }
+          },
+          nextDelayMs: (snapshot) => snapshot.consecutiveFailures > 0
+            ? TETI_REGISTRY_RETRY_DELAYS_MS[
+                Math.min(snapshot.consecutiveFailures - 1, TETI_REGISTRY_RETRY_DELAYS_MS.length - 1)
+              ]
+            : intervals.registryHeartbeatMs
         },
         {
           id: TETI_RUNTIME_JOB_IDS.chatmailPoll,
@@ -114,6 +161,7 @@ export class TetiRuntime {
           id: TETI_RUNTIME_JOB_IDS.codexRefresh,
           intervalMs: intervals.codexRefreshMs,
           runOnStart: true,
+          shouldRun: () => this.hasLocalAccount(),
           run: async () => { await this.dependencies.codexUsageService.refreshNow(); }
         }
       ],
@@ -141,15 +189,43 @@ export class TetiRuntime {
   }
 
   notifyAccountAvailable(account?: TetiAccount): void {
-    if (account) this.discoveryAccount = clone(account);
+    if (account) {
+      this.discoveryAccount = clone(account);
+      this.setRegistryStatus({ state: "unknown" });
+    }
     this.host.runNow(TETI_RUNTIME_JOB_IDS.registryHeartbeat);
     this.host.runNow(TETI_RUNTIME_JOB_IDS.chatmailPoll);
+    this.host.runNow(TETI_RUNTIME_JOB_IDS.codexRefresh);
   }
 
   async readDiscoveryAccount(): Promise<TetiAccount> {
     const account = this.discoveryAccount ?? await this.loadAccount();
     if (!account) throw new Error("A local Teti account is required before discovery heartbeat.");
     return clone(account);
+  }
+
+  async getTetiStatus(): Promise<TetiStatus> {
+    const account = await this.loadAccount();
+    return account
+      ? {
+          exists: true,
+          address: account.address,
+          registry: clone(this.registryStatus),
+          onlineStatus: "unknown"
+        }
+      : {
+          exists: false,
+          registry: { state: "unknown" },
+          onlineStatus: "unknown"
+        };
+  }
+
+  notifyRegistryRegistered(account: TetiAccount): void {
+    this.notifyAccountAvailable(account);
+    this.setRegistryStatus({
+      state: "registered",
+      checkedAt: new Date().toISOString()
+    });
   }
 
   getCodexUsageState(): CodexUsageState {
@@ -165,7 +241,11 @@ export class TetiRuntime {
   }
 
   async setPassportSharing(policy: PassportSharingPolicy): Promise<RuntimePassportSnapshot> {
-    await (await this.rawPeerService()).setPassportSharing(policy);
+    if (this.peerServicePromise) {
+      await (await this.peerServicePromise).setPassportSharing(policy);
+    } else {
+      await this.dependencies.passportSharingStore.save(policy);
+    }
     return this.passportService.getSnapshot();
   }
 
@@ -174,6 +254,19 @@ export class TetiRuntime {
     if (account && !this.discoveryAccount) this.discoveryAccount = clone(account);
     if (!account) this.discoveryAccount = null;
     return Boolean(account);
+  }
+
+  private setRegistryStatus(status: RegistryStatus, nextRetryMs?: number): void {
+    this.registryStatus = clone(status);
+    try {
+      this.onRegistryStatusChange({
+        status: clone(status),
+        attempt: this.registryAttempt,
+        ...(nextRetryMs === undefined ? {} : { nextRetryMs })
+      });
+    } catch {
+      // Diagnostics do not own Runtime state.
+    }
   }
 
   private async loadAccount(): Promise<TetiAccount | null> {
@@ -188,6 +281,9 @@ export class TetiRuntime {
   }
 
   private async rawPeerService(): Promise<PeerConnectionService> {
+    if (!(await this.hasLocalAccount())) {
+      throw new Error("A local Teti account is required before starting Chatmail peer services.");
+    }
     this.peerServicePromise ??= this.dependencies.getPeerConnectionService();
     return this.peerServicePromise;
   }
@@ -243,11 +339,15 @@ export class TetiRuntime {
   }
 
   async getPassportSharing(): Promise<PassportSharingPolicy> {
-    return clone(await (await this.rawPeerService()).getPassportSharing());
+    return clone(await this.dependencies.passportSharingStore.load());
   }
 
   async updatePassportSharing(policy: PassportSharingPolicy): Promise<PassportSharingPolicy> {
-    return clone(await (await this.rawPeerService()).setPassportSharing(policy));
+    if (this.peerServicePromise) {
+      return clone(await (await this.peerServicePromise).setPassportSharing(policy));
+    }
+    await this.dependencies.passportSharingStore.save(policy);
+    return clone(policy);
   }
 }
 
@@ -293,6 +393,25 @@ class RuntimePeerConnectionFacade implements PeerConnectionService {
 
 function clone<T>(value: T): T {
   return structuredClone(value);
+}
+
+function registryStatusFromError(error: unknown): RegistryStatus {
+  if (
+    typeof error === "object"
+    && error !== null
+    && "registry" in error
+    && typeof error.registry === "object"
+    && error.registry !== null
+    && "state" in error.registry
+  ) {
+    return clone(error.registry as RegistryStatus);
+  }
+  return {
+    state: "unreachable",
+    checkedAt: new Date().toISOString(),
+    errorCode: "REG_UNKNOWN",
+    retryable: true
+  };
 }
 
 function settleWithin(promises: readonly Promise<unknown>[], timeoutMs: number): Promise<TetiRuntimeStopResult> {

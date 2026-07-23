@@ -35,6 +35,7 @@ export interface FirstLaunchError {
   kind: FirstLaunchErrorKind;
   message: string;
   recoverable: boolean;
+  diagnosticCode?: string;
 }
 
 export interface FirstLaunchSnapshot {
@@ -249,12 +250,14 @@ export class FirstLaunchStateMachine {
 export function createFirstLaunchError(
   kind: FirstLaunchErrorKind,
   message: string,
-  recoverable = true
+  recoverable = true,
+  diagnosticCode?: string
 ): FirstLaunchError {
   return {
     kind,
     message,
-    recoverable
+    recoverable,
+    ...(diagnosticCode ? { diagnosticCode } : {})
   };
 }
 

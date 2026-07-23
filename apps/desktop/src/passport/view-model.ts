@@ -39,6 +39,8 @@ export interface AiPassportPanelViewModel {
 export interface PassportSettingsViewModel {
   title: string;
   identityLabel: string;
+  registryLabel: string;
+  registryTone: "ok" | "pending" | "error";
   toggleLabel: string;
   open: boolean;
   enabled: boolean;
@@ -84,6 +86,7 @@ export function toPassportViewModel(
     settings: {
       title: "设置",
       identityLabel: formatLocalTetiIdentity(snapshot.passport.identity),
+      ...formatRegistryStatus(snapshot.passport.registry),
       toggleLabel: "Passport 分享",
       open: snapshot.openPanel === "sharing",
       enabled: snapshot.passport.sharing.resourceSummary && snapshot.passport.sharing.resourceQuota,
@@ -92,6 +95,43 @@ export function toPassportViewModel(
     },
     connections: snapshot.passport.connections.map((connection) => toConnectionCardViewModel(connection, now))
   };
+}
+
+function formatRegistryStatus(
+  status: RuntimePassportSnapshot["registry"]
+): Pick<PassportSettingsViewModel, "registryLabel" | "registryTone"> {
+  if (status.state === "registered") {
+    return { registryLabel: "已公开", registryTone: "ok" };
+  }
+  if (status.state === "unknown") {
+    return { registryLabel: "检查中", registryTone: "pending" };
+  }
+  if (status.state === "not_registered") {
+    return { registryLabel: "待同步 [REG-NF]", registryTone: "pending" };
+  }
+  if (status.state === "unreachable") {
+    return {
+      registryLabel: `待同步 [${shortRegistryCode(status.errorCode, "REG-NET")}]`,
+      registryTone: "pending"
+    };
+  }
+  if (status.state === "rejected") {
+    return { registryLabel: "同步被拒绝 [REG-REJ]", registryTone: "error" };
+  }
+  return { registryLabel: "身份冲突 [REG-CON]", registryTone: "error" };
+}
+
+function shortRegistryCode(code: string | undefined, fallback: string): string {
+  const known: Record<string, string> = {
+    REG_DNS: "REG-DNS",
+    REG_TIMEOUT: "REG-TO",
+    REG_TLS: "REG-TLS",
+    REG_NETWORK: "REG-NET",
+    REG_HTTP_5XX: "REG-5XX",
+    REG_INVALID_RESPONSE: "REG-JSON",
+    REG_UNKNOWN: "REG-NET"
+  };
+  return code ? known[code] ?? fallback : fallback;
 }
 
 export function formatLocalTetiIdentity(identity: PassportIdentity | null): string {

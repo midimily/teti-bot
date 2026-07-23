@@ -497,6 +497,18 @@ input {
   white-space: nowrap;
 }
 
+.teti-settings-identity-value.is-ok {
+  color: #3f8f69;
+}
+
+.teti-settings-identity-value.is-pending {
+  color: #a46f19;
+}
+
+.teti-settings-identity-value.is-error {
+  color: var(--teti-error);
+}
+
 .teti-sharing-error {
   color: var(--teti-error) !important;
 }

@@ -98,10 +98,11 @@ export function toFirstLaunchViewModel(snapshot: FirstLaunchSnapshot): FirstLaun
       };
 
     case "recoverable_error":
+      const diagnosticCode = formatDiagnosticCode(snapshot.error?.diagnosticCode);
       return {
         panel: "expanded",
         character: "error",
-        title: "Teti 需要一点时间",
+        title: diagnosticCode ? `Teti 需要一点时间 [${diagnosticCode}]` : "Teti 需要一点时间",
         message: snapshot.error?.message ?? "Teti 暂时还没完成。",
         primaryAction:
           snapshot.error?.kind === "discovery_registration_failure" ? "再连接一次" : "再试一次",
@@ -125,6 +126,18 @@ export function toFirstLaunchViewModel(snapshot: FirstLaunchSnapshot): FirstLaun
         message: snapshot.error?.message ?? "Teti 遇到了内部设置问题。"
       };
   }
+}
+
+function formatDiagnosticCode(code: string | undefined): string | null {
+  if (!code) return null;
+  if (code === "CM_RPC_NOT_FOUND" || code === "CM_RPC_DENIED" || code === "CM_RPC_INCOMPATIBLE"
+    || code === "CM_RPC_LOCKED" || code === "CM_RPC_EXIT" || code === "CM_RPC_TIMEOUT"
+    || code === "CM_RPC_IO") return "CM-RPC";
+  if (code === "CM_CFG" || code === "CM_CFG_TIMEOUT") return "CM-CFG";
+  if (code === "CM_IO" || code === "CM_IO_TIMEOUT") return "CM-IO";
+  if (code === "CM_ID" || code === "CM_ID_TIMEOUT" || code === "CM_ID_INVALID") return "CM-ID";
+  if (code.startsWith("LOC_")) return "LOC-SAVE";
+  return null;
 }
 
 function phaseLabel(phase: FirstLaunchSnapshot["phase"]): string {

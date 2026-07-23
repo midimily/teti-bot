@@ -16,9 +16,10 @@ export function createRuntimeOwnedLifecycleDependencies(
       runtime.notifyAccountAvailable(account);
       return account;
     },
+    getTetiStatus: () => runtime.getTetiStatus(),
     registerDiscovery: async (account) => {
       await base.registerDiscovery(account);
-      runtime.notifyAccountAvailable(account);
+      runtime.notifyRegistryRegistered(account);
     },
     heartbeatDiscovery: () => runtime.readDiscoveryAccount(),
     getPeerConnectionService: async () => runtime.getPeerConnectionFacade(),

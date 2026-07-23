@@ -7,6 +7,7 @@ import {
   sanitizeError,
   type FirstLaunchAccountLifecycle
 } from "../src/first-launch/index.ts";
+import { toFirstLaunchViewModel } from "../src/first-launch/view-model.ts";
 
 test("no account enters first-launch onboarding and expands notch panel", async () => {
   const lifecycle = new RecordingLifecycle();
@@ -34,7 +35,7 @@ test("valid existing account skips onboarding and collapses into idle", async ()
   assert.equal(notch.mode, "collapsed");
 });
 
-test("existing relay account with pending registry sync reopens the recovery UI", async () => {
+test("existing local account enters idle while Registry recovery stays in Runtime", async () => {
   const account = createAccount("Milo");
   const lifecycle = new RecordingLifecycle({ storedAccount: account, registered: false });
   const notch = new MemoryNotchWindowController();
@@ -46,10 +47,10 @@ test("existing relay account with pending registry sync reopens the recovery UI"
 
   const snapshot = await coordinator.initialize();
 
-  assert.equal(snapshot.state, "recoverable_error");
-  assert.equal(snapshot.error?.kind, "discovery_registration_failure");
+  assert.equal(snapshot.state, "idle");
+  assert.equal(snapshot.error, undefined);
   assert.equal(snapshot.account?.id, account.id);
-  assert.equal(notch.mode, "expanded");
+  assert.equal(notch.mode, "collapsed");
 });
 
 test("invalid name is rejected before account creation", async () => {
@@ -160,6 +161,28 @@ test("provisioning failure retains name and can retry", async () => {
   assert.equal(lifecycle.createCalls.length, 2);
 });
 
+test("Chatmail provisioning diagnostics are visible as a compact setup failure code", async () => {
+  const lifecycle = new RecordingLifecycle();
+  lifecycle.createHandler = async () => {
+    throw Object.assign(
+      new Error("Chatmail account storage is already owned by another process."),
+      { diagnosticCode: "CM_RPC_LOCKED" }
+    );
+  };
+  const coordinator = new FirstLaunchCoordinator({
+    accountLifecycle: lifecycle,
+    notchWindow: new MemoryNotchWindowController()
+  });
+
+  await coordinator.initialize();
+  const snapshot = await coordinator.submitName("Milo");
+  const viewModel = toFirstLaunchViewModel(snapshot);
+
+  assert.equal(snapshot.error?.kind, "chatmail_provisioning_failure");
+  assert.equal(snapshot.error?.diagnosticCode, "CM_RPC_LOCKED");
+  assert.equal(viewModel.title, "Teti 需要一点时间 [CM-RPC]");
+});
+
 test("persistence failure never reaches ready", async () => {
   const lifecycle = new RecordingLifecycle();
   lifecycle.createHandler = async () => {
@@ -177,7 +200,7 @@ test("persistence failure never reaches ready", async () => {
   assert.equal(snapshot.error?.kind, "local_persistence_failure");
 });
 
-test("discovery failure after persistence does not create a second identity and can retry independently", async () => {
+test("a post-save failure still completes local initialization and leaves Registry to Runtime", async () => {
   const persistedAccount = createAccount("Milo");
   const lifecycle = new RecordingLifecycle();
   lifecycle.createHandler = async () => {
@@ -193,16 +216,12 @@ test("discovery failure after persistence does not create a second identity and 
   });
 
   await coordinator.initialize();
-  const failed = await coordinator.submitName("Milo");
-  assert.equal(failed.state, "recoverable_error");
-  assert.equal(failed.error?.kind, "discovery_registration_failure");
-  assert.equal(failed.account?.id, persistedAccount.id);
+  const ready = await coordinator.submitName("Milo");
+  assert.equal(ready.state, "ready");
+  assert.equal(ready.error, undefined);
+  assert.equal(ready.account?.id, persistedAccount.id);
   assert.equal(lifecycle.createCalls.length, 1);
-
-  const retried = await coordinator.retryDiscoveryRegistration();
-  assert.equal(retried.state, "ready");
-  assert.equal(discovery.registerCalls.length, 1);
-  assert.equal(lifecycle.createCalls.length, 1);
+  assert.equal(discovery.registerCalls.length, 0);
 });
 
 test("repeated initialization with an existing account does not create duplicate identities", async () => {
@@ -258,7 +277,13 @@ class RecordingLifecycle implements FirstLaunchAccountLifecycle {
   async getTetiStatus(): Promise<TetiStatus> {
     return {
       exists: this.storedAccount !== null,
-      registered: this.storedAccount !== null && this.registered,
+      registry: {
+        state: this.storedAccount === null
+          ? "unknown"
+          : this.registered
+            ? "registered"
+            : "unreachable"
+      },
       onlineStatus: "unknown"
     };
   }

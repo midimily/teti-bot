@@ -27,7 +27,13 @@ export interface RealValidationManifest {
   remoteExpiryExpectation?: string;
 }
 
-export function manifestFromAccount(profile: TetiProfile, account: PublicTetiAccount): RealValidationManifest {
+export function manifestFromAccount(
+  profile: TetiProfile,
+  account: PublicTetiAccount,
+  discoveryRegistrationStatus: NonNullable<
+    RealValidationManifest["discoveryRegistrationStatus"]
+  > = "not_attempted"
+): RealValidationManifest {
   return {
     version: 1,
     validationProfileName: profile.root.split("/").pop() ?? "unknown",
@@ -36,7 +42,7 @@ export function manifestFromAccount(profile: TetiProfile, account: PublicTetiAcc
     publicTetiId: account.id,
     publicChatmailAddress: account.address,
     creationTimestamp: account.createdAt,
-    discoveryRegistrationStatus: "succeeded",
+    discoveryRegistrationStatus,
     protocolVersion: 1,
     duplicateCreation: {
       attempted: false,

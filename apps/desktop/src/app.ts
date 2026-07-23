@@ -175,8 +175,8 @@ export async function createDesktopApp(options: DesktopAppOptions): Promise<Desk
     }
   };
 
-  await coordinator.initialize();
-  passport.start();
+  const initial = await coordinator.initialize();
+  if (initial.account) passport.start();
   app.render();
   await notchWindow.setMode(visualModeForViewModel(toFirstLaunchViewModel(coordinator.snapshot)), "initial-render");
 
@@ -815,6 +815,10 @@ async function submitAndRender(
   }
 
   await pending;
+  if (coordinator.snapshot.account && passport) {
+    passport.start();
+    await passport.refreshNow();
+  }
   if (root) {
     renderSnapshot(root, coordinator.snapshot, config, coordinator, connections, passport);
   }

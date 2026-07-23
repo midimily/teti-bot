@@ -1,5 +1,6 @@
 import type { RemoteAiStatusSnapshot } from "../../../../core/ai-status/types.ts";
 import type { RuntimePassportSnapshot } from "../../../../core/passport/snapshot.ts";
+import type { RegistryStatus } from "../../../../core/account/model.ts";
 
 export const LIFECYCLE_PROTOCOL_VERSION = 1;
 export const LIFECYCLE_MAX_LINE_BYTES = 64 * 1024;
@@ -73,7 +74,7 @@ export interface LifecycleHealthResult {
 
 export interface LifecycleStatusResult {
   exists: boolean;
-  registered: boolean;
+  registry: RegistryStatus;
   onlineStatus: "unknown" | "offline" | "online";
   account?: PublicTetiAccount;
 }
@@ -139,6 +140,7 @@ export interface LifecycleErrorDto {
   message: string;
   recoverable: boolean;
   retryTarget?: LifecycleMethod;
+  diagnosticCode?: string;
 }
 
 export type LifecycleErrorCode =

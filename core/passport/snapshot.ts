@@ -1,11 +1,12 @@
 import type { TetiConnectionDirection, TetiConnectionState } from "../connection/types.ts";
+import type { RegistryStatus } from "../account/model.ts";
 import type {
   AiResource,
   PassportSharingPolicy,
   TetiCapabilityPassport
 } from "./types.ts";
 
-export const RUNTIME_PASSPORT_SNAPSHOT_SCHEMA_VERSION = 1;
+export const RUNTIME_PASSPORT_SNAPSHOT_SCHEMA_VERSION = 2;
 
 export interface PassportIdentity {
   tetiId: string;
@@ -45,10 +46,11 @@ export interface PassportConnectionSnapshot {
  * `generatedAt` change only when the underlying content changes.
  */
 export interface RuntimePassportSnapshot {
-  schemaVersion: 1;
+  schemaVersion: 2;
   revision: number;
   generatedAt: string;
   identity: PassportIdentity | null;
+  registry: RegistryStatus;
   localPassport: TetiCapabilityPassport;
   connections: PassportConnectionSnapshot[];
   sharing: PassportSharingPolicy;

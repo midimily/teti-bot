@@ -29,7 +29,7 @@ import type {
   DiscoveryRegistrationPayload
 } from "./model.ts";
 
-test("create account calls chatmail adapter, saves local state, and registers discovery identity", async () => {
+test("create account calls chatmail adapter and saves local state before background discovery", async () => {
   const storage = new MemoryTetiAccountStorage();
   const chatmailAdapter = new RecordingChatmailAdapter();
   const discoveryClient = new RecordingDiscoveryClient();
@@ -50,7 +50,8 @@ test("create account calls chatmail adapter, saves local state, and registers di
   assert.equal(account.chatmailAccountId, 1);
   assert.equal(account.publicKey, "mock-public-key");
   assert.deepEqual(await storage.load(), account);
-  assert.equal(discoveryClient.registerCalls.length, 1);
+  assert.equal(discoveryClient.registerCalls.length, 0);
+  await manager.ensureTetiRegistration();
   assert.deepEqual(discoveryClient.registerCalls[0], toDiscoveryRegistrationPayload(account));
 });
 
@@ -74,6 +75,8 @@ test("create account can auto provision chatmail identity from display name", as
   assert.equal(account.chatmailAccountId, 41);
   assert.equal(account.publicKey, "provisioned-public-key");
   assert.deepEqual(await storage.load(), account);
+  assert.equal(discoveryClient.registerCalls.length, 0);
+  await manager.ensureTetiRegistration();
   assert.equal(discoveryClient.registerCalls.length, 1);
   assert.equal(discoveryClient.registerCalls[0].id, "teti_abcdefghi");
   assert.equal(discoveryClient.registerCalls[0].displayName, "Alex");
@@ -94,11 +97,13 @@ test("account creation canonicalizes a case-insensitive relay identity before pe
   assert.equal(account.id, "teti_abc123xyz");
   assert.equal(account.address, "abc123xyz@mail.seep.im");
   assert.equal((await storage.load())?.id, "teti_abc123xyz");
+  assert.equal(discoveryClient.registerCalls.length, 0);
+  await manager.ensureTetiRegistration();
   assert.equal(discoveryClient.registerCalls[0].id, "teti_abc123xyz");
   assert.equal(discoveryClient.registerCalls[0].address, "abc123xyz@mail.seep.im");
 });
 
-test("account creation reports relay, persistence, and registry transaction stages in order", async () => {
+test("account creation reports only local identity transaction stages in order", async () => {
   const stages: string[] = [];
   const manager = new TetiAccountManager({
     storage: new MemoryTetiAccountStorage(),
@@ -113,12 +118,11 @@ test("account creation reports relay, persistence, and registry transaction stag
     "identity_created",
     "persisting",
     "persisted",
-    "registering_discovery",
     "complete"
   ]);
 });
 
-test("registry failure retains the relay identity locally for idempotent recovery", async () => {
+test("registry failure cannot roll back a locally initialized Teti account", async () => {
   const storage = new MemoryTetiAccountStorage();
   const stages: string[] = [];
   const manager = new TetiAccountManager({
@@ -128,10 +132,11 @@ test("registry failure retains the relay identity locally for idempotent recover
     onCreationStage: async (stage) => stages.push(stage)
   });
 
-  await assert.rejects(() => manager.createTetiAccount({ name: "Milo" }), /registry unavailable/);
+  await manager.createTetiAccount({ name: "Milo" });
+  await assert.rejects(() => manager.ensureTetiRegistration(), /state unreachable/);
 
   assert.equal((await storage.load())?.address, "abcdefghi@mail.seep.im");
-  assert.equal(stages.at(-1), "registering_discovery");
+  assert.equal(stages.at(-1), "complete");
 });
 
 test("wrong relay address blocks persistence and discovery registration", async () => {
@@ -206,7 +211,9 @@ test("status reports registry sync pending when a legacy identity is missing its
     discoveryClient: new LegacyDiscoveryClient()
   });
 
-  assert.equal((await manager.getTetiStatus()).registered, false);
+  const status = await manager.getTetiStatus();
+  assert.equal(status.registry.state, "conflict");
+  assert.equal(status.registry.errorCode, "REG_IDENTITY_MISMATCH");
 });
 
 test("delete account removes discovery identity, deletes chatmail account, and removes local state", async () => {
@@ -248,6 +255,7 @@ test("refresh environment updates local profile and registry heartbeat payload",
   await manager.createTetiAccount({
     address: "env000001@mail.seep.im"
   });
+  await manager.ensureTetiRegistration();
 
   const refreshed = await manager.refreshTetiEnvironment();
 

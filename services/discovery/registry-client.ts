@@ -10,6 +10,18 @@ import {
 
 export const DEFAULT_TETI_REGISTRY_URL = "https://teti-registry.seep2026.workers.dev";
 export const TETI_REGISTRY_URL_ENV = "TETI_REGISTRY_URL";
+export const DEFAULT_TETI_REGISTRY_TIMEOUT_MS = 10_000;
+
+export type RegistryFailureKind =
+  | "unreachable"
+  | "rejected"
+  | "conflict"
+  | "invalid_response";
+
+export interface RegistryDiscoveryClientOptions {
+  fetchImpl?: typeof fetch;
+  timeoutMs?: number;
+}
 
 export interface DiscoveryIdentity {
   version: 1;
@@ -40,9 +52,19 @@ interface RegistryResponse<TData> {
 
 export class RegistryDiscoveryClient implements DiscoveryClient {
   private readonly baseUrl: string;
+  private readonly fetchImpl: typeof fetch;
+  private readonly timeoutMs: number;
 
-  constructor(baseUrl = resolveTetiRegistryUrl()) {
+  constructor(
+    baseUrl = resolveTetiRegistryUrl(),
+    options: RegistryDiscoveryClientOptions = {}
+  ) {
     this.baseUrl = normalizeRegistryUrl(baseUrl);
+    this.fetchImpl = options.fetchImpl ?? globalThis.fetch.bind(globalThis);
+    this.timeoutMs = options.timeoutMs ?? DEFAULT_TETI_REGISTRY_TIMEOUT_MS;
+    if (!Number.isFinite(this.timeoutMs) || this.timeoutMs <= 0) {
+      throw new Error("Registry timeout must be positive.");
+    }
   }
 
   async registerIdentity(payload: DiscoveryRegistrationPayload): Promise<DiscoveryIdentity> {
@@ -111,20 +133,65 @@ export class RegistryDiscoveryClient implements DiscoveryClient {
   }
 
   private async request<TData>(path: string, init: RequestInit): Promise<TData> {
-    const response = await fetch(`${this.baseUrl}${path}`, {
-      ...init,
-      headers: {
-        "content-type": "application/json",
-        ...(init.headers ?? {})
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+    let response: Response;
+    try {
+      response = await this.fetchImpl(`${this.baseUrl}${path}`, {
+        ...init,
+        headers: {
+          "content-type": "application/json",
+          ...(init.headers ?? {})
+        },
+        signal: controller.signal
+      });
+    } catch (error) {
+      if (controller.signal.aborted) {
+        throw new RegistryClientError(
+          0,
+          "REG_TIMEOUT",
+          "Teti registry request timed out.",
+          "unreachable",
+          true
+        );
       }
-    });
+      const code = registryTransportCode(error);
+      throw new RegistryClientError(
+        0,
+        code,
+        "Teti registry is temporarily unreachable.",
+        "unreachable",
+        true
+      );
+    } finally {
+      clearTimeout(timeout);
+    }
 
     const body = (await response.json().catch(() => null)) as RegistryResponse<TData> | null;
     if (!response.ok || !body?.success) {
+      const code = body?.error ?? (
+        response.status >= 500
+          ? "REG_HTTP_5XX"
+          : response.ok
+            ? "REG_INVALID_RESPONSE"
+            : "REG_HTTP_REJECTED"
+      );
+      const temporarilyUnavailable = response.status >= 500
+        || response.status === 408
+        || response.status === 429;
+      const kind: RegistryFailureKind = temporarilyUnavailable
+        ? "unreachable"
+        : response.status === 409
+          ? "conflict"
+          : response.ok
+            ? "invalid_response"
+            : "rejected";
       throw new RegistryClientError(
         response.status,
-        body?.error ?? "REGISTRY_ERROR",
-        body?.message ?? "Teti registry request failed."
+        code,
+        body?.message ?? "Teti registry request failed.",
+        kind,
+        temporarilyUnavailable || response.ok
       );
     }
 
@@ -177,11 +244,21 @@ function readProcessEnvironment(): Record<string, string | undefined> {
 export class RegistryClientError extends Error {
   readonly status: number;
   readonly code: string;
+  readonly kind: RegistryFailureKind;
+  readonly retryable: boolean;
 
-  constructor(status: number, code: string, message: string) {
+  constructor(
+    status: number,
+    code: string,
+    message: string,
+    kind: RegistryFailureKind = status >= 500 ? "unreachable" : "rejected",
+    retryable = status >= 500 || status === 429
+  ) {
     super(message);
     this.status = status;
     this.code = code;
+    this.kind = kind;
+    this.retryable = retryable;
   }
 }
 
@@ -198,9 +275,31 @@ function assertRegistrationConfirmed(
     throw new RegistryClientError(
       502,
       "REGISTRY_WRITE_NOT_CONFIRMED",
-      "Teti registry did not confirm the complete public identity."
+      "Teti registry did not confirm the complete public identity.",
+      "invalid_response",
+      true
     );
   }
 
   return identity;
+}
+
+function registryTransportCode(error: unknown): string {
+  const code = readErrorCode(error);
+  if (code === "ENOTFOUND" || code === "EAI_AGAIN") return "REG_DNS";
+  if (code === "CERT_HAS_EXPIRED" || code === "UNABLE_TO_VERIFY_LEAF_SIGNATURE" || code === "ERR_TLS_CERT_ALTNAME_INVALID") {
+    return "REG_TLS";
+  }
+  if (code === "ETIMEDOUT" || code === "UND_ERR_CONNECT_TIMEOUT") return "REG_TIMEOUT";
+  return "REG_NETWORK";
+}
+
+function readErrorCode(error: unknown): string | null {
+  if (typeof error !== "object" || error === null) return null;
+  const direct = (error as { code?: unknown }).code;
+  if (typeof direct === "string") return direct;
+  const cause = (error as { cause?: unknown }).cause;
+  if (typeof cause !== "object" || cause === null) return null;
+  const nested = (cause as { code?: unknown }).code;
+  return typeof nested === "string" ? nested : null;
 }

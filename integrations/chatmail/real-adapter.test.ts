@@ -2,9 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { RealChatmailAdapter } from "./real-adapter.ts";
 import {
+  ChatmailProvisioningError,
   DEFAULT_CHATMAIL_ACCOUNT_QR,
   RpcChatmailProvisioner
 } from "./provisioner.ts";
+import { ChatmailTransportError } from "./stdio-transport.ts";
 import {
   ChatmailRpcConfigurationError,
   ChatmailRpcError,
@@ -809,6 +811,61 @@ test("chatmail provisioner creates identity from display name without exposing p
       }
     }
   ]);
+});
+
+test("chatmail provisioner reports the relay configuration stage when it times out", async () => {
+  const rpc = new (class extends RecordingChatmailRpcClient {
+    override async configureAccount(
+      accountId: number,
+      input: CreateChatmailAccountInput
+    ): Promise<void> {
+      this.calls.push("configureAccount");
+      this.configureInputs.push({ accountId, input });
+      await new Promise<void>(() => undefined);
+    }
+  })();
+  const provisioner = new RpcChatmailProvisioner(rpc, {
+    timeouts: {
+      relayConfigMs: 5
+    }
+  });
+
+  await assert.rejects(
+    () => provisioner.createIdentity("Alex"),
+    (error) => {
+      assert.equal(error instanceof ChatmailProvisioningError, true);
+      assert.equal((error as ChatmailProvisioningError).code, "CM_CFG_TIMEOUT");
+      assert.equal((error as ChatmailProvisioningError).stage, "relay_config");
+      return true;
+    }
+  );
+  assert.deepEqual(rpc.calls, [
+    "addAccount",
+    "configureAccount",
+    "removeAccount"
+  ]);
+});
+
+test("chatmail provisioner preserves an accounts.lock transport diagnosis", async () => {
+  const rpc = new (class extends RecordingChatmailRpcClient {
+    override async addAccount(): Promise<number> {
+      throw new ChatmailTransportError(
+        "CM_RPC_LOCKED",
+        "Chatmail account storage is already owned by another local process."
+      );
+    }
+  })();
+  const provisioner = new RpcChatmailProvisioner(rpc);
+
+  await assert.rejects(
+    () => provisioner.createIdentity("Alex"),
+    (error) => {
+      assert.equal(error instanceof ChatmailProvisioningError, true);
+      assert.equal((error as ChatmailProvisioningError).code, "CM_RPC_LOCKED");
+      assert.equal((error as ChatmailProvisioningError).stage, "rpc_account");
+      return true;
+    }
+  );
 });
 
 class RecordingChatmailRpcClient implements ChatmailRpcClient {

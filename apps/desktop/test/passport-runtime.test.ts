@@ -56,6 +56,7 @@ test("Runtime Passport reads aggregate local caches only and keep revision stabl
       },
       getConnections() { return [connection]; },
       getCodexUsage() { return readyUsage(); },
+      getRegistry() { return { state: "registered" }; },
       async getSharing() {
         sharingReads += 1;
         return resourceSharingPolicy(false);
