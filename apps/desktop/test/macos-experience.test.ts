@@ -116,11 +116,15 @@ test("desktop shell exposes AI Passport and explicit Passport sharing consent", 
   assert.match(app, /target\.closest\("\.teti-header-panel"\)/);
   assert.match(app, /target\.closest\("\.teti-header-icon\[aria-expanded\]"\)/);
   assert.match(app, /options\.tauri\.onDockActivate/);
+  assert.match(app, /controls\.append\(taskButton, statusButton, sharingButton, statusPanel, sharingPanel\)/);
+  assert.match(app, /connections\.open\("task-back-to-island"\)/);
   assert.doesNotMatch(passportView, /toggle\.disabled/);
   assert.doesNotMatch(app, /iconButton\(X, "收起"/);
   assert.match(styles, /\.teti-header\s*\{[\s\S]*right:\s*14px/);
   assert.match(styles, /\.teti-toolbar-asset-icon\s*\{[\s\S]*object-fit:\s*contain/);
   assert.match(styles, /\.teti-toolbar-asset-icon\s*\{[\s\S]*filter:\s*saturate\(0\.78\)/);
+  assert.match(styles, /\.teti-task-header-button > svg\s*\{[\s\S]*width:\s*22px;[\s\S]*height:\s*22px/);
+  assert.match(styles, /\.teti-task-header-button > svg\s*\{[\s\S]*color:\s*#70dafc;[\s\S]*filter:\s*saturate\(0\.78\);[\s\S]*opacity:\s*0\.82/);
   assert.match(styles, /\.teti-ai-status-panel,[\s\S]*rgba\(255, 255, 255, 0\.38\)/);
   assert.match(styles, /\.teti-sharing-panel[\s\S]*backdrop-filter:\s*blur\(28px\)/);
   assert.equal(existsSync(join(desktopRoot, "assets", "codex-status.png")), true);

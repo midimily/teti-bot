@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import {
+  MAX_TETI_APPLICATION_ENVELOPE_BYTES,
   TETI_APPLICATION_PROTOCOL_VERSION,
   type TetiApplicationEnvelope,
   type TetiApplicationMessageType
@@ -39,6 +40,9 @@ export function serializeApplicationEnvelope(envelope: TetiApplicationEnvelope):
 }
 
 export function parseApplicationEnvelope(raw: string): TetiApplicationEnvelope {
+  if (new TextEncoder().encode(raw).byteLength > MAX_TETI_APPLICATION_ENVELOPE_BYTES) {
+    throw new TetiApplicationProtocolError("Teti application envelope exceeds the allowed size.");
+  }
   let value: unknown;
   try {
     value = JSON.parse(raw);

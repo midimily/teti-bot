@@ -7,6 +7,7 @@ import { createDesktopAccountLifecycle } from "./provisioning/index.ts";
 import { readProvisioningMode, type ProvisioningModeConfig } from "./provisioning/modes.ts";
 import { TauriNotchWindowController, visualModeForViewModel } from "./platform/tauri-notch-window.ts";
 import type { TauriInvoker } from "./platform/tauri-api.ts";
+import { DockActivationGuard } from "./platform/dock-activation-guard.ts";
 import {
   LifecycleBridgeClient
 } from "./provisioning/bridge-lifecycle.ts";
@@ -102,6 +103,7 @@ export async function createDesktopApp(options: DesktopAppOptions): Promise<Desk
   let stopDockActivateListener: (() => void) | undefined;
   let preserveStateForBrandOpen = false;
   let brandOpenGuardTimer: number | undefined;
+  const dockActivationGuard = new DockActivationGuard();
   const baseSchedule = options.schedule ?? ((callback: () => void, delayMs: number) => setTimeout(callback, delayMs));
   const clearBrandOpenGuard = () => {
     preserveStateForBrandOpen = false;
@@ -164,6 +166,10 @@ export async function createDesktopApp(options: DesktopAppOptions): Promise<Desk
     tauri: options.tauri,
     notchWindow,
     onChange: () => app?.render(),
+    onReturnToIsland: () => {
+      passport.closePanel(false);
+      connections.open("task-back-to-island");
+    },
     schedule: baseSchedule
   });
   if (options.tauri.onFocusChanged) {
@@ -173,6 +179,7 @@ export async function createDesktopApp(options: DesktopAppOptions): Promise<Desk
           clearBrandOpenGuard();
           return;
         }
+        if (dockActivationGuard.shouldIgnoreFocusLoss()) return;
         passport.closePanel();
         tasks.dismissFromOutside();
         connections.dismissFromOutside();
@@ -182,13 +189,14 @@ export async function createDesktopApp(options: DesktopAppOptions): Promise<Desk
 
   if (options.tauri.onDockActivate) {
     stopDockActivateListener = await options.tauri.onDockActivate(() => {
+      if (!dockActivationGuard.begin()) return;
       if (!coordinator.snapshot.account) {
         void notchWindow.show("dock-activate");
         return;
       }
       passport.closePanel(false);
-      tasks.close("dock-activate-reset");
-      connections.open();
+      tasks.close("dock-activate-reset", { notify: false, updateWindowMode: false });
+      connections.open("dock-activate");
     });
   }
 
@@ -788,7 +796,7 @@ function createIslandHeader(
     taskButton.classList.add("has-task-badge");
     taskButton.dataset.count = String(Math.min(pendingTasks, 9));
   }
-  controls.append(statusButton, taskButton, sharingButton, statusPanel, sharingPanel);
+  controls.append(taskButton, statusButton, sharingButton, statusPanel, sharingPanel);
 
   header.append(brand, controls);
   return header;

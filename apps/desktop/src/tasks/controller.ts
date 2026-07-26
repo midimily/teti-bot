@@ -37,6 +37,11 @@ export interface TaskControllerSnapshot {
   error?: string;
 }
 
+export interface TaskCloseOptions {
+  notify?: boolean;
+  updateWindowMode?: boolean;
+}
+
 export interface TaskClient {
   summaries(): Promise<CollaborationTaskSummarySnapshot>;
   get(taskId: string): Promise<CollaborationTaskTransportRecord>;
@@ -53,6 +58,7 @@ export class TaskController {
   private readonly tauri: TauriInvoker;
   private readonly notchWindow: TauriNotchWindowController;
   private readonly onChange: () => void;
+  private readonly onReturnToIsland?: () => void;
   private readonly schedule: (callback: () => void, delayMs: number) => unknown;
   private readonly cancelTimer: (handle: unknown) => void;
   private snapshotValue: TaskControllerSnapshot = {
@@ -74,6 +80,7 @@ export class TaskController {
     tauri: TauriInvoker;
     notchWindow: TauriNotchWindowController;
     onChange: () => void;
+    onReturnToIsland?: () => void;
     schedule?: (callback: () => void, delayMs: number) => unknown;
     cancel?: (handle: unknown) => void;
   }) {
@@ -81,6 +88,7 @@ export class TaskController {
     this.tauri = options.tauri;
     this.notchWindow = options.notchWindow;
     this.onChange = options.onChange;
+    this.onReturnToIsland = options.onReturnToIsland;
     this.schedule = options.schedule ?? ((callback, delayMs) => setTimeout(callback, delayMs));
     this.cancelTimer = options.cancel ?? ((handle) => clearTimeout(handle as ReturnType<typeof setTimeout>));
   }
@@ -114,11 +122,14 @@ export class TaskController {
     void this.notchWindow.setMode("task", "compose-task").catch(() => undefined);
   }
 
-  close(reason = "close-task-workspace"): void {
+  close(reason = "close-task-workspace", options: TaskCloseOptions = {}): void {
+    if (!this.snapshotValue.open && this.snapshotValue.error === undefined) return;
     this.snapshotValue.open = false;
     delete this.snapshotValue.error;
-    this.onChange();
-    void this.notchWindow.setMode("idle", reason).catch(() => undefined);
+    if (options.notify !== false) this.onChange();
+    if (options.updateWindowMode !== false) {
+      void this.notchWindow.setMode("idle", reason).catch(() => undefined);
+    }
   }
 
   dismissFromOutside(): void {
@@ -127,7 +138,12 @@ export class TaskController {
 
   back(): void {
     if (this.snapshotValue.screen === "inbox") {
-      this.close();
+      if (this.onReturnToIsland) {
+        this.close("task-back-to-island", { notify: false, updateWindowMode: false });
+        this.onReturnToIsland();
+      } else {
+        this.close();
+      }
       return;
     }
     this.snapshotValue.screen = "inbox";

@@ -176,6 +176,7 @@ export class TaskTransportRuntime {
     const state = await this.store.load();
     let changed = this.reconcileInterruptedExecutions(state);
     changed = await this.refreshAttachmentReadiness(state) || changed;
+    changed = expireDueRecords(state, this.now()) || changed;
     if (changed) await this.store.save(state);
     const record = state.records.find((candidate) => candidate.request.taskId === taskId);
     if (!record) throw new TaskTransportRuntimeError("TASK_NOT_FOUND", "Task was not found.");
@@ -353,6 +354,12 @@ export class TaskTransportRuntime {
     }
     const state = await this.store.load();
     const observedAt = validTimestampOrNow(input.receivedAt, this.now()).toISOString();
+    if (Date.parse(receipt.receivedAt) > this.now().getTime() + MAX_TASK_CLOCK_SKEW_MS) {
+      throw new TaskTransportRuntimeError(
+        "TASK_CLOCK_SKEW",
+        "Task receipt timestamp is too far in the future."
+      );
+    }
     rememberPeerVersions(state, receipt.targetTetiId, receipt.supportedTaskVersions, observedAt);
     const record = state.records.find(
       (candidate) => candidate.direction === "outgoing"
@@ -360,7 +367,7 @@ export class TaskTransportRuntime {
         && candidate.request.taskId === receipt.taskId
         && candidate.request.targetTetiId === receipt.targetTetiId
     );
-    if (record) applyReceipt(record, receipt, observedAt);
+    if (record && shouldApplyReceipt(record, receipt)) applyReceipt(record, receipt, observedAt);
     await this.store.save(state);
   }
 
@@ -449,7 +456,7 @@ export class TaskTransportRuntime {
     validateTaskArtifact(payload.artifact);
     const state = await this.store.load();
     const record = findTaskRecord(state, "outgoing", account.id, payload.taskId);
-    if (!record) return;
+    if (!record || ["failed", "canceled", "rejected"].includes(record.state)) return;
     const artifacts = record.artifacts ?? [];
     if (artifacts.length === 0) {
       record.artifacts = [...artifacts, structuredClone(payload.artifact)];
@@ -748,6 +755,10 @@ export class TaskTransportRuntime {
       record.artifactPending = true;
       record.state = "completed";
       delete record.safeErrorCode;
+    } else if (result?.safeErrorCode === "ADAPTER_AUTH_REQUIRED") {
+      record.state = "auth_required";
+      record.approval = "pending";
+      record.safeErrorCode = "ADAPTER_AUTH_REQUIRED";
     } else {
       record.state = result?.state === "canceled" ? "canceled" : "failed";
       record.safeErrorCode = result?.safeErrorCode ?? "ADAPTER_INTERNAL_ERROR";
@@ -991,9 +1002,12 @@ function applyReceipt(
 ): void {
   record.receipt = structuredClone(receipt);
   record.updatedAt = observedAt;
-  delete record.safeErrorCode;
   if (receipt.status === "received" || receipt.status === "duplicate") {
     record.delivery = "acknowledged";
+    if (record.state === "submitted"
+      && ["TASK_CHATMAIL_SEND_FAILED", "TASK_CONNECTION_UNAVAILABLE"].includes(record.safeErrorCode ?? "")) {
+      delete record.safeErrorCode;
+    }
     return;
   }
   if (receipt.status === "expired") {
@@ -1004,6 +1018,22 @@ function applyReceipt(
   record.state = receipt.status === "conflict" ? "failed" : "rejected";
   record.approval = "rejected";
   record.safeErrorCode = receipt.status === "conflict" ? "TASK_ID_CONFLICT" : "TASK_REJECTED";
+}
+
+function shouldApplyReceipt(
+  record: CollaborationTaskTransportRecord,
+  receipt: TetiTaskReceiptPayload
+): boolean {
+  if (["conflict", "rejected", "expired"].includes(record.delivery)) return false;
+  if (record.receipt) {
+    const order = Date.parse(receipt.receivedAt) - Date.parse(record.receipt.receivedAt);
+    if (order < 0) return false;
+    if (order === 0) return JSON.stringify(receipt) === JSON.stringify(record.receipt);
+  }
+  if (!["received", "duplicate"].includes(receipt.status) && record.state !== "submitted") {
+    return false;
+  }
+  return true;
 }
 
 function rememberPeerVersions(
@@ -1030,7 +1060,9 @@ function rememberPeerVersions(
 function expireDueRecords(state: TetiTaskTransportStoreState, now: Date): boolean {
   let changed = false;
   for (const record of state.records) {
-    if ((record.state === "submitted" || record.delivery === "queued" || record.delivery === "send_failed")
+    if ((!isTerminalTaskState(record.state)
+      || record.delivery === "queued"
+      || record.delivery === "send_failed")
       && Date.parse(record.request.expiresAt) <= now.getTime()) {
       expireRecord(record, now.toISOString());
       changed = true;
@@ -1127,7 +1159,8 @@ function requireMutableIncomingTask(
     expireRecord(record, now.toISOString());
     throw new TaskTransportRuntimeError("TASK_EXPIRED", "Task approval has expired.");
   }
-  if (record.approval !== "pending" || record.state !== "submitted") {
+  if (record.approval !== "pending"
+    || (record.state !== "submitted" && record.state !== "auth_required")) {
     throw new TaskTransportRuntimeError("TASK_NOT_PENDING", "Task no longer awaits approval.");
   }
   return record;

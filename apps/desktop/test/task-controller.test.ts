@@ -79,6 +79,61 @@ test("Task controller coalesces refresh requests into one poll timer", async () 
   assert.equal(scheduled.length, 0);
 });
 
+test("Task controller can leave the task surface without rendering an idle frame", async () => {
+  const modes: Array<{ mode: string; reason: string }> = [];
+  let renders = 0;
+  const controller = new TaskController({
+    client: new RecordingTaskClient(),
+    tauri: new RecordingTauriInvoker(),
+    notchWindow: {
+      setMode: async (mode: string, reason: string) => {
+        modes.push({ mode, reason });
+      }
+    } as never,
+    onChange: () => { renders += 1; }
+  });
+
+  controller.openInbox();
+  await Promise.resolve();
+  modes.length = 0;
+  renders = 0;
+  controller.close("dock-activate-reset", { notify: false, updateWindowMode: false });
+
+  assert.equal(controller.snapshot.open, false);
+  assert.equal(renders, 0);
+  assert.deepEqual(modes, []);
+  controller.dispose();
+});
+
+test("Task inbox back returns to the expanded island without entering idle mode", async () => {
+  const modes: Array<{ mode: string; reason: string }> = [];
+  let renders = 0;
+  let returns = 0;
+  const controller = new TaskController({
+    client: new RecordingTaskClient(),
+    tauri: new RecordingTauriInvoker(),
+    notchWindow: {
+      setMode: async (mode: string, reason: string) => {
+        modes.push({ mode, reason });
+      }
+    } as never,
+    onChange: () => { renders += 1; },
+    onReturnToIsland: () => { returns += 1; }
+  });
+
+  controller.openInbox();
+  await Promise.resolve();
+  modes.length = 0;
+  renders = 0;
+  controller.back();
+
+  assert.equal(controller.snapshot.open, false);
+  assert.equal(returns, 1);
+  assert.equal(renders, 0);
+  assert.deepEqual(modes, []);
+  controller.dispose();
+});
+
 class RecordingTaskClient implements TaskClient {
   readonly staged = {
     part: {

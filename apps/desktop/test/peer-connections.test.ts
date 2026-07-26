@@ -286,6 +286,31 @@ test("outside focus loss collapses the outer connection island when no request i
   controller.dispose();
 });
 
+test("reopening an open connection island reasserts its native mode", async () => {
+  const invoker = new RecordingTauriInvoker();
+  let renders = 0;
+  const controller = new PeerConnectionController({
+    client: new StaticPeerConnectionClient(emptyResult),
+    notchWindow: new TauriNotchWindowController(invoker),
+    onChange: () => { renders += 1; }
+  });
+
+  controller.open();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  invoker.calls.length = 0;
+  renders = 0;
+  controller.open("dock-activate");
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  assert.equal(controller.snapshot.open, true);
+  assert.equal(renders, 1);
+  assert.deepEqual(invoker.calls, [{
+    command: "set_island_mode",
+    args: { mode: "onboarding", reason: "dock-activate" }
+  }]);
+  controller.dispose();
+});
+
 test("disposing the controller cancels opening, success, and collapse timers", async () => {
   const scheduler = new ControlledScheduler();
   const controller = new PeerConnectionController({

@@ -4,7 +4,8 @@ import type { TetiAccount } from "../account/model.ts";
 import { MemoryTetiAccountStorage } from "../account/storage.ts";
 import { MemoryTetiConnectionStorage } from "../connection/storage.ts";
 import { TetiConnectionState, type TetiConnectionRecord } from "../connection/types.ts";
-import { createApplicationEnvelope, serializeApplicationEnvelope } from "../protocol/envelope.ts";
+import { createApplicationEnvelope, parseApplicationEnvelope, serializeApplicationEnvelope } from "../protocol/envelope.ts";
+import { MAX_TETI_APPLICATION_ENVELOPE_BYTES } from "../protocol/types.ts";
 import { TetiApplicationProtocolError, validateApplicationEnvelope } from "../protocol/validator.ts";
 import {
   MemoryTetiMessageTracker,
@@ -97,6 +98,36 @@ test("application protocol rejects a non-canonical fromTetiId", () => {
       error instanceof TetiApplicationProtocolError &&
       /exactly 9 ASCII lowercase/.test(error.message)
   );
+});
+
+test("application protocol rejects oversized raw JSON and envelope extension fields", () => {
+  const oversized = JSON.stringify({
+    version: 1,
+    type: "teti.presence",
+    messageId: "oversized-message",
+    fromTetiId: "teti_remote001",
+    createdAt: fixedNow,
+    payload: { status: "online", timestamp: fixedNow },
+    padding: "x".repeat(MAX_TETI_APPLICATION_ENVELOPE_BYTES)
+  });
+  assert.throws(() => parseApplicationEnvelope(oversized), /exceeds the allowed size/);
+  assert.throws(() => validateApplicationEnvelope({
+    version: 1,
+    type: "teti.presence",
+    messageId: "extension-message",
+    fromTetiId: "teti_remote001",
+    createdAt: fixedNow,
+    payload: { status: "online", timestamp: fixedNow },
+    command: "unsafe"
+  }), /unsupported field/);
+  assert.throws(() => validateApplicationEnvelope({
+    version: 1,
+    type: "teti.presence",
+    messageId: "payload-extension-message",
+    fromTetiId: "teti_remote001",
+    createdAt: fixedNow,
+    payload: { status: "online", timestamp: fixedNow, command: "unsafe" }
+  }), /unsupported field/);
 });
 
 test("duplicate message is ignored after first processing", async () => {

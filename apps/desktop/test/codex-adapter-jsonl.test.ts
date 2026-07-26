@@ -33,6 +33,7 @@ test("Codex JSONL maps the documented lifecycle to one controlled Artifact", () 
 
   assert.deepEqual(parseCodexJsonl(output), {
     terminalState: "completed",
+    failureKind: null,
     finalMessage: "Safe final answer.",
     eventCount: 6,
     threadStarted: true,
@@ -41,6 +42,22 @@ test("Codex JSONL maps the documented lifecycle to one controlled Artifact", () 
   assert.equal(decodeCodexArtifact(output), "Safe final answer.");
   assert.equal(decodeCodexArtifact(output).includes("secret"), false);
   assert.equal(decodeCodexArtifact(output).includes("reasoning"), false);
+});
+
+test("Codex JSONL maps an expired local login to the safe authentication state", () => {
+  const output = jsonl([
+    { type: "thread.started" },
+    { type: "turn.started" },
+    { type: "turn.failed", error: { message: "Authentication token expired. Please login again." } }
+  ]);
+
+  assert.equal(parseCodexJsonl(output).failureKind, "auth");
+  assert.equal(classifyCodexFailure(output), "ADAPTER_AUTH_REQUIRED");
+  assert.throws(
+    () => decodeCodexArtifact(output),
+    (error: unknown) => readSafeCode(error) === "ADAPTER_AUTH_REQUIRED"
+  );
+  assert.equal(JSON.stringify(parseCodexJsonl(output)).includes("token expired"), false);
 });
 
 test("Codex JSONL uses the last completed agent message as final output", () => {

@@ -2,8 +2,8 @@
 
 Status: Accepted plan
 Previous product baseline: Beta 0.1.1
-Current implemented milestone: Beta 0.1.12
-Next planned release: Beta 0.1.13
+Current implemented milestone: Beta 0.1.13
+Next planned release: Beta 0.2.0
 
 Product sequencing decision: 0.1.6, 0.1.7, and 0.1.8 are deferred and were not
 implemented. The application version intentionally jumps from 0.1.5 to 0.1.9;
@@ -45,7 +45,7 @@ exists.
 | 0.1.10 | Callable Passport and cross-version projection — implemented | Raw Observation is local; only Runtime-qualified Agents and capabilities enter schema 3; known current peers receive no redundant legacy payload |
 | 0.1.11 | A2A-aligned Task objects over Chatmail — implemented | Versioning, identity, TTL, idempotency, replay, durable outbox, and offline receipt pass; no execution |
 | 0.1.12 | Two-Mac request, allow-once, execution, status, and Artifact UI — implemented | Text plus bounded image input; explicit approval; isolated Adapter execution; bounded text Artifact |
-| 0.1.13 | Security hardening and release candidate | Restart, duplicate, reordering, crash, timeout, expiry, and old-peer tests pass |
+| 0.1.13 | Security hardening and release candidate — implemented | Restart, duplicate, reordering, crash, timeout, expiry, malicious-envelope isolation, and old-peer tests pass |
 | 0.2.0 | Beta collaboration release | Complete two-Mac demo and compatibility matrix pass |
 
 Every completed milestone increments the application patch version. A

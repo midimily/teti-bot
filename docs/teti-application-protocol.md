@@ -45,6 +45,11 @@ Required fields:
 
 `fromTetiId` must match the lowercase canonical format `teti_[a-z0-9]{9}`. Application envelopes do not normalize case and reject non-canonical IDs.
 
+Beta 0.1.13 limits the complete UTF-8 envelope to 128 KiB before JSON parsing,
+rejects unknown top-level keys, and bounds identifiers and timestamps. Payload
+schemas remain independently allowlisted. One malformed Chatmail message is
+isolated and cannot block later valid messages in the same poll batch.
+
 ## Message Types V1
 
 ### Profile Sync
@@ -189,8 +194,21 @@ Duplicate `messageId` values are ignored after the first successful generic
 processing. Production Task transport additionally deduplicates by Task ID so
 retries with a new envelope or Chatmail message ID remain idempotent.
 
-## Next Step
+## Beta 0.1.13 Recovery Rules
 
-Beta 0.1.13 hardens restart, duplicate, reordering, corrupt attachment,
-timeout, expiry and old-peer recovery. It does not broaden permission scope or
-introduce a public A2A endpoint.
+- semantic Task ID deduplication is authoritative even when a retry has a new
+  Application Envelope message ID;
+- status revision and receipt time ordering cannot roll a terminal or newer
+  state backward;
+- a receipt too far in the future is rejected instead of pinning ordering;
+- interrupted local work becomes `failed` with `TASK_RUNTIME_RESTARTED` after
+  Runtime recovery and is reported to the requester;
+- an expired local Agent login becomes `auth_required`; the receiver must log
+  in locally and explicitly allow once again before a new execution attempt;
+- all pending and authentication-required Tasks still expire at their original
+  absolute TTL;
+- a known Task-v1 peer continues to receive text-only requests and schema-v1
+  text Artifacts.
+
+These rules do not broaden permission scope, transmit credentials, or introduce
+a public A2A endpoint.

@@ -17,6 +17,10 @@ switch (mode) {
     process.exitCode = 7;
     break;
 
+  case "exit-signal":
+    process.kill(process.pid, "SIGKILL");
+    break;
+
   case "overflow":
     process.stdout.write("x".repeat(8 * 1024));
     keepAlive();

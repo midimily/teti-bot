@@ -104,6 +104,20 @@ test("one failing Adapter execution is isolated from another task", async () => 
   await kernel.shutdown();
 });
 
+test("an Agent that exits unexpectedly is failed safely and its workspace is recovered", async () => {
+  const adapter = fakeAdapter("exit-signal");
+  const kernel = new CallableAdapterKernel({ adapters: [adapter] });
+  const result = await kernel.execute(task("agent-exit-task"));
+
+  assert.equal(result.state, "failed");
+  assert.equal(result.safeErrorCode, "ADAPTER_EXIT_NONZERO");
+  assert.equal(result.artifact, undefined);
+  assert.equal(kernel.snapshot.activeTaskCount, 0);
+  assert.ok(adapter.lastContext);
+  await assert.rejects(() => stat(adapter.lastContext!.workspacePath));
+  await kernel.shutdown();
+});
+
 test("Kernel rejects duplicate IDs, unknown Adapters, and new work after shutdown", async () => {
   const adapter = fakeAdapter("echo");
   const kernel = new CallableAdapterKernel({ adapters: [adapter] });

@@ -13,7 +13,11 @@ import {
 import type { TetiConnectionRecord, TetiConnectionState } from "../../../core/connection/types.ts";
 import type { AiToolStatusSnapshot } from "../../../core/ai-status/types.ts";
 import type { CallableAgent } from "../../../core/callability/types.ts";
-import { parseApplicationEnvelope } from "../../../core/protocol/envelope.ts";
+import {
+  createApplicationEnvelope,
+  parseApplicationEnvelope,
+  serializeApplicationEnvelope
+} from "../../../core/protocol/envelope.ts";
 import type {
   ChatmailAdapter,
   ChatmailIdentity,
@@ -540,6 +544,262 @@ test("a completed status may safely skip a missing working update", async () => 
   assert.equal(completed.artifacts?.length, 1);
 });
 
+test("out-of-order Task status and receipt messages cannot roll back newer state", async () => {
+  const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
+  const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
+  const registry = new StaticRegistry([toIdentity(accountA), toIdentity(accountB)]);
+  const relay = new MemoryChatmailRelay();
+  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), registry);
+  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), registry, undefined, {
+    taskExecutor: new FakeTaskExecutor()
+  });
+  const connection = await confirmPeers(runtimeA, runtimeB, "beta00002");
+  const sent = await runtimeA.sendTask({
+    connectionRequestId: connection.requestId,
+    taskId: "task-reordered-001",
+    capabilityId: "code-analysis",
+    text: "Keep the highest status revision."
+  });
+  await runtimeB.poll();
+  await runtimeB.approveTask(sent.request.taskId);
+  await flushBackgroundWork();
+  await flushBackgroundWork();
+  relay.reverseApplicationMessages(accountA.address, "teti.task.status");
+  await runtimeA.poll();
+  assert.equal((await runtimeA.getTask(sent.request.taskId)).state, "completed");
+
+  const receiptTask = await runtimeA.sendTask({
+    connectionRequestId: connection.requestId,
+    taskId: "task-receipt-reordered-001",
+    capabilityId: "code-analysis",
+    text: "Keep the newest receipt."
+  });
+  await runtimeB.poll();
+  const conflict = createApplicationEnvelope({
+    type: "teti.task.request",
+    messageId: "conflicting-retry-message",
+    fromTetiId: accountA.id,
+    createdAt: new Date().toISOString(),
+    payload: {
+      ...receiptTask.request,
+      input: receiptTask.request.schemaVersion === 1
+        ? { kind: "text" as const, text: "Conflicting immutable content." }
+        : {
+            kind: "parts" as const,
+            parts: [{ kind: "text" as const, text: "Conflicting immutable content." }]
+          }
+    }
+  });
+  relay.pushRaw(accountB.address, accountA.address, serializeApplicationEnvelope(conflict));
+  await runtimeB.poll();
+  relay.reverseApplicationMessages(accountA.address, "teti.task.receipt");
+  await runtimeA.poll();
+  const afterReceipts = await runtimeA.getTask(receiptTask.request.taskId);
+  assert.equal(afterReceipts.state, "failed");
+  assert.equal(afterReceipts.safeErrorCode, "TASK_ID_CONFLICT");
+
+  const futureReceipt = createApplicationEnvelope({
+    type: "teti.task.receipt",
+    messageId: "future-receipt-message",
+    fromTetiId: accountB.id,
+    createdAt: new Date().toISOString(),
+    payload: {
+      schemaVersion: 1,
+      taskId: receiptTask.request.taskId,
+      requesterTetiId: accountA.id,
+      targetTetiId: accountB.id,
+      status: "received",
+      receivedAt: "2099-01-01T00:00:00.000Z",
+      supportedTaskVersions: [1, 2]
+    }
+  });
+  relay.pushRaw(accountA.address, accountB.address, serializeApplicationEnvelope(futureReceipt));
+  await runtimeA.poll();
+  const afterFutureReceipt = await runtimeA.getTask(receiptTask.request.taskId);
+  assert.equal(afterFutureReceipt.state, "failed");
+  assert.equal(afterFutureReceipt.safeErrorCode, "TASK_ID_CONFLICT");
+});
+
+test("Runtime restart durably fails interrupted work and reports recovery to the requester", async () => {
+  const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
+  const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
+  const registry = new StaticRegistry([toIdentity(accountA), toIdentity(accountB)]);
+  const relay = new MemoryChatmailRelay();
+  const storeB = new MemoryTaskTransportStore();
+  const connectionsA = new MemoryTetiConnectionStorage();
+  const connectionsB = new MemoryTetiConnectionStorage();
+  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), registry, connectionsA);
+  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), registry, connectionsB, {
+    taskTransportStore: storeB,
+    taskExecutor: new HangingTaskExecutor()
+  });
+  const connection = await confirmPeers(runtimeA, runtimeB, "beta00002");
+  const sent = await runtimeA.sendTask({
+    connectionRequestId: connection.requestId,
+    taskId: "task-runtime-crash-001",
+    capabilityId: "code-analysis",
+    text: "This task is interrupted by a Runtime crash."
+  });
+  await runtimeB.poll();
+  assert.equal((await runtimeB.approveTask(sent.request.taskId)).state, "working");
+
+  const restartedB = await makeRuntime(
+    accountB,
+    relay.adapter(accountB.address),
+    registry,
+    connectionsB,
+    { taskTransportStore: storeB }
+  );
+  const recovered = await restartedB.getTask(sent.request.taskId);
+  assert.equal(recovered.state, "failed");
+  assert.equal(recovered.safeErrorCode, "TASK_RUNTIME_RESTARTED");
+  await restartedB.poll();
+  await runtimeA.poll();
+  const reported = await runtimeA.getTask(sent.request.taskId);
+  assert.equal(reported.state, "failed");
+  assert.equal(reported.safeErrorCode, "TASK_RUNTIME_RESTARTED");
+});
+
+test("expired Agent authentication returns to explicit allow-once after local login", async () => {
+  const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
+  const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
+  const registry = new StaticRegistry([toIdentity(accountA), toIdentity(accountB)]);
+  const relay = new MemoryChatmailRelay();
+  const executor = new RecoveringAuthTaskExecutor();
+  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), registry);
+  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), registry, undefined, {
+    taskExecutor: executor
+  });
+  const connection = await confirmPeers(runtimeA, runtimeB, "beta00002");
+  const sent = await runtimeA.sendTask({
+    connectionRequestId: connection.requestId,
+    taskId: "task-auth-recovery-001",
+    capabilityId: "code-analysis",
+    text: "Retry only after local login."
+  });
+  await runtimeB.poll();
+  await runtimeB.approveTask(sent.request.taskId);
+  await flushBackgroundWork();
+  await flushBackgroundWork();
+  const authRequired = await runtimeB.getTask(sent.request.taskId);
+  assert.equal(authRequired.state, "auth_required");
+  assert.equal(authRequired.approval, "pending");
+  assert.equal(authRequired.safeErrorCode, "ADAPTER_AUTH_REQUIRED");
+  await runtimeA.poll();
+  assert.equal((await runtimeA.getTask(sent.request.taskId)).state, "auth_required");
+
+  executor.authenticated = true;
+  await runtimeB.approveTask(sent.request.taskId);
+  await flushBackgroundWork();
+  await flushBackgroundWork();
+  await runtimeA.poll();
+  const completed = await runtimeA.getTask(sent.request.taskId);
+  assert.equal(completed.state, "completed");
+  assert.equal(completed.artifacts?.length, 1);
+  assert.equal(executor.requests.length, 2);
+});
+
+test("an auth-required Task still expires instead of remaining actionable forever", async () => {
+  let nowMs = Date.parse("2026-07-26T04:00:00.000Z");
+  const now = () => new Date(nowMs);
+  const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
+  const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
+  const registry = new StaticRegistry([toIdentity(accountA), toIdentity(accountB)]);
+  const relay = new MemoryChatmailRelay();
+  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), registry, undefined, { now });
+  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), registry, undefined, {
+    now,
+    taskExecutor: new RecoveringAuthTaskExecutor()
+  });
+  const connection = await confirmPeers(runtimeA, runtimeB, "beta00002");
+  const sent = await runtimeA.sendTask({
+    connectionRequestId: connection.requestId,
+    taskId: "task-auth-expiry-001",
+    capabilityId: "code-analysis",
+    text: "Do not keep this authorization prompt forever.",
+    ttlMs: 1_000
+  });
+  await runtimeB.poll();
+  await runtimeB.approveTask(sent.request.taskId);
+  await flushBackgroundWork();
+  await flushBackgroundWork();
+  assert.equal((await runtimeB.getTask(sent.request.taskId)).state, "auth_required");
+
+  nowMs += 2_000;
+  const expired = await runtimeB.getTask(sent.request.taskId);
+  assert.equal(expired.state, "rejected");
+  assert.equal(expired.approval, "expired");
+  assert.equal(expired.safeErrorCode, "TASK_EXPIRED");
+});
+
+test("a current Teti keeps text Task interoperability with a known v1 peer", async () => {
+  const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
+  const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
+  const registry = new StaticRegistry([toIdentity(accountA), toIdentity(accountB)]);
+  const relay = new MemoryChatmailRelay();
+  const storeA = new MemoryTaskTransportStore();
+  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), registry, undefined, {
+    taskTransportStore: storeA
+  });
+  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), registry, undefined, {
+    taskExecutor: new FakeTaskExecutor()
+  });
+  const connection = await confirmPeers(runtimeA, runtimeB, "beta00002");
+  await storeA.save({
+    schemaVersion: 1,
+    records: [],
+    peers: [{
+      tetiId: accountB.id,
+      supportedVersions: [1],
+      observedAt: "2099-01-01T00:00:00.000Z"
+    }]
+  });
+  const sent = await runtimeA.sendTask({
+    connectionRequestId: connection.requestId,
+    taskId: "task-v1-peer-001",
+    capabilityId: "code-analysis",
+    text: "Text-only compatibility task."
+  });
+  assert.equal(sent.protocolVersion, 1);
+  await runtimeB.poll();
+  await runtimeB.approveTask(sent.request.taskId);
+  await flushBackgroundWork();
+  await flushBackgroundWork();
+  await runtimeA.poll();
+  const completed = await runtimeA.getTask(sent.request.taskId);
+  assert.equal(completed.state, "completed");
+  assert.equal(completed.artifacts?.[0]?.schemaVersion, 1);
+});
+
+test("an oversized malicious envelope is isolated without blocking the next valid peer message", async () => {
+  const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
+  const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
+  const registry = new StaticRegistry([toIdentity(accountA), toIdentity(accountB)]);
+  const relay = new MemoryChatmailRelay();
+  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), registry);
+  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), registry);
+  await confirmPeers(runtimeA, runtimeB, "beta00002");
+  relay.pushRaw(accountB.address, accountA.address, JSON.stringify({
+    version: 1,
+    type: "teti.task.request",
+    messageId: "malicious",
+    fromTetiId: accountA.id,
+    createdAt: new Date().toISOString(),
+    payload: { padding: "x".repeat(160 * 1024) }
+  }));
+  const presence = createApplicationEnvelope({
+    type: "teti.presence",
+    messageId: "valid-after-malicious",
+    fromTetiId: accountA.id,
+    payload: { status: "alpha-heartbeat", timestamp: new Date().toISOString() }
+  });
+  relay.pushRaw(accountB.address, accountA.address, serializeApplicationEnvelope(presence));
+
+  const result = await runtimeB.poll();
+  assert.ok(result.connections[0]?.lastHeartbeatReceivedAt);
+  assert.equal((await runtimeB.listTasks()).records.length, 0);
+});
+
 async function makeRuntime(
   account: TetiAccount,
   chatmailAdapter: ChatmailAdapter,
@@ -685,6 +945,7 @@ class StaticRegistry implements TetiRegistryReader {
 class MemoryChatmailRelay {
   private readonly queues = new Map<string, ChatmailReceivedMessage[]>();
   private nextMessageId = 1;
+  private lastReceivedAtMs = Date.now();
 
   adapter(fromAddress: string): ChatmailAdapter {
     return new RelayAdapter(this, fromAddress);
@@ -704,7 +965,7 @@ class MemoryChatmailRelay {
         downloadState: "Done" as const,
         viewType: "Image"
       } : {}),
-      receivedAt: new Date().toISOString()
+      receivedAt: this.nextReceivedAt()
     });
     this.queues.set(input.peerAddress, queue);
     return { messageId, chatId: messageId };
@@ -749,6 +1010,33 @@ class MemoryChatmailRelay {
     queue.splice(index, 1);
     return true;
   }
+
+  pushRaw(targetAddress: string, fromAddress: string, text: string): void {
+    const messageId = this.nextMessageId++;
+    const queue = this.queues.get(targetAddress) ?? [];
+    queue.push({
+      messageId,
+      chatId: messageId,
+      fromAddress,
+      text,
+      receivedAt: this.nextReceivedAt()
+    });
+    this.queues.set(targetAddress, queue);
+  }
+
+  reverseApplicationMessages(address: string, type: string): void {
+    const queue = this.queues.get(address) ?? [];
+    const matching = queue.filter((message) => applicationType(message) === type).reverse();
+    let index = 0;
+    this.queues.set(address, queue.map((message) =>
+      applicationType(message) === type ? matching[index++]! : message
+    ));
+  }
+
+  private nextReceivedAt(): string {
+    this.lastReceivedAtMs = Math.max(Date.now(), this.lastReceivedAtMs + 1);
+    return new Date(this.lastReceivedAtMs).toISOString();
+  }
 }
 
 class FakeTaskExecutor implements TaskExecutionBridge {
@@ -792,6 +1080,90 @@ class FakeTaskExecutor implements TaskExecutionBridge {
 
   cancel(taskId: string): boolean {
     return this.tasks.delete(taskId);
+  }
+}
+
+class HangingTaskExecutor implements TaskExecutionBridge {
+  private readonly tasks = new Map<string, CallableAdapterTaskSnapshot>();
+
+  resolveTarget(capabilityId: string) {
+    return { adapterId: "fake.adapter", agentId: "fake-agent", capabilityId };
+  }
+
+  execute(request: CallableAdapterTaskRequest): Promise<CallableAdapterTaskSnapshot> {
+    this.tasks.set(request.taskId, workingSnapshot(request));
+    return new Promise<CallableAdapterTaskSnapshot>(() => undefined);
+  }
+
+  getTask(taskId: string): CallableAdapterTaskSnapshot | null {
+    return structuredClone(this.tasks.get(taskId) ?? null);
+  }
+
+  cancel(taskId: string): boolean {
+    return this.tasks.delete(taskId);
+  }
+}
+
+class RecoveringAuthTaskExecutor implements TaskExecutionBridge {
+  readonly requests: CallableAdapterTaskRequest[] = [];
+  readonly tasks = new Map<string, CallableAdapterTaskSnapshot>();
+  authenticated = false;
+
+  resolveTarget(capabilityId: string) {
+    return { adapterId: "fake.adapter", agentId: "fake-agent", capabilityId };
+  }
+
+  async execute(request: CallableAdapterTaskRequest): Promise<CallableAdapterTaskSnapshot> {
+    this.requests.push(structuredClone(request));
+    const working = workingSnapshot(request);
+    const result: CallableAdapterTaskSnapshot = this.authenticated
+      ? {
+          ...working,
+          state: "completed",
+          updatedAt: new Date().toISOString(),
+          completedAt: new Date().toISOString(),
+          artifact: { kind: "text", text: "safe:authenticated-result" }
+        }
+      : {
+          ...working,
+          state: "failed",
+          updatedAt: new Date().toISOString(),
+          completedAt: new Date().toISOString(),
+          safeErrorCode: "ADAPTER_AUTH_REQUIRED"
+        };
+    this.tasks.set(request.taskId, result);
+    return result;
+  }
+
+  getTask(taskId: string): CallableAdapterTaskSnapshot | null {
+    return structuredClone(this.tasks.get(taskId) ?? null);
+  }
+
+  cancel(taskId: string): boolean {
+    return this.tasks.delete(taskId);
+  }
+}
+
+function workingSnapshot(request: CallableAdapterTaskRequest): CallableAdapterTaskSnapshot {
+  return {
+    schemaVersion: 2,
+    taskId: request.taskId,
+    adapterId: request.adapterId,
+    agentId: request.agentId,
+    capabilityId: request.capabilityId,
+    state: "working",
+    submittedAt: request.createdAt,
+    startedAt: request.createdAt,
+    updatedAt: request.createdAt
+  };
+}
+
+function applicationType(message: ChatmailReceivedMessage): string | undefined {
+  if (!message.text) return undefined;
+  try {
+    return parseApplicationEnvelope(message.text).type;
+  } catch {
+    return undefined;
   }
 }
 

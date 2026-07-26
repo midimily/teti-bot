@@ -104,17 +104,19 @@ export class PeerConnectionController {
     }
   }
 
-  open(): void {
+  open(reason = "open-peer-connections"): void {
     if (this.disposed) return;
     if (this.snapshotValue.open) {
       this.touch();
+      this.onChange();
+      void this.notchWindow.setMode("onboarding", reason).catch(() => undefined);
       return;
     }
     this.snapshotValue.open = true;
     this.resetConnectPanel();
     this.touch();
     this.onChange();
-    void this.notchWindow.setMode("onboarding", "open-peer-connections").catch(() => undefined);
+    void this.notchWindow.setMode("onboarding", reason).catch(() => undefined);
   }
 
   close(reason = "close-peer-connections"): void {

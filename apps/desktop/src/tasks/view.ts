@@ -33,7 +33,7 @@ export function createTaskWorkspace(
 function createTaskHeader(controller: TaskController, snapshot: TaskControllerSnapshot): HTMLElement {
   const header = document.createElement("header");
   header.className = "teti-task-header";
-  const back = iconButton(ArrowLeft, snapshot.screen === "inbox" ? "收起任务" : "返回任务列表", () => controller.back());
+  const back = iconButton(ArrowLeft, snapshot.screen === "inbox" ? "返回留海屏" : "返回任务列表", () => controller.back());
   const title = document.createElement("div");
   title.className = "teti-task-title";
   const heading = document.createElement("strong");
@@ -241,9 +241,13 @@ function createTaskDetail(
     scope.className = "teti-task-scope";
     const executionAgent = localAgentForTask(localPassport, record.request.capabilityId, images.length > 0);
     const scopeTitle = document.createElement("strong");
-    scopeTitle.textContent = executionAgent ? `${executionAgent.name} · 仅允许一次` : "仅允许一次";
+    scopeTitle.textContent = record.state === "auth_required"
+      ? "Agent 登录后 · 再允许一次"
+      : executionAgent ? `${executionAgent.name} · 仅允许一次` : "仅允许一次";
     const scopeDetail = document.createElement("span");
-    scopeDetail.textContent = "只执行本任务；授权时重新校验 Agent，不开放文件、命令或持续权限。";
+    scopeDetail.textContent = record.state === "auth_required"
+      ? "Teti 不保存登录凭据；请先在本机完成 Agent 登录，再重新授权本任务。"
+      : "只执行本任务；授权时重新校验 Agent，不开放文件、命令或持续权限。";
     scope.append(scopeTitle, scopeDetail);
     content.append(scope);
   }
@@ -272,7 +276,11 @@ function createTaskDetail(
   actions.className = "teti-task-actionbar is-detail";
   if (record.direction === "incoming" && record.approval === "pending") {
     const reject = actionButton("拒绝", "secondary", () => void controller.reject());
-    const allow = actionButton("仅允许一次", "primary", () => void controller.approve());
+    const allow = actionButton(
+      record.state === "auth_required" ? "登录后重试一次" : "仅允许一次",
+      "primary",
+      () => void controller.approve()
+    );
     reject.disabled = snapshot.busy;
     allow.disabled = snapshot.busy || record.attachmentsReady === false;
     actions.append(reject, allow);
@@ -418,6 +426,7 @@ function errorText(message: string): HTMLElement {
 
 function taskStatusLabel(task: TaskControllerSnapshot["summary"]["tasks"][number]): string {
   if (task.cancelPending) return "正在取消";
+  if (task.state === "auth_required") return "Agent 需要登录";
   if (task.direction === "incoming" && task.approval === "pending") {
     return task.attachmentsReady ? "等待你确认" : "正在接收图片";
   }
@@ -427,6 +436,7 @@ function taskStatusLabel(task: TaskControllerSnapshot["summary"]["tasks"][number
 
 function detailStatusLabel(record: NonNullable<TaskControllerSnapshot["selectedTask"]>): string {
   if (record.cancelPending) return "正在取消";
+  if (record.state === "auth_required") return "Agent 需要登录";
   if (record.direction === "incoming" && record.approval === "pending") {
     return record.attachmentsReady === false ? "正在接收图片" : "等待你确认";
   }

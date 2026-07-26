@@ -1,4 +1,7 @@
 import {
+  MAX_TETI_APPLICATION_ENVELOPE_BYTES,
+  MAX_TETI_APPLICATION_MESSAGE_ID_BYTES,
+  MAX_TETI_APPLICATION_TIMESTAMP_BYTES,
   TETI_APPLICATION_PROTOCOL_VERSION,
   type TetiApplicationEnvelope,
   type TetiApplicationMessageType
@@ -20,11 +23,15 @@ export class TetiApplicationProtocolError extends Error {}
 export function validateApplicationEnvelope(
   value: unknown
 ): asserts value is TetiApplicationEnvelope {
+  if (encodedSize(value) > MAX_TETI_APPLICATION_ENVELOPE_BYTES) {
+    throw new TetiApplicationProtocolError("Teti application envelope exceeds the allowed size.");
+  }
   if (!isRecord(value)) {
     throw new TetiApplicationProtocolError("Teti application envelope must be an object.");
   }
 
   rejectPrivateFields(value, "Teti application envelope");
+  rejectUnknownKeys(value, ["version", "type", "messageId", "fromTetiId", "createdAt", "payload"], "Teti application envelope");
 
   if (value.version !== TETI_APPLICATION_PROTOCOL_VERSION) {
     throw new TetiApplicationProtocolError("Unsupported Teti application envelope version.");
@@ -34,13 +41,13 @@ export function validateApplicationEnvelope(
     throw new TetiApplicationProtocolError("Teti application envelope type is invalid.");
   }
 
-  requireNonEmptyString(value.messageId, "messageId");
+  requireBoundedString(value.messageId, "messageId", MAX_TETI_APPLICATION_MESSAGE_ID_BYTES);
   if (!isCanonicalTetiPublicId(value.fromTetiId)) {
     throw new TetiApplicationProtocolError(
       "fromTetiId must match teti_ followed by exactly 9 ASCII lowercase letters or numbers."
     );
   }
-  requireNonEmptyString(value.createdAt, "createdAt");
+  requireTimestamp(value.createdAt, "createdAt");
 
   if (!isRecord(value.payload)) {
     throw new TetiApplicationProtocolError("Teti application envelope payload is required.");
@@ -72,22 +79,28 @@ export function rejectPrivateFields(value: Record<string, unknown>, label: strin
 
 function validatePayload(type: TetiApplicationMessageType, payload: Record<string, unknown>): void {
   if (type === "teti.profile.sync") {
+    rejectUnknownKeys(payload, ["displayName", "platform", "aiEnvironment"], "Profile sync payload");
     if ("displayName" in payload && payload.displayName !== undefined && typeof payload.displayName !== "string") {
       throw new TetiApplicationProtocolError("Profile sync displayName must be a string.");
     }
-    requireNonEmptyString(payload.platform, "platform");
-    requireStringArray(payload.aiEnvironment, "aiEnvironment");
+    if (typeof payload.displayName === "string" && utf8Size(payload.displayName) > 256) {
+      throw new TetiApplicationProtocolError("Profile sync displayName is too large.");
+    }
+    requireBoundedString(payload.platform, "platform", 64);
+    requireStringArray(payload.aiEnvironment, "aiEnvironment", 64, 128);
     return;
   }
 
   if (type === "teti.capability.offer") {
-    requireStringArray(payload.capabilities, "capabilities");
+    rejectUnknownKeys(payload, ["capabilities"], "Capability offer payload");
+    requireStringArray(payload.capabilities, "capabilities", 64, 128);
     return;
   }
 
   if (type === "teti.presence") {
-    requireNonEmptyString(payload.status, "status");
-    requireNonEmptyString(payload.timestamp, "timestamp");
+    rejectUnknownKeys(payload, ["status", "timestamp", "taskProtocolVersions"], "Presence payload");
+    requireBoundedString(payload.status, "status", 64);
+    requireTimestamp(payload.timestamp, "timestamp");
     if (payload.taskProtocolVersions !== undefined) {
       try {
         validateTaskProtocolVersions(payload.taskProtocolVersions);
@@ -135,20 +148,55 @@ function validatePayload(type: TetiApplicationMessageType, payload: Record<strin
   }
 }
 
-function requireStringArray(value: unknown, fieldName: string): void {
-  if (!Array.isArray(value) || value.length === 0) {
+function requireStringArray(
+  value: unknown,
+  fieldName: string,
+  maximumItems: number,
+  maximumItemBytes: number
+): void {
+  if (!Array.isArray(value) || value.length === 0 || value.length > maximumItems) {
     throw new TetiApplicationProtocolError(`${fieldName} must be a non-empty string array.`);
   }
 
-  if (value.some((item) => typeof item !== "string" || !item.trim())) {
+  if (value.some((item) => typeof item !== "string" || !item.trim() || utf8Size(item) > maximumItemBytes)) {
     throw new TetiApplicationProtocolError(`${fieldName} must contain only non-empty strings.`);
   }
 }
 
-function requireNonEmptyString(value: unknown, fieldName: string): void {
-  if (typeof value !== "string" || !value.trim()) {
+function requireBoundedString(value: unknown, fieldName: string, maximumBytes: number): void {
+  if (typeof value !== "string" || !value.trim() || utf8Size(value) > maximumBytes) {
     throw new TetiApplicationProtocolError(`${fieldName} is required.`);
   }
+}
+
+function requireTimestamp(value: unknown, fieldName: string): void {
+  requireBoundedString(value, fieldName, MAX_TETI_APPLICATION_TIMESTAMP_BYTES);
+  if (!Number.isFinite(Date.parse(value as string))) {
+    throw new TetiApplicationProtocolError(`${fieldName} must be a valid timestamp.`);
+  }
+}
+
+function rejectUnknownKeys(
+  value: Record<string, unknown>,
+  allowed: readonly string[],
+  label: string
+): void {
+  if (Object.keys(value).some((key) => !allowed.includes(key))) {
+    throw new TetiApplicationProtocolError(`${label} contains an unsupported field.`);
+  }
+}
+
+function encodedSize(value: unknown): number {
+  try {
+    const encoded = JSON.stringify(value);
+    return typeof encoded === "string" ? utf8Size(encoded) : 0;
+  } catch {
+    throw new TetiApplicationProtocolError("Teti application envelope is not serializable.");
+  }
+}
+
+function utf8Size(value: string): number {
+  return new TextEncoder().encode(value).byteLength;
 }
 
 function isSupportedApplicationType(value: string): value is TetiApplicationMessageType {

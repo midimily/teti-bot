@@ -9,6 +9,9 @@ import type {
 } from "../task/transport.ts";
 
 export const TETI_APPLICATION_PROTOCOL_VERSION = 1;
+export const MAX_TETI_APPLICATION_ENVELOPE_BYTES = 128 * 1024;
+export const MAX_TETI_APPLICATION_MESSAGE_ID_BYTES = 128;
+export const MAX_TETI_APPLICATION_TIMESTAMP_BYTES = 64;
 
 export type TetiApplicationMessageType =
   | "teti.profile.sync"

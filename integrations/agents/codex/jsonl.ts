@@ -11,6 +11,7 @@ export const CODEX_JSONL_LIMITS = {
 
 export interface CodexJsonlSummary {
   terminalState: "completed" | "failed" | "error" | "missing";
+  failureKind: "auth" | "upstream" | null;
   finalMessage: string | null;
   eventCount: number;
   threadStarted: boolean;
@@ -31,6 +32,7 @@ export function parseCodexJsonl(stdout: string): CodexJsonlSummary {
   let threadStarted = false;
   let turnStarted = false;
   let terminalState: CodexJsonlSummary["terminalState"] = "missing";
+  let failureKind: CodexJsonlSummary["failureKind"] = null;
   let finalMessage: string | null = null;
 
   for (const line of lines) {
@@ -90,10 +92,12 @@ export function parseCodexJsonl(stdout: string): CodexJsonlSummary {
 
       case "turn.failed":
         terminalState = "failed";
+        failureKind = isAuthenticationFailure(collectFailureText(event)) ? "auth" : "upstream";
         break;
 
       case "error":
         terminalState = "error";
+        failureKind = isAuthenticationFailure(collectFailureText(event)) ? "auth" : "upstream";
         break;
 
       default:
@@ -104,6 +108,7 @@ export function parseCodexJsonl(stdout: string): CodexJsonlSummary {
 
   return {
     terminalState,
+    failureKind,
     finalMessage,
     eventCount: lines.length,
     threadStarted,
@@ -115,7 +120,7 @@ export function decodeCodexArtifact(stdout: string): string {
   const summary = parseCodexJsonl(stdout);
   if (summary.terminalState === "failed" || summary.terminalState === "error") {
     throw new CallableAdapterOutputError(
-      "ADAPTER_UPSTREAM_FAILED",
+      summary.failureKind === "auth" ? "ADAPTER_AUTH_REQUIRED" : "ADAPTER_UPSTREAM_FAILED",
       "Codex reported a failed turn."
     );
   }
@@ -129,11 +134,24 @@ export function classifyCodexFailure(stdout: string): CallableAdapterSafeErrorCo
   try {
     const summary = parseCodexJsonl(stdout);
     return summary.terminalState === "failed" || summary.terminalState === "error"
-      ? "ADAPTER_UPSTREAM_FAILED"
+      ? summary.failureKind === "auth" ? "ADAPTER_AUTH_REQUIRED" : "ADAPTER_UPSTREAM_FAILED"
       : "ADAPTER_EXIT_NONZERO";
   } catch {
     return "ADAPTER_EXIT_NONZERO";
   }
+}
+
+function collectFailureText(event: Record<string, unknown>): string {
+  const values: string[] = [];
+  if (typeof event.message === "string") values.push(event.message);
+  const error = record(event.error);
+  if (typeof error?.message === "string") values.push(error.message);
+  return values.join("\n").slice(0, 8 * 1024);
+}
+
+function isAuthenticationFailure(value: string): boolean {
+  return /(?:authentication|login|sign[ -]?in).{0,32}(?:required|needed)|not (?:authenticated|logged in)|unauthori[sz]ed|token.{0,24}(?:expired|invalid)/i
+    .test(value);
 }
 
 function record(value: unknown): Record<string, unknown> | null {
