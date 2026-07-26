@@ -67,7 +67,9 @@ export class RealChatmailAdapter implements ChatmailAdapter {
   }
 
   async sendMessage(input: SendChatmailMessageInput): Promise<ChatmailSentMessage> {
-    return this.rpc.sendTextMessage(input);
+    if (!input.attachment) return this.rpc.sendTextMessage(input);
+    if (!this.rpc.sendFileMessage) throw new Error("Chatmail file messages are unavailable.");
+    return this.rpc.sendFileMessage({ ...input, attachment: input.attachment });
   }
 
   async waitForDelivery(input: WaitForChatmailDeliveryInput) {
@@ -98,6 +100,17 @@ export class RealChatmailAdapter implements ChatmailAdapter {
     input: ReceiveChatmailMessagesInput
   ): Promise<ChatmailReceivedMessage[]> {
     return this.rpc.receiveMessages(input);
+  }
+
+  async downloadMessageAttachment(
+    accountId: number,
+    messageId: number
+  ): Promise<ChatmailReceivedMessage> {
+    if (!this.rpc.downloadFullMessage || !this.rpc.getReceivedMessage) {
+      throw new Error("Chatmail attachment download is unavailable.");
+    }
+    await this.rpc.downloadFullMessage(accountId, messageId);
+    return this.rpc.getReceivedMessage(accountId, messageId);
   }
 
   async deleteAccount(input: DeleteChatmailAccountInput): Promise<void> {

@@ -1,0 +1,277 @@
+import { isCanonicalTetiPublicId } from "../identity/public-id.ts";
+import {
+  MAX_TASK_PROTOCOL_VERSIONS,
+  TETI_TASK_TRANSPORT_SCHEMA_VERSION,
+  TETI_SUPPORTED_TASK_PROTOCOL_VERSIONS,
+  type TetiTaskProtocolVersion,
+  type TetiTaskArtifactPayload,
+  type TetiTaskAttachmentPayload,
+  type TetiTaskCancelPayload,
+  type TetiTaskReceiptPayload,
+  type TetiTaskStatusPayload
+} from "./transport.ts";
+import type { CollaborationTaskRequest, TaskImagePart, TaskTextPart } from "./types.ts";
+import { validateTaskArtifact, validateTaskImagePart } from "./validation.ts";
+
+const SAFE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const RECEIPT_STATUSES = ["received", "duplicate", "expired", "conflict", "rejected"] as const;
+const TASK_UPDATE_STATES = [
+  "working",
+  "input_required",
+  "auth_required",
+  "completed",
+  "failed",
+  "canceled",
+  "rejected"
+] as const;
+
+export class TaskTransportContractError extends Error {}
+
+export function validateTaskReceiptPayload(
+  value: unknown
+): asserts value is TetiTaskReceiptPayload {
+  const receipt = exactRecord(value, [
+    "schemaVersion",
+    "taskId",
+    "requesterTetiId",
+    "targetTetiId",
+    "status",
+    "receivedAt",
+    "supportedTaskVersions"
+  ], "Task receipt");
+  if (receipt.schemaVersion !== TETI_TASK_TRANSPORT_SCHEMA_VERSION) {
+    throw new TaskTransportContractError("Unsupported Task receipt schema version.");
+  }
+  safeId(receipt.taskId, "taskId");
+  canonicalTetiId(receipt.requesterTetiId, "requesterTetiId");
+  canonicalTetiId(receipt.targetTetiId, "targetTetiId");
+  if (receipt.requesterTetiId === receipt.targetTetiId) {
+    throw new TaskTransportContractError("Task requester and target must be different Tetis.");
+  }
+  if (typeof receipt.status !== "string" || !RECEIPT_STATUSES.includes(
+    receipt.status as (typeof RECEIPT_STATUSES)[number]
+  )) {
+    throw new TaskTransportContractError("Task receipt status is invalid.");
+  }
+  timestamp(receipt.receivedAt, "receivedAt");
+  validateTaskProtocolVersions(receipt.supportedTaskVersions);
+}
+
+export function validateTaskProtocolVersions(value: unknown): asserts value is number[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > MAX_TASK_PROTOCOL_VERSIONS) {
+    throw new TaskTransportContractError("Task protocol versions are invalid.");
+  }
+  const seen = new Set<number>();
+  for (const version of value) {
+    if (!Number.isSafeInteger(version) || version < 1 || version > 255 || seen.has(version)) {
+      throw new TaskTransportContractError("Task protocol versions are invalid.");
+    }
+    seen.add(version);
+  }
+}
+
+export function validateTaskAttachmentPayload(
+  value: unknown
+): asserts value is TetiTaskAttachmentPayload {
+  const payload = exactOptionalRecord(value, [
+    "schemaVersion",
+    "taskId",
+    "requesterTetiId",
+    "targetTetiId",
+    "purpose",
+    "part",
+    "createdAt",
+    "expiresAt"
+  ], ["artifactId"], "Task attachment");
+  if (payload.schemaVersion !== 1) throw new TaskTransportContractError("Unsupported Task attachment version.");
+  taskIdentity(payload);
+  if (payload.purpose !== "input" && payload.purpose !== "artifact") {
+    throw new TaskTransportContractError("Task attachment purpose is invalid.");
+  }
+  if (payload.purpose === "artifact") safeId(payload.artifactId, "artifactId");
+  if (payload.purpose === "input" && payload.artifactId !== undefined) {
+    throw new TaskTransportContractError("Task input attachment cannot name an Artifact.");
+  }
+  validateTaskImagePart(payload.part);
+  const createdAt = timestamp(payload.createdAt, "createdAt");
+  const expiresAt = timestamp(payload.expiresAt, "expiresAt");
+  if (expiresAt <= createdAt) throw new TaskTransportContractError("Task attachment expiry is invalid.");
+}
+
+export function validateTaskStatusPayload(
+  value: unknown
+): asserts value is TetiTaskStatusPayload {
+  const payload = exactOptionalRecord(value, [
+    "schemaVersion",
+    "taskId",
+    "requesterTetiId",
+    "targetTetiId",
+    "revision",
+    "state",
+    "updatedAt"
+  ], ["safeErrorCode"], "Task status");
+  if (payload.schemaVersion !== 1) throw new TaskTransportContractError("Unsupported Task status version.");
+  taskIdentity(payload);
+  if (!Number.isSafeInteger(payload.revision) || Number(payload.revision) <= 0) {
+    throw new TaskTransportContractError("Task status revision is invalid.");
+  }
+  if (typeof payload.state !== "string"
+    || !TASK_UPDATE_STATES.includes(payload.state as (typeof TASK_UPDATE_STATES)[number])) {
+    throw new TaskTransportContractError("Task status state is invalid.");
+  }
+  timestamp(payload.updatedAt, "updatedAt");
+  if (payload.safeErrorCode !== undefined
+    && (typeof payload.safeErrorCode !== "string" || !/^[A-Z0-9_]{1,64}$/.test(payload.safeErrorCode))) {
+    throw new TaskTransportContractError("Task status safe error code is invalid.");
+  }
+}
+
+export function validateTaskCancelPayload(
+  value: unknown
+): asserts value is TetiTaskCancelPayload {
+  const payload = exactRecord(value, [
+    "schemaVersion",
+    "taskId",
+    "requesterTetiId",
+    "targetTetiId",
+    "requestedAt"
+  ], "Task cancel");
+  if (payload.schemaVersion !== 1) throw new TaskTransportContractError("Unsupported Task cancel version.");
+  taskIdentity(payload);
+  timestamp(payload.requestedAt, "requestedAt");
+}
+
+export function validateTaskArtifactPayload(
+  value: unknown
+): asserts value is TetiTaskArtifactPayload {
+  const payload = exactRecord(value, [
+    "schemaVersion",
+    "taskId",
+    "requesterTetiId",
+    "targetTetiId",
+    "artifact",
+    "createdAt"
+  ], "Task Artifact payload");
+  if (payload.schemaVersion !== 1) throw new TaskTransportContractError("Unsupported Task Artifact payload version.");
+  taskIdentity(payload);
+  validateTaskArtifact(payload.artifact);
+  if ((payload.artifact as { taskId: string }).taskId !== payload.taskId) {
+    throw new TaskTransportContractError("Task Artifact identity is invalid.");
+  }
+  timestamp(payload.createdAt, "createdAt");
+}
+
+/**
+ * Unknown peers receive the compatibility floor so a currently-offline current
+ * peer can still receive its first Task. Once a peer has advertised versions,
+ * no common version is a hard failure instead of a speculative send.
+ */
+export function selectTaskProtocolVersion(
+  remoteVersions?: readonly number[]
+): TetiTaskProtocolVersion | null {
+  if (!remoteVersions) return TETI_SUPPORTED_TASK_PROTOCOL_VERSIONS[0];
+  const supported = [...TETI_SUPPORTED_TASK_PROTOCOL_VERSIONS]
+    .sort((left, right) => right - left)
+    .find((version) => remoteVersions.includes(version));
+  return supported ?? null;
+}
+
+export function canonicalTaskRequestJson(value: CollaborationTaskRequest): string {
+  return JSON.stringify({
+    schemaVersion: value.schemaVersion,
+    taskId: value.taskId,
+    requesterTetiId: value.requesterTetiId,
+    targetTetiId: value.targetTetiId,
+    offerId: value.offerId,
+    capabilityId: value.capabilityId,
+    input: canonicalInput(value.input),
+    createdAt: value.createdAt,
+    expiresAt: value.expiresAt
+  });
+}
+
+function canonicalInput(input: CollaborationTaskRequest["input"]): unknown {
+  if (input.kind === "text") return { kind: "text", text: input.text };
+  return {
+    kind: "parts",
+    parts: input.parts.map((part) => part.kind === "text"
+      ? canonicalTextPart(part)
+      : canonicalImagePart(part))
+  };
+}
+
+function canonicalTextPart(part: TaskTextPart): unknown {
+  return { kind: "text", text: part.text };
+}
+
+function canonicalImagePart(part: TaskImagePart): unknown {
+  return {
+    kind: "image",
+    attachmentId: part.attachmentId,
+    mimeType: part.mimeType,
+    byteLength: part.byteLength,
+    width: part.width,
+    height: part.height,
+    sha256: part.sha256
+  };
+}
+
+function exactRecord(value: unknown, keys: readonly string[], label: string): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new TaskTransportContractError(`${label} must be an object.`);
+  }
+  const record = value as Record<string, unknown>;
+  const extra = Object.keys(record).find((key) => !keys.includes(key));
+  const missing = keys.find((key) => !(key in record));
+  if (extra) throw new TaskTransportContractError(`${label} contains an unsupported field.`);
+  if (missing) throw new TaskTransportContractError(`${label} is missing a required field.`);
+  return record;
+}
+
+function exactOptionalRecord(
+  value: unknown,
+  required: readonly string[],
+  optional: readonly string[],
+  label: string
+): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new TaskTransportContractError(`${label} must be an object.`);
+  }
+  const record = value as Record<string, unknown>;
+  const allowed = [...required, ...optional];
+  const extra = Object.keys(record).find((key) => !allowed.includes(key));
+  const missing = required.find((key) => !(key in record));
+  if (extra) throw new TaskTransportContractError(`${label} contains an unsupported field.`);
+  if (missing) throw new TaskTransportContractError(`${label} is missing a required field.`);
+  return record;
+}
+
+function taskIdentity(value: Record<string, unknown>): void {
+  safeId(value.taskId, "taskId");
+  canonicalTetiId(value.requesterTetiId, "requesterTetiId");
+  canonicalTetiId(value.targetTetiId, "targetTetiId");
+  if (value.requesterTetiId === value.targetTetiId) {
+    throw new TaskTransportContractError("Task requester and target must be different Tetis.");
+  }
+}
+
+function canonicalTetiId(value: unknown, label: string): asserts value is string {
+  if (!isCanonicalTetiPublicId(value)) {
+    throw new TaskTransportContractError(`${label} must be a canonical lowercase Teti ID.`);
+  }
+}
+
+function safeId(value: unknown, label: string): asserts value is string {
+  if (typeof value !== "string" || !SAFE_ID_PATTERN.test(value)) {
+    throw new TaskTransportContractError(`${label} is invalid.`);
+  }
+}
+
+function timestamp(value: unknown, label: string): number {
+  if (typeof value !== "string" || !value.trim()) {
+    throw new TaskTransportContractError(`${label} is required.`);
+  }
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed)) throw new TaskTransportContractError(`${label} is invalid.`);
+  return parsed;
+}

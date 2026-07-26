@@ -2,7 +2,7 @@ import type { NotchWindowController, NotchWindowGeometry } from "../first-launch
 import type { FirstLaunchViewModel } from "../first-launch/view-model.ts";
 import type { TauriInvoker } from "./tauri-api.ts";
 
-export type IslandVisualMode = "hidden" | "idle" | "onboarding" | "processing" | "error" | "ready";
+export type IslandVisualMode = "hidden" | "idle" | "onboarding" | "processing" | "error" | "ready" | "task";
 
 export class TauriNotchWindowController implements NotchWindowController {
   private readonly tauri: TauriInvoker;

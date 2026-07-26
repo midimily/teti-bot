@@ -25,7 +25,8 @@ pub fn run() {
             window::position_island,
             window::show_island,
             window::hide_island,
-            window::current_monitor_info
+            window::current_monitor_info,
+            pick_task_images
         ])
         .build(tauri::generate_context!())
         .expect("failed to build Teti Desktop");
@@ -44,4 +45,19 @@ pub fn run() {
             let _ = handle.emit("teti://dock-activate", ());
         }
     });
+}
+
+#[tauri::command]
+async fn pick_task_images() -> Result<Vec<String>, String> {
+    let files = rfd::AsyncFileDialog::new()
+        .set_title("选择任务图片")
+        .add_filter("Images", &["png", "jpg", "jpeg"])
+        .pick_files()
+        .await;
+    Ok(files
+        .unwrap_or_default()
+        .into_iter()
+        .take(4)
+        .map(|file| file.path().to_string_lossy().into_owned())
+        .collect())
 }

@@ -9,6 +9,8 @@ import {
   TETI_CAPABILITY_PASSPORT_SCHEMA_VERSION,
   type PassportSharingPolicy
 } from "../../../../../core/passport/types.ts";
+import type { CallableAgent } from "../../../../../core/callability/types.ts";
+import { projectCallablePassport } from "../../../../../core/passport/callable-projection.ts";
 import type { CodexUsageState } from "../../../src/codex-usage/types.ts";
 import type { PeerConnectionDto } from "../../../src/lifecycle-bridge/protocol.ts";
 import { mapAccountIdentity, mapCodexUsageResource, mapPeerConnection } from "./mappers.ts";
@@ -17,6 +19,7 @@ export interface RuntimePassportSources {
   loadAccount(): Promise<TetiAccount | null>;
   getConnections(): readonly PeerConnectionDto[];
   getCodexUsage(): CodexUsageState;
+  getCallableAgents?(): readonly CallableAgent[];
   getRegistry(): RegistryStatus;
   getSharing(): Promise<PassportSharingPolicy>;
 }
@@ -41,10 +44,12 @@ export class RuntimePassportService {
       this.sources.loadAccount(),
       this.sources.getSharing().catch(() => ({ ...DEFAULT_PASSPORT_SHARING_POLICY }))
     ]);
+    const callable = projectCallablePassport(this.sources.getCallableAgents?.() ?? []);
     const content = {
       identity: mapAccountIdentity(account),
       registry: this.sources.getRegistry(),
       resources: [mapCodexUsageResource(this.sources.getCodexUsage(), this.fallbackObservedAt)],
+      callable,
       connections: this.sources.getConnections().map((connection) => mapPeerConnection(connection, now)),
       sharing
     };
@@ -62,9 +67,9 @@ export class RuntimePassportService {
         schemaVersion: TETI_CAPABILITY_PASSPORT_SCHEMA_VERSION,
         generatedAt,
         resources: content.resources,
-        agents: [],
-        capabilities: [],
-        bindings: []
+        agents: content.callable.agents,
+        capabilities: content.callable.capabilities,
+        bindings: content.callable.bindings
       },
       connections: content.connections,
       sharing: content.sharing

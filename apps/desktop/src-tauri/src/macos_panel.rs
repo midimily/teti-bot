@@ -123,7 +123,10 @@ fn resize_and_pin_on_main(app: &AppHandle, mode: IslandMode) -> Result<(), Strin
     // has already switched to the idle face, so keep the panel resize deterministic.
     panel.setFrame_display_animate(target, true, false);
     panel.setHasShadow(!matches!(mode, IslandMode::Hidden | IslandMode::Idle));
-    let accepts_input = matches!(mode, IslandMode::Onboarding | IslandMode::Error);
+    let accepts_input = matches!(
+        mode,
+        IslandMode::Onboarding | IslandMode::Error | IslandMode::Task
+    );
     panel.setBecomesKeyOnlyIfNeeded(!accepts_input);
     apply_content_clip(
         panel,
@@ -211,7 +214,7 @@ fn panel_height(mode: IslandMode, base_height: f64, safe_top: f64, has_notch: bo
     if has_notch
         && matches!(
             mode,
-            IslandMode::Onboarding | IslandMode::Processing | IslandMode::Error
+            IslandMode::Onboarding | IslandMode::Processing | IslandMode::Error | IslandMode::Task
         )
     {
         return base_height;
@@ -300,6 +303,7 @@ const fn mode_code(mode: IslandMode) -> u8 {
         IslandMode::Processing => 3,
         IslandMode::Error => 4,
         IslandMode::Ready => 5,
+        IslandMode::Task => 6,
     }
 }
 
@@ -310,6 +314,7 @@ const fn mode_from_code(code: u8) -> IslandMode {
         3 => IslandMode::Processing,
         4 => IslandMode::Error,
         5 => IslandMode::Ready,
+        6 => IslandMode::Task,
         _ => IslandMode::Idle,
     }
 }

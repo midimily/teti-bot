@@ -21,6 +21,7 @@ use std::os::unix::process::CommandExt;
 
 const PROTOCOL_VERSION: u8 = 1;
 const MAX_LINE_BYTES: usize = 64 * 1024;
+const MAX_RESPONSE_LINE_BYTES: usize = 128 * 1024;
 const MAX_LOG_BYTES: u64 = 1024 * 1024;
 const SIDECAR_GRACEFUL_SHUTDOWN: Duration = Duration::from_millis(3_000);
 const SIDECAR_TERMINATE_GRACE: Duration = Duration::from_millis(500);
@@ -535,7 +536,7 @@ fn fail_pending_responses(pending: &PendingResponses) {
 fn parse_sidecar_response_line(
     line: &str,
 ) -> Result<LifecycleCommandResponse, LifecycleCommandError> {
-    if line.len() > MAX_LINE_BYTES {
+    if line.len() > MAX_RESPONSE_LINE_BYTES {
         return Err(bridge_error(
             "OVERSIZED_REQUEST",
             "Lifecycle response is too large.",
@@ -622,12 +623,17 @@ pub fn timeout_for_method(method: &str) -> Duration {
         "lifecycle.health" => 2_000,
         "passport.get" => 2_000,
         "passport.sharing.set" => 5_000,
+        "agent.observation.get" => 2_000,
+        "agent.observation.scan" | "agent.observation.override.set" => 10_000,
         "account.status" | "account.load" => 5_000,
         "account.create" => 120_000,
         "discovery.register" | "discovery.retry" => 15_000,
         "discovery.heartbeat" => 30_000,
         "connection.resolve" => 15_000,
         "connection.request" | "connection.accept" | "connection.reject" => 30_000,
+        "task.send" => 30_000,
+        "task.list" | "task.summary" | "task.get" | "task.attachment.resolve" => 2_000,
+        "task.attachment.stage" | "task.approve" | "task.reject" | "task.cancel" => 10_000,
         _ => 5_000,
     })
 }
@@ -646,8 +652,20 @@ fn is_allowed_method(method: &str) -> bool {
             | "connection.request"
             | "connection.accept"
             | "connection.reject"
+            | "task.send"
+            | "task.list"
+            | "task.summary"
+            | "task.get"
+            | "task.attachment.stage"
+            | "task.attachment.resolve"
+            | "task.approve"
+            | "task.reject"
+            | "task.cancel"
             | "passport.get"
             | "passport.sharing.set"
+            | "agent.observation.get"
+            | "agent.observation.scan"
+            | "agent.observation.override.set"
     )
 }
 
@@ -733,6 +751,11 @@ mod tests {
     fn timeout_values_are_method_specific() {
         assert!(is_allowed_method("discovery.heartbeat"));
         assert!(is_allowed_method("passport.get"));
+        assert!(is_allowed_method("agent.observation.get"));
+        assert!(is_allowed_method("task.send"));
+        assert!(is_allowed_method("task.list"));
+        assert!(is_allowed_method("task.approve"));
+        assert!(is_allowed_method("task.attachment.stage"));
         assert!(!is_allowed_method("usage.get"));
         assert_eq!(
             timeout_for_method("lifecycle.health"),
@@ -754,10 +777,29 @@ mod tests {
             timeout_for_method("discovery.heartbeat"),
             Duration::from_millis(30_000)
         );
-        assert_eq!(timeout_for_method("passport.get"), Duration::from_millis(2_000));
+        assert_eq!(
+            timeout_for_method("passport.get"),
+            Duration::from_millis(2_000)
+        );
         assert_eq!(
             timeout_for_method("passport.sharing.set"),
             Duration::from_millis(5_000)
+        );
+        assert_eq!(
+            timeout_for_method("agent.observation.scan"),
+            Duration::from_millis(10_000)
+        );
+        assert_eq!(
+            timeout_for_method("task.send"),
+            Duration::from_millis(30_000)
+        );
+        assert_eq!(
+            timeout_for_method("task.list"),
+            Duration::from_millis(2_000)
+        );
+        assert_eq!(
+            timeout_for_method("task.approve"),
+            Duration::from_millis(10_000)
         );
     }
 
@@ -812,8 +854,8 @@ mod tests {
 
     #[test]
     fn parse_response_rejects_oversized_output() {
-        let error =
-            parse_sidecar_response("expected", &"x".repeat(MAX_LINE_BYTES + 1)).unwrap_err();
+        let error = parse_sidecar_response("expected", &"x".repeat(MAX_RESPONSE_LINE_BYTES + 1))
+            .unwrap_err();
 
         assert_eq!(error.code, "OVERSIZED_REQUEST");
         assert!(!error.recoverable);

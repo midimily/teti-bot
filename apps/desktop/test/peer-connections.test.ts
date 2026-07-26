@@ -396,7 +396,7 @@ function confirmedConnection(requestId: string): PassportConnectionSnapshot {
     createdAt: "2026-07-17T00:00:00.000Z",
     updatedAt: "2026-07-17T00:00:01.000Z",
     lastSeen: null,
-    passport: { state: "unknown", resources: [] }
+    passport: { state: "unknown", resources: [], agents: [] }
   };
 }
 

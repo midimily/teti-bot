@@ -23,8 +23,16 @@ import {
 import { TetiApplicationProtocolError } from "../protocol/validator.ts";
 import { RealChatmailAdapter } from "../../integrations/chatmail/real-adapter.ts";
 import { UnconfiguredChatmailRpcClient } from "../../integrations/chatmail/rpc-client.ts";
-import type { ChatmailAdapter } from "../../integrations/chatmail/types.ts";
+import type { ChatmailAdapter, ChatmailFileAttachment } from "../../integrations/chatmail/types.ts";
 import type { AiStatusSyncPayload } from "../ai-status/types.ts";
+import type { CollaborationTaskRequest } from "../task/types.ts";
+import type {
+  TetiTaskArtifactPayload,
+  TetiTaskAttachmentPayload,
+  TetiTaskCancelPayload,
+  TetiTaskReceiptPayload,
+  TetiTaskStatusPayload
+} from "../task/transport.ts";
 import {
   handleApplicationEnvelope,
   type TetiApplicationHandlerResult
@@ -49,6 +57,7 @@ export interface SendApplicationEnvelopeInput<TPayload> {
   connectionRequestId: string;
   type: TetiApplicationEnvelope<TPayload>["type"];
   payload: TPayload;
+  attachment?: ChatmailFileAttachment;
 }
 
 export interface SentApplicationEnvelope {
@@ -126,6 +135,62 @@ export class TetiApplicationManager {
     });
   }
 
+  async sendTaskRequest(
+    connectionRequestId: string,
+    payload: CollaborationTaskRequest
+  ): Promise<SentApplicationEnvelope> {
+    return this.sendApplicationEnvelope({
+      connectionRequestId,
+      type: "teti.task.request",
+      payload
+    });
+  }
+
+  async sendTaskReceipt(
+    connectionRequestId: string,
+    payload: TetiTaskReceiptPayload
+  ): Promise<SentApplicationEnvelope> {
+    return this.sendApplicationEnvelope({
+      connectionRequestId,
+      type: "teti.task.receipt",
+      payload
+    });
+  }
+
+  async sendTaskAttachment(
+    connectionRequestId: string,
+    payload: TetiTaskAttachmentPayload,
+    attachment: ChatmailFileAttachment
+  ): Promise<SentApplicationEnvelope> {
+    return this.sendApplicationEnvelope({
+      connectionRequestId,
+      type: "teti.task.attachment",
+      payload,
+      attachment
+    });
+  }
+
+  async sendTaskStatus(
+    connectionRequestId: string,
+    payload: TetiTaskStatusPayload
+  ): Promise<SentApplicationEnvelope> {
+    return this.sendApplicationEnvelope({ connectionRequestId, type: "teti.task.status", payload });
+  }
+
+  async sendTaskCancel(
+    connectionRequestId: string,
+    payload: TetiTaskCancelPayload
+  ): Promise<SentApplicationEnvelope> {
+    return this.sendApplicationEnvelope({ connectionRequestId, type: "teti.task.cancel", payload });
+  }
+
+  async sendTaskArtifact(
+    connectionRequestId: string,
+    payload: TetiTaskArtifactPayload
+  ): Promise<SentApplicationEnvelope> {
+    return this.sendApplicationEnvelope({ connectionRequestId, type: "teti.task.artifact", payload });
+  }
+
   async sendApplicationEnvelope<TPayload>(
     input: SendApplicationEnvelopeInput<TPayload>
   ): Promise<SentApplicationEnvelope> {
@@ -141,7 +206,8 @@ export class TetiApplicationManager {
     const sent = await this.chatmailAdapter.sendMessage({
       accountId: account.chatmailAccountId,
       peerAddress: connection.remoteAddress,
-      text: serializeApplicationEnvelope(envelope)
+      text: serializeApplicationEnvelope(envelope),
+      ...(input.attachment ? { attachment: input.attachment } : {})
     });
 
     return {

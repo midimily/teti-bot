@@ -3,6 +3,10 @@ import test from "node:test";
 import type { RuntimePassportSnapshot } from "../../../core/passport/snapshot.ts";
 import type { PassportSharingPolicy } from "../../../core/passport/types.ts";
 import {
+  emptyAgentManagementSnapshot,
+  type AgentManagementSnapshot
+} from "../../../core/observation/management.ts";
+import {
   PassportController,
   emptyPassportSnapshot,
   type PassportClient
@@ -40,6 +44,8 @@ test("Passport sharing updates optimistically and rolls back on persistence fail
   await controller.setResourceSharing(true);
   assert.equal(controller.snapshot.passport.sharing.resourceSummary, true);
   assert.equal(controller.snapshot.passport.sharing.resourceQuota, true);
+  assert.equal(controller.snapshot.passport.sharing.agents, true);
+  assert.equal(controller.snapshot.passport.sharing.capabilities, true);
 
   client.failSet = true;
   await controller.setResourceSharing(false);
@@ -89,10 +95,26 @@ test("Passport controller owns toolbar panel state independently of data refresh
   assert.equal(controller.snapshot.openPanel, null);
 });
 
+test("Agent management supports explicit rescan and local path override", async () => {
+  const client = new FakePassportClient();
+  const controller = new PassportController({ client, onChange: () => undefined });
+
+  await controller.rescanAgents();
+  assert.equal(controller.snapshot.agentManagement.state, "ready");
+  await controller.setAgentPathOverride("codex", " /opt/homebrew/bin/codex ");
+  assert.equal(
+    controller.snapshot.agentManagement.pathOverrides.codex,
+    "/opt/homebrew/bin/codex"
+  );
+  await controller.setAgentPathOverride("codex", "");
+  assert.equal(controller.snapshot.agentManagement.pathOverrides.codex, undefined);
+});
+
 class FakePassportClient implements PassportClient {
   getCalls = 0;
   failSet = false;
   snapshot = emptyPassportSnapshot(new Date("2026-07-22T00:00:00.000Z"));
+  agents = emptyAgentManagementSnapshot(new Date("2026-07-22T00:00:00.000Z"));
 
   async getSnapshot(): Promise<RuntimePassportSnapshot> {
     this.getCalls += 1;
@@ -105,6 +127,22 @@ class FakePassportClient implements PassportClient {
     this.snapshot.revision += 1;
     return structuredClone(this.snapshot);
   }
+
+  async getAgentManagement(): Promise<AgentManagementSnapshot> {
+    return structuredClone(this.agents);
+  }
+
+  async rescanAgents(): Promise<AgentManagementSnapshot> {
+    this.agents.revision += 1;
+    this.agents.state = "ready";
+    return structuredClone(this.agents);
+  }
+
+  async setAgentPathOverride(agentId: string, path: string | null): Promise<AgentManagementSnapshot> {
+    if (path) this.agents.pathOverrides[agentId] = path;
+    else delete this.agents.pathOverrides[agentId];
+    return structuredClone(this.agents);
+  }
 }
 
 function policy(enabled: boolean): PassportSharingPolicy {
@@ -113,7 +151,7 @@ function policy(enabled: boolean): PassportSharingPolicy {
     audience: "confirmed_peers",
     resourceSummary: enabled,
     resourceQuota: enabled,
-    agents: false,
+    agents: enabled,
     capabilities: false
   };
 }

@@ -16,6 +16,7 @@ import {
   UnconfiguredChatmailRpcClient,
   type JsonRpcConnection,
   type JsonRpcRequest,
+  type JsonRpcRequestOptions,
   type JsonRpcResponse
 } from "./rpc-client.ts";
 import type {
@@ -507,6 +508,85 @@ test("JSON-RPC client sends text using existing contact when present", async () 
   ]);
 });
 
+test("JSON-RPC client sends a file through the installed misc_send_msg OpenRPC contract", async () => {
+  const connection = new RoutingJsonRpcConnection({
+    lookup_contact_id_by_addr: { jsonrpc: "2.0", id: 1, result: 32 },
+    create_chat_by_contact_id: { jsonrpc: "2.0", id: 2, result: 42 },
+    misc_send_msg: {
+      jsonrpc: "2.0",
+      id: 3,
+      result: [62, { id: 62, chatId: 42, text: "descriptor" }]
+    }
+  });
+  const client = new JsonRpcChatmailClient(new JsonRpcClientTransport(connection));
+
+  const sent = await client.sendFileMessage({
+    accountId: 2,
+    peerAddress: "known@mail.seep.im",
+    text: "descriptor",
+    attachment: {
+      path: "/private/tmp/teti-image.png",
+      filename: "teti-task-image.png"
+    }
+  });
+
+  assert.deepEqual(sent, { messageId: 62, chatId: 42 });
+  assert.deepEqual(connection.requests.at(-1), {
+    jsonrpc: "2.0",
+    id: 3,
+    method: "misc_send_msg",
+    params: [
+      2,
+      42,
+      "descriptor",
+      "/private/tmp/teti-image.png",
+      "teti-task-image.png",
+      null,
+      null
+    ]
+  });
+});
+
+test("JSON-RPC client projects received image metadata and private blob path", async () => {
+  const connection = new RoutingJsonRpcConnection({
+    get_next_msgs: { jsonrpc: "2.0", id: 1, result: [71] },
+    get_message: {
+      jsonrpc: "2.0",
+      id: 2,
+      result: {
+        id: 71,
+        chatId: 9,
+        text: "attachment descriptor",
+        file: "/private/chatmail/blobs/hash.png",
+        fileName: "teti-task-image.png",
+        fileMime: "image/png",
+        fileBytes: 1024,
+        downloadState: "Done",
+        viewType: "Image",
+        state: 10,
+        sender: { address: "peer@mail.seep.im" }
+      }
+    }
+  });
+  const client = new JsonRpcChatmailClient(new JsonRpcClientTransport(connection));
+
+  const messages = await client.receiveMessages({ accountId: 3, backlogFirst: true });
+
+  assert.deepEqual(messages, [{
+    messageId: 71,
+    chatId: 9,
+    fromAddress: "peer@mail.seep.im",
+    text: "attachment descriptor",
+    filePath: "/private/chatmail/blobs/hash.png",
+    fileName: "teti-task-image.png",
+    fileMime: "image/png",
+    fileBytes: 1024,
+    downloadState: "Done",
+    viewType: "Image",
+    receivedAt: undefined
+  }]);
+});
+
 test("JSON-RPC client receives IncomingMsg events and loads messages", async () => {
   const connection = new RoutingJsonRpcConnection({
     get_next_event_batch: {
@@ -781,6 +861,63 @@ test("JSON-RPC client drains offline backlog before waiting for live events", as
   ]);
 });
 
+test("JSON-RPC client keeps one timeout-free event request alive across empty Runtime polls", async () => {
+  const connection = new DeferredEventJsonRpcConnection();
+  const client = new JsonRpcChatmailClient(new JsonRpcClientTransport(connection));
+
+  assert.deepEqual(await client.receiveMessages({ accountId: 5 }), []);
+  assert.deepEqual(await client.receiveMessages({ accountId: 5 }), []);
+
+  assert.equal(
+    connection.requests.filter(({ payload }) => payload.method === "get_next_event_batch").length,
+    1
+  );
+  assert.deepEqual(connection.requests[0]?.options, { timeoutMs: null });
+
+  connection.emit([
+    {
+      contextId: 5,
+      event: {
+        kind: "IncomingMsg",
+        chatId: 41,
+        msgId: 42
+      }
+    }
+  ]);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  const messages = await client.receiveMessages({ accountId: 5 });
+
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0]?.messageId, 42);
+  assert.equal(
+    connection.requests.filter(({ payload }) => payload.method === "get_next_event_batch").length,
+    1
+  );
+});
+
+test("JSON-RPC client treats transport timeout codes as recoverable event waits", async () => {
+  const diagnostics: unknown[] = [];
+  const connection = new EventTimeoutJsonRpcConnection();
+  const client = new JsonRpcChatmailClient(new JsonRpcClientTransport(connection));
+
+  const messages = await client.receiveMessages({
+    accountId: 5,
+    onDiagnostic: (diagnostic) => diagnostics.push(diagnostic)
+  });
+
+  assert.deepEqual(messages, []);
+  assert.deepEqual(diagnostics[0], {
+    type: "eventBatchError",
+    accountId: 5,
+    error: "Chatmail JSON-RPC request timed out."
+  });
+  assert.deepEqual(connection.requests.map(({ payload }) => payload.method), [
+    "get_next_event_batch",
+    "get_next_msgs"
+  ]);
+});
+
 test("chatmail provisioner creates identity from display name without exposing password", async () => {
   const rpc = new RecordingChatmailRpcClient();
   const provisioner = new RpcChatmailProvisioner(rpc);
@@ -1010,4 +1147,87 @@ class RoutingJsonRpcConnection implements JsonRpcConnection {
       id: payload.id
     };
   }
+}
+
+class DeferredEventJsonRpcConnection implements JsonRpcConnection {
+  readonly requests: Array<{
+    payload: JsonRpcRequest;
+    options?: JsonRpcRequestOptions;
+  }> = [];
+  private resolveEvent?: (events: unknown[]) => void;
+
+  async send(
+    payload: JsonRpcRequest,
+    options?: JsonRpcRequestOptions
+  ): Promise<JsonRpcResponse> {
+    this.requests.push({ payload, options });
+    if (payload.method === "get_next_event_batch") {
+      return new Promise<JsonRpcResponse>((resolve) => {
+        this.resolveEvent = (events) => resolve({
+          jsonrpc: "2.0",
+          id: payload.id,
+          result: events
+        });
+      });
+    }
+    if (payload.method === "get_next_msgs") {
+      return { jsonrpc: "2.0", id: payload.id, result: [] };
+    }
+    if (payload.method === "get_message") {
+      return {
+        jsonrpc: "2.0",
+        id: payload.id,
+        result: {
+          id: 42,
+          chatId: 41,
+          text: "deferred event",
+          timestamp: 1783771200,
+          sender: { address: "peer@mail.seep.im" }
+        }
+      };
+    }
+    return missingMethod(payload);
+  }
+
+  emit(events: unknown[]): void {
+    assert.ok(this.resolveEvent, "event request must be pending before emitting");
+    const resolve = this.resolveEvent;
+    this.resolveEvent = undefined;
+    resolve(events);
+  }
+}
+
+class EventTimeoutJsonRpcConnection implements JsonRpcConnection {
+  readonly requests: Array<{
+    payload: JsonRpcRequest;
+    options?: JsonRpcRequestOptions;
+  }> = [];
+
+  async send(
+    payload: JsonRpcRequest,
+    options?: JsonRpcRequestOptions
+  ): Promise<JsonRpcResponse> {
+    this.requests.push({ payload, options });
+    if (payload.method === "get_next_event_batch") {
+      throw new ChatmailTransportError(
+        "CM_RPC_TIMEOUT",
+        "Chatmail JSON-RPC request timed out."
+      );
+    }
+    if (payload.method === "get_next_msgs") {
+      return { jsonrpc: "2.0", id: payload.id, result: [] };
+    }
+    return missingMethod(payload);
+  }
+}
+
+function missingMethod(payload: JsonRpcRequest): JsonRpcResponse {
+  return {
+    jsonrpc: "2.0",
+    id: payload.id,
+    error: {
+      code: -32601,
+      message: "Method not found"
+    }
+  };
 }

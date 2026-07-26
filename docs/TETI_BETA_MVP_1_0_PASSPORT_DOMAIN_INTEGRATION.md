@@ -18,15 +18,17 @@ flowchart LR
     Registry["Registry status cache"]
     Peers["Peer cache"]
     Codex["Codex cache"]
+    Observer["Agent Observer snapshot"]
     Sharing["Passport policy"]
-    Legacy["Legacy network adapter"]
+    Network["Versioned AI-status adapter"]
     Service["Passport Service"]
     Account --> Service
     Registry --> Service
     Peers --> Service
     Codex --> Service
+    Observer --> Service
     Sharing --> Service
-    Legacy --> Peers
+    Network --> Peers
   end
 
   Service --> Snapshot["RuntimePassportSnapshot"]
@@ -46,7 +48,7 @@ sequenceDiagram
   participant Desktop as Passport Controller
   participant UI as Renderer
 
-  Jobs->>Cache: Refresh Registry / Chatmail / Codex
+  Jobs->>Cache: Refresh Registry / Chatmail / Codex / Agent observation
   Desktop->>Passport: passport.get
   Passport->>Cache: Read current local snapshots
   Cache-->>Passport: Account + Registry + peers + Codex + policy
@@ -82,7 +84,8 @@ flowchart TB
 
 - nullable local identity;
 - the current structured Registry state and privacy-safe diagnostic code;
-- one frozen `TetiCapabilityPassport` containing current resources and empty Agent, Capability, and Binding arrays;
+- one frozen `TetiCapabilityPassport` containing current resources, the latest
+  completed local Agent observation, and empty Capability and Binding arrays;
 - connection projections with identity, relationship state, last seen time, and remote Passport;
 - `PassportSharingPolicy`;
 - a stable revision and generation timestamp.
@@ -102,11 +105,15 @@ Remote Passport state is:
 | --- | --- |
 | Local Teti account | `PassportIdentity` |
 | `CodexUsageState` | generic `AiResource` |
+| Agent Observer completed snapshot | local generic `AiAgent[]` |
 | Peer connection cache | `PassportConnectionSnapshot` |
-| `RemoteAiStatusSnapshot` | remote Passport state and generic resources |
-| old `statusSharing:boolean` file | one-time `PassportSharingPolicy` migration |
+| `RemoteAiStatusSnapshot` | remote Passport state, generic resources, and safe Agent inventory |
+| old `statusSharing:boolean` or resource-only settings | one-time all-safe-Passport policy migration |
 
-The old `teti.ai.status.sync` wire payload remains the active network adapter for resource-summary sharing in this release. No new provider or Teti network message is introduced.
+`teti.ai.status.sync` remains the only network adapter. Phase 5 sends schema v1
+Resource data for older peers, followed by schema v2 Resource plus sanitized
+Agent data for current peers. No new provider or Teti application message type
+is introduced.
 
 ## Desktop Boundary
 
@@ -114,10 +121,24 @@ Renderer receives presentation-ready ViewModels. It does not parse TTLs, inspect
 
 Provider-specific icon and plan presentation is isolated in the Passport ViewModel. Adding another resource later requires a Runtime mapper and presentation mapping, not another UI data controller.
 
+On every Runtime start, `agents` remains empty until the first complete local
+discovery result. The renderer does not synthesize built-in rows or show
+not-yet-checked Agents during startup, first initialization, or registration.
+After completion, the normal three-second local Passport read makes the full
+result visible. Later background scans keep the previous completed list visible
+until their replacement snapshot is ready.
+
 ## Privacy
 
 - Passport aggregation reads sanitized Runtime state only.
 - Credentials, access tokens, account identifiers, raw provider responses, prompts, files, and conversations are excluded.
 - Sharing defaults off.
-- The current UI toggle changes `resourceSummary` and `resourceQuota` together; Agent and Capability sharing remain false and unimplemented.
+- The current UI toggle changes `resourceSummary`, `resourceQuota`, and `agents`
+  together; Capability sharing remains false.
+- Local Agent observations enter the private Chatmail AI-status payload only
+  after the first complete Observer result and only while Passport sharing is
+  enabled.
 - Network broadcasting is scheduled asynchronously after local policy persistence, so the UI never waits on a peer network queue.
+
+The complete Phase 5 contract is documented in
+[`docs/implementation/TETI_PASSPORT_PHASE_5_SHARING.md`](implementation/TETI_PASSPORT_PHASE_5_SHARING.md).

@@ -443,7 +443,7 @@ export class MockPeerConnectionClient implements PeerConnectionClient {
       createdAt: now,
       updatedAt: now,
       lastSeen: null,
-      passport: { state: "unknown", resources: [] }
+      passport: { state: "unknown", resources: [], agents: [], capabilities: [], bindings: [] }
     }];
     this.publish();
     return { requestOutcome: {

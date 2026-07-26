@@ -1,6 +1,9 @@
 import type { PassportController } from "./controller.ts";
 import type {
+  AgentViewModel,
   AiPassportPanelViewModel,
+  CapabilityViewModel,
+  ManagedAgentViewModel,
   PassportSettingsViewModel,
   RemotePassportViewModel,
   ResourceTone,
@@ -13,10 +16,42 @@ export function createAiPassportPanel(viewModel: AiPassportPanelViewModel): HTML
   const panel = document.createElement("div");
   panel.className = "teti-header-panel teti-ai-status-panel";
   panel.hidden = !viewModel.open;
+  const panelHeading = document.createElement("div");
+  panelHeading.className = "teti-panel-heading";
   const heading = document.createElement("strong");
   heading.textContent = viewModel.title;
-  panel.append(heading);
-  for (const resource of viewModel.resources) panel.append(createResourceRow(resource));
+  const summary = document.createElement("small");
+  summary.textContent = passportSummary(
+    viewModel.resources.length,
+    viewModel.agents.length,
+    viewModel.capabilities.length
+  );
+  panelHeading.append(heading, summary);
+  panel.append(panelHeading);
+  if (viewModel.resources.length > 0) {
+    const section = document.createElement("section");
+    section.className = "teti-passport-section teti-resource-section";
+    section.append(createSectionTitle("AI 资源", viewModel.resources.length));
+    for (const resource of viewModel.resources) section.append(createResourceRow(resource));
+    panel.append(section);
+  }
+  if (viewModel.agents.length > 0) {
+    const section = document.createElement("section");
+    section.className = "teti-passport-section teti-agent-section";
+    section.append(createSectionTitle("可用 Agent", viewModel.agents.length));
+    for (const agent of viewModel.agents) section.append(createAgentRow(agent));
+    panel.append(section);
+  }
+  if (viewModel.capabilities.length > 0) {
+    const section = document.createElement("section");
+    section.className = "teti-passport-section teti-capability-section";
+    section.append(createSectionTitle("可调用能力", viewModel.capabilities.length));
+    const list = document.createElement("div");
+    list.className = "teti-capability-list";
+    for (const capability of viewModel.capabilities) list.append(createCapabilityChip(capability));
+    section.append(list);
+    panel.append(section);
+  }
   return panel;
 }
 
@@ -27,11 +62,19 @@ export function createPassportSettingsPanel(
   const panel = document.createElement("div");
   panel.className = "teti-header-panel teti-sharing-panel";
   panel.hidden = !viewModel.open;
+  const panelHeading = document.createElement("div");
+  panelHeading.className = "teti-panel-heading";
   const title = document.createElement("strong");
   title.textContent = viewModel.title;
+  const caption = document.createElement("small");
+  caption.textContent = "身份、分享与本机 Agent";
+  panelHeading.append(title, caption);
+  const overview = document.createElement("section");
+  overview.className = "teti-settings-card teti-settings-overview";
   const identity = document.createElement("div");
   identity.className = "teti-settings-identity-row";
   const identityKey = document.createElement("span");
+  identityKey.className = "teti-settings-label";
   identityKey.textContent = "我的 Teti";
   const identityValue = document.createElement("span");
   identityValue.className = "teti-settings-identity-value";
@@ -41,29 +84,155 @@ export function createPassportSettingsPanel(
   const registry = document.createElement("div");
   registry.className = "teti-settings-identity-row";
   const registryKey = document.createElement("span");
+  registryKey.className = "teti-settings-label";
   registryKey.textContent = "公开状态";
   const registryValue = document.createElement("span");
   registryValue.className = `teti-settings-identity-value is-${viewModel.registryTone}`;
   registryValue.textContent = viewModel.registryLabel;
   registry.append(registryKey, registryValue);
+  overview.append(identity, registry);
   const label = document.createElement("label");
-  label.className = "teti-toggle-row";
+  label.className = "teti-toggle-row teti-settings-card teti-sharing-control";
   label.setAttribute("aria-busy", String(viewModel.busy));
-  const text = document.createElement("span");
+  const toggleCopy = document.createElement("span");
+  toggleCopy.className = "teti-toggle-copy";
+  const text = document.createElement("strong");
   text.textContent = viewModel.toggleLabel;
+  const hint = document.createElement("small");
+  hint.textContent = "向已建联 Teti 分享当前 Passport";
+  toggleCopy.append(text, hint);
   const toggle = document.createElement("input");
   toggle.type = "checkbox";
   toggle.checked = viewModel.enabled;
   toggle.addEventListener("change", () => void controller?.setResourceSharing(toggle.checked));
-  label.append(text, toggle);
-  panel.append(title, identity, registry, label);
+  label.append(toggleCopy, toggle);
+  panel.append(panelHeading, overview, label);
   if (viewModel.error) {
     const error = document.createElement("small");
     error.className = "teti-sharing-error";
     error.textContent = viewModel.error;
     panel.append(error);
   }
+  panel.append(createAgentManagementSection(viewModel, controller));
   return panel;
+}
+
+function createSectionTitle(label: string, count: number): HTMLElement {
+  const title = document.createElement("div");
+  title.className = "teti-agent-section-title";
+  const text = document.createElement("span");
+  text.textContent = label;
+  const badge = document.createElement("span");
+  badge.className = "teti-section-count";
+  badge.textContent = String(count);
+  title.append(text, badge);
+  return title;
+}
+
+function passportSummary(resourceCount: number, agentCount: number, capabilityCount: number): string {
+  const parts = [`${resourceCount} 项 AI 资源`];
+  if (agentCount > 0) parts.push(`${agentCount} 个可用 Agent`);
+  if (capabilityCount > 0) parts.push(`${capabilityCount} 项能力`);
+  return parts.join(" · ");
+}
+
+function createAgentManagementSection(
+  viewModel: PassportSettingsViewModel,
+  controller?: PassportController
+): HTMLElement {
+  const management = viewModel.agentManagement;
+  const section = document.createElement("section");
+  section.className = "teti-agent-management";
+
+  const header = document.createElement("div");
+  header.className = "teti-agent-management-header";
+  const copy = document.createElement("span");
+  const title = document.createElement("strong");
+  title.textContent = "Agent 管理";
+  const status = document.createElement("small");
+  status.textContent = management.statusLabel;
+  copy.append(title, status);
+  const rescan = document.createElement("button");
+  rescan.className = "teti-agent-rescan";
+  rescan.type = "button";
+  rescan.textContent = management.scanning ? "扫描中" : "重新扫描";
+  rescan.disabled = management.scanning;
+  rescan.addEventListener("click", () => void controller?.rescanAgents());
+  header.append(copy, rescan);
+  section.append(header);
+
+  if (!management.readyToDisplay) {
+    const pending = document.createElement("div");
+    pending.className = "teti-agent-discovery-pending";
+    pending.setAttribute("role", "status");
+    pending.textContent = "完成首次安全扫描后显示 Agent 列表。";
+    section.append(pending);
+  } else {
+    const list = document.createElement("div");
+    list.className = "teti-agent-management-list";
+    for (const agent of management.agents) list.append(createManagedAgentRow(agent, controller));
+    if (management.agents.length === 0) {
+      const empty = document.createElement("small");
+      empty.textContent = "当前没有启用的 Agent 定义。";
+      list.append(empty);
+    }
+    section.append(list);
+  }
+
+  if (management.error) {
+    const error = document.createElement("small");
+    error.className = "teti-agent-management-error";
+    error.textContent = management.error;
+    section.append(error);
+  }
+  const privacy = document.createElement("small");
+  privacy.className = "teti-agent-management-privacy";
+  privacy.textContent = "仅检查安装、版本和运行状态；路径只保存在本机。";
+  section.append(privacy);
+  return section;
+}
+
+function createManagedAgentRow(
+  agent: ManagedAgentViewModel,
+  controller?: PassportController
+): HTMLElement {
+  const item = document.createElement("div");
+  item.className = "teti-managed-agent";
+  item.append(createAgentRow(agent));
+  if (!agent.canOverride) return item;
+
+  const details = document.createElement("details");
+  details.className = "teti-agent-path-details";
+  const summary = document.createElement("summary");
+  summary.textContent = agent.pathOverride ? "自定义路径已启用" : "路径 override";
+  const form = document.createElement("form");
+  form.className = "teti-agent-path-form";
+  const input = document.createElement("input");
+  input.className = "teti-agent-path-input";
+  input.type = "text";
+  input.value = agent.pathOverride;
+  input.placeholder = agent.pathPlaceholder;
+  input.autocomplete = "off";
+  input.spellcheck = false;
+  input.disabled = agent.busy;
+  input.setAttribute("aria-label", `${agent.name} 自定义安装路径`);
+  const save = document.createElement("button");
+  save.type = "submit";
+  save.textContent = agent.busy ? "保存中" : "保存";
+  save.disabled = agent.busy;
+  const clear = document.createElement("button");
+  clear.type = "button";
+  clear.textContent = "清除";
+  clear.disabled = agent.busy || !agent.pathOverride;
+  clear.addEventListener("click", () => void controller?.setAgentPathOverride(agent.id, ""));
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    void controller?.setAgentPathOverride(agent.id, input.value);
+  });
+  form.append(input, save, clear);
+  details.append(summary, form);
+  item.append(details);
+  return item;
 }
 
 export function createRemotePassport(viewModel: RemotePassportViewModel): HTMLElement {
@@ -71,7 +240,25 @@ export function createRemotePassport(viewModel: RemotePassportViewModel): HTMLEl
   container.className = "teti-peer-ai-status";
   if (viewModel.note) return passportNote(container, viewModel.note, viewModel.stale);
   for (const resource of viewModel.resources) container.append(createRemoteResource(resource));
+  for (const agent of viewModel.agents) container.append(createRemoteAgent(agent));
+  if (viewModel.capabilities.length > 0) {
+    const capabilities = document.createElement("div");
+    capabilities.className = "teti-peer-capabilities";
+    for (const capability of viewModel.capabilities) {
+      capabilities.append(createCapabilityChip(capability));
+    }
+    container.append(capabilities);
+  }
   return container;
+}
+
+function createCapabilityChip(capability: CapabilityViewModel): HTMLElement {
+  const chip = document.createElement("span");
+  chip.className = `teti-capability-chip${capability.stale ? " is-stale" : ""}`;
+  chip.dataset.capabilityId = capability.id;
+  chip.textContent = capability.name;
+  chip.title = `${capability.categoryLabel} · ${capability.availabilityLabel}`;
+  return chip;
 }
 
 function createResourceRow(resource: ResourceViewModel): HTMLElement {
@@ -106,6 +293,33 @@ function createResourceRow(resource: ResourceViewModel): HTMLElement {
   return row;
 }
 
+function createAgentRow(agent: AgentViewModel): HTMLElement {
+  const row = document.createElement("div");
+  row.className = `teti-agent-row is-${agent.tone}`;
+  row.dataset.agentId = agent.id;
+
+  const mark = document.createElement("span");
+  mark.className = "teti-agent-mark";
+  mark.setAttribute("aria-hidden", "true");
+
+  const identity = document.createElement("span");
+  identity.className = "teti-agent-identity";
+  const name = document.createElement("strong");
+  name.textContent = agent.name;
+  identity.append(name);
+  if (agent.detailLabel) {
+    const detail = document.createElement("small");
+    detail.textContent = agent.detailLabel;
+    identity.append(detail);
+  }
+
+  const status = document.createElement("span");
+  status.className = "teti-agent-status";
+  status.textContent = agent.statusLabel;
+  row.append(mark, identity, status);
+  return row;
+}
+
 function createRemoteResource(resource: ResourceViewModel): HTMLElement {
   const row = document.createElement("div");
   row.className = "teti-peer-ai-tool";
@@ -116,6 +330,22 @@ function createRemoteResource(resource: ResourceViewModel): HTMLElement {
   }`;
   row.append(text);
   if (resource.remainingPercent !== null) row.append(progressTrack(resource.remainingPercent, true));
+  return row;
+}
+
+function createRemoteAgent(agent: AgentViewModel): HTMLElement {
+  const row = document.createElement("div");
+  row.className = `teti-peer-agent is-${agent.tone}`;
+  const mark = document.createElement("span");
+  mark.className = "teti-peer-agent-mark";
+  mark.setAttribute("aria-hidden", "true");
+  const text = document.createElement("span");
+  text.className = "teti-peer-agent-copy";
+  text.textContent = [agent.name, agent.detailLabel].filter(Boolean).join(" · ");
+  const status = document.createElement("span");
+  status.className = "teti-peer-agent-status";
+  status.textContent = agent.statusLabel;
+  row.append(mark, text, status);
   return row;
 }
 

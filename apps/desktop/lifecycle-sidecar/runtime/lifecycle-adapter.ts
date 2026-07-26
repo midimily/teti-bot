@@ -24,6 +24,9 @@ export function createRuntimeOwnedLifecycleDependencies(
     heartbeatDiscovery: () => runtime.readDiscoveryAccount(),
     getPeerConnectionService: async () => runtime.getPeerConnectionFacade(),
     getPassportSnapshot: () => runtime.getPassportSnapshot(),
-    setPassportSharing: (policy) => runtime.setPassportSharing(policy)
+    setPassportSharing: (policy) => runtime.setPassportSharing(policy),
+    getAgentManagementSnapshot: () => runtime.getAgentManagementSnapshot(),
+    rescanAgents: () => runtime.rescanAgents(),
+    setAgentPathOverride: (agentId, path) => runtime.setAgentPathOverride(agentId, path)
   };
 }

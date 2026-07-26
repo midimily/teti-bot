@@ -4,12 +4,12 @@ import type { RuntimePassportSnapshot } from "./snapshot.ts";
 
 test("runtime Passport snapshot keeps expiry at resource and remote Passport scope", () => {
   const snapshot: RuntimePassportSnapshot = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     revision: 1,
     generatedAt: "2026-07-22T00:00:00.000Z",
     identity: null,
     localPassport: {
-      schemaVersion: 1,
+      schemaVersion: 2,
       generatedAt: "2026-07-22T00:00:00.000Z",
       resources: [],
       agents: [],

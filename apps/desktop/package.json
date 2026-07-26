@@ -1,6 +1,6 @@
 {
   "name": "@teti/desktop",
-  "version": "0.1.0",
+  "version": "0.1.12",
   "private": true,
   "type": "module",
   "scripts": {
@@ -8,6 +8,10 @@
     "tauri:dev": "tauri dev",
     "build": "npm run runtime:bundle && vite build",
     "runtime:bundle": "node --experimental-strip-types scripts/bundle-runtime.ts",
+    "codex-adapter:smoke": "node --experimental-strip-types scripts/smoke-codex-adapter.ts",
+    "codebuddy-adapter:smoke": "node --experimental-strip-types scripts/smoke-codebuddy-adapter.ts",
+    "codebuddy-adapter:security-smoke": "node --experimental-strip-types scripts/security-smoke-codebuddy-adapter.ts",
+    "codebuddy-adapter:lifecycle-smoke": "node --experimental-strip-types scripts/lifecycle-smoke-codebuddy-adapter.ts",
     "preview": "vite preview --host 127.0.0.1",
     "typecheck": "tsc --noEmit",
     "tauri:build": "tauri build && node --experimental-strip-types scripts/sign-app.ts",

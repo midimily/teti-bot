@@ -18,7 +18,7 @@ test("Passport sharing defaults off and persists a private field-level policy", 
   await store.save(resourceSharingPolicy(true));
   assert.deepEqual(await store.load(), resourceSharingPolicy(true));
   assert.deepEqual(JSON.parse(await readFile(path, "utf8")), {
-    version: 2,
+    version: 4,
     passportSharing: resourceSharingPolicy(true)
   });
   assert.equal((await stat(path)).mode & 0o777, 0o600);
@@ -32,17 +32,51 @@ test("legacy statusSharing is migrated once to the Passport policy", async (cont
   const store = new FilePassportSharingStore(path);
 
   assert.deepEqual(await store.load(), resourceSharingPolicy(true));
-  assert.equal(JSON.parse(await readFile(path, "utf8")).version, 2);
+  assert.equal(JSON.parse(await readFile(path, "utf8")).version, 4);
 });
 
-test("invalid or unsupported sharing fields fail closed", async (context) => {
-  const directory = await mkdtemp(join(tmpdir(), "teti-passport-settings-invalid-"));
+test("the previous resource-only Passport policy migrates to the all-on single switch", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "teti-passport-resource-migration-"));
   context.after(async () => rm(directory, { recursive: true, force: true }));
   const path = join(directory, "settings.json");
   await writeFile(path, JSON.stringify({
     version: 2,
-    passportSharing: { ...resourceSharingPolicy(true), agents: true }
+    passportSharing: {
+      version: 1,
+      audience: "confirmed_peers",
+      resourceSummary: true,
+      resourceQuota: true,
+      agents: false,
+      capabilities: false
+    }
   }));
   const store = new FilePassportSharingStore(path);
-  await assert.rejects(() => store.load(), /not implemented/);
+
+  assert.deepEqual(await store.load(), resourceSharingPolicy(true));
+  assert.equal(JSON.parse(await readFile(path, "utf8")).version, 4);
+});
+
+test("the previous all-Agent policy migrates to Callable Agent and Capability sharing", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "teti-passport-settings-invalid-"));
+  context.after(async () => rm(directory, { recursive: true, force: true }));
+  const path = join(directory, "settings.json");
+  await writeFile(path, JSON.stringify({
+    version: 3,
+    passportSharing: { ...resourceSharingPolicy(true), capabilities: false }
+  }));
+  const store = new FilePassportSharingStore(path);
+  assert.deepEqual(await store.load(), resourceSharingPolicy(true));
+  assert.equal(JSON.parse(await readFile(path, "utf8")).version, 4);
+});
+
+test("partial single-switch sharing fields fail closed", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "teti-passport-settings-partial-"));
+  context.after(async () => rm(directory, { recursive: true, force: true }));
+  const path = join(directory, "settings.json");
+  await writeFile(path, JSON.stringify({
+    version: 4,
+    passportSharing: { ...resourceSharingPolicy(true), capabilities: false }
+  }));
+  const store = new FilePassportSharingStore(path);
+  await assert.rejects(() => store.load(), /one switch/);
 });

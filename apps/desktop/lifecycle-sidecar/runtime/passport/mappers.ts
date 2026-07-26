@@ -1,11 +1,23 @@
 import type { TetiAccount } from "../../../../../core/account/model.ts";
-import type { AiToolStatusSnapshot, RemoteAiStatusSnapshot } from "../../../../../core/ai-status/types.ts";
+import type {
+  AiAgentStatusSnapshot,
+  AiToolStatusSnapshot,
+  RemoteAiStatusSnapshot
+} from "../../../../../core/ai-status/types.ts";
 import type {
   PassportConnectionSnapshot,
   PassportIdentity,
   RemotePassportSnapshot
 } from "../../../../../core/passport/snapshot.ts";
-import type { AiResource, AiResourcePlan, TetiAvailability } from "../../../../../core/passport/types.ts";
+import type {
+  AiAgent,
+  AiResource,
+  AiResourcePlan,
+  CallablePassportAgent,
+  CapabilityBinding,
+  TetiCapability,
+  TetiAvailability
+} from "../../../../../core/passport/types.ts";
 import type { CodexUsageState } from "../../../src/codex-usage/types.ts";
 import type { PeerConnectionDto } from "../../../src/lifecycle-bridge/protocol.ts";
 
@@ -72,11 +84,14 @@ export function mapRemoteAiStatus(
   snapshot: RemoteAiStatusSnapshot | undefined,
   now: Date
 ): RemotePassportSnapshot {
-  if (!snapshot) return { state: "unknown", resources: [] };
+  if (!snapshot) return { state: "unknown", resources: [], agents: [], capabilities: [], bindings: [] };
   if (snapshot.sharing === "disabled") {
     return {
       state: "disabled",
       resources: [],
+      agents: [],
+      capabilities: [],
+      bindings: [],
       generatedAt: snapshot.generatedAt,
       expiresAt: snapshot.expiresAt,
       receivedAt: snapshot.receivedAt
@@ -86,9 +101,66 @@ export function mapRemoteAiStatus(
   return {
     state: expired ? "stale" : "fresh",
     resources: snapshot.tools.map((tool) => mapRemoteToolResource(tool, snapshot.expiresAt, expired)),
+    agents: snapshot.schemaVersion === 3
+      ? snapshot.agents.map((agent) => mapRemoteCallableAgent(agent, expired))
+      : snapshot.schemaVersion === 2
+        ? snapshot.agents.map((agent) => mapRemoteAgent(agent, expired))
+        : [],
+    capabilities: snapshot.schemaVersion === 3
+      ? snapshot.capabilities.map((capability) => mapRemoteCapability(capability, expired))
+      : [],
+    bindings: snapshot.schemaVersion === 3
+      ? snapshot.bindings.map((binding) => cloneBinding(binding))
+      : [],
     generatedAt: snapshot.generatedAt,
     expiresAt: snapshot.expiresAt,
     receivedAt: snapshot.receivedAt
+  };
+}
+
+function mapRemoteCallableAgent(
+  agent: CallablePassportAgent,
+  passportExpired: boolean
+): CallablePassportAgent {
+  return {
+    ...structuredClone(agent),
+    availability: passportExpired ? "stale" : agent.availability
+  };
+}
+
+function mapRemoteCapability(
+  capability: TetiCapability,
+  passportExpired: boolean
+): TetiCapability {
+  return {
+    ...structuredClone(capability),
+    availability: passportExpired ? "stale" : capability.availability
+  };
+}
+
+function cloneBinding(binding: CapabilityBinding): CapabilityBinding {
+  return {
+    capabilityId: binding.capabilityId,
+    agentIds: [...binding.agentIds],
+    resourceIds: [...binding.resourceIds]
+  };
+}
+
+function mapRemoteAgent(agent: AiAgentStatusSnapshot, passportExpired: boolean): AiAgent {
+  return {
+    id: agent.agentId,
+    name: agent.name,
+    ...(agent.provider ? { provider: agent.provider } : {}),
+    type: agent.type,
+    surfaces: [...agent.surfaces],
+    installationStatus: agent.installationStatus,
+    ...(agent.detectionSource ? { detectionSource: agent.detectionSource } : {}),
+    ...(agent.version ? { version: agent.version } : {}),
+    runtimeStatus: passportExpired ? "unknown" : agent.runtimeStatus,
+    ...(passportExpired || agent.processCount === null ? {} : { processCount: agent.processCount }),
+    ...(agent.confidence ? { confidence: agent.confidence } : {}),
+    ...(agent.lastSeenAt ? { lastSeenAt: agent.lastSeenAt } : {}),
+    observedAt: agent.observedAt
   };
 }
 

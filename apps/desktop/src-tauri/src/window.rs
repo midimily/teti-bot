@@ -21,6 +21,7 @@ pub enum IslandMode {
     Processing,
     Error,
     Ready,
+    Task,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -202,6 +203,10 @@ pub fn size_for_mode(mode: IslandMode) -> IslandSize {
         IslandMode::Ready => IslandSize {
             width: 360.0,
             height: 150.0,
+        },
+        IslandMode::Task => IslandSize {
+            width: 600.0,
+            height: 360.0,
         },
     }
 }

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { TetiAccount } from "../../../core/account/model.ts";
+import type { CallableAgent } from "../../../core/callability/types.ts";
 import type { RemoteAiStatusSnapshot } from "../../../core/ai-status/types.ts";
 import type { PeerConnectionDto } from "../src/lifecycle-bridge/protocol.ts";
 import type { CodexUsageState } from "../src/codex-usage/types.ts";
@@ -43,6 +44,37 @@ test("remote Passport state distinguishes unknown, disabled, fresh, and stale wi
   assert.equal(stale.resources[0]?.availability, "stale");
 });
 
+test("remote Passport maps every safe Agent field and expires live process state", () => {
+  const fresh = mapRemoteAiStatus(
+    remoteAgentStatus("2026-07-22T00:20:00.000Z"),
+    new Date("2026-07-22T00:10:00.000Z")
+  );
+  assert.deepEqual(fresh.agents[0], {
+    id: "codex",
+    name: "Codex",
+    provider: "openai",
+    type: "cli",
+    surfaces: ["cli"],
+    installationStatus: "installed",
+    detectionSource: "command",
+    version: "codex-cli 1.2.3",
+    runtimeStatus: "running",
+    processCount: 2,
+    confidence: "high",
+    lastSeenAt: "2026-07-22T00:09:00.000Z",
+    observedAt: "2026-07-22T00:09:00.000Z"
+  });
+
+  const stale = mapRemoteAiStatus(
+    remoteAgentStatus("2026-07-22T00:10:00.000Z"),
+    new Date("2026-07-22T00:10:00.000Z")
+  );
+  assert.equal(stale.state, "stale");
+  assert.equal(stale.agents[0]?.runtimeStatus, "unknown");
+  assert.equal(stale.agents[0]?.processCount, undefined);
+  assert.equal(stale.agents[0]?.installationStatus, "installed");
+});
+
 test("Runtime Passport reads aggregate local caches only and keep revision stable", async () => {
   let accountReads = 0;
   let sharingReads = 0;
@@ -75,6 +107,39 @@ test("Runtime Passport reads aggregate local caches only and keep revision stabl
   assert.equal(second.connections[0]?.passport.state, "fresh");
   assert.equal(accountReads, 2);
   assert.equal(sharingReads, 2);
+});
+
+test("Runtime Passport projects only qualified Callable Agents, never Observer results", async () => {
+  let agents: CallableAgent[] = [];
+  const service = new RuntimePassportService({
+    sources: {
+      async loadAccount() { return account(); },
+      getConnections() { return []; },
+      getCodexUsage() { return readyUsage(); },
+      getCallableAgents() { return agents; },
+      getRegistry() { return { state: "registered" }; },
+      async getSharing() { return resourceSharingPolicy(false); }
+    },
+    now: () => new Date("2026-07-25T00:00:00.000Z")
+  });
+
+  const before = await service.getSnapshot();
+  assert.deepEqual(before.localPassport.agents, []);
+
+  agents = [{
+    schemaVersion: 1,
+    agentId: "codex",
+    adapterId: "codex.local",
+    adapterRevision: 1,
+    capabilityIds: ["code-analysis"],
+    inputModes: ["text"],
+    outputModes: ["text"],
+    readyAt: "2026-07-25T00:00:00.000Z"
+  }];
+  const after = await service.getSnapshot();
+  assert.equal(after.revision, before.revision + 1);
+  assert.equal(after.localPassport.agents[0]?.id, "codex");
+  assert.equal(after.localPassport.capabilities[0]?.id, "code-analysis");
 });
 
 function readyUsage(): CodexUsageState {
@@ -116,6 +181,32 @@ function remoteStatus(
       quotas: [],
       observedAt: "2026-07-22T00:00:00.000Z"
     }] : []
+  };
+}
+
+function remoteAgentStatus(expiresAt: string): RemoteAiStatusSnapshot {
+  return {
+    schemaVersion: 2,
+    sharing: "enabled",
+    generatedAt: "2026-07-22T00:00:00.000Z",
+    expiresAt,
+    receivedAt: "2026-07-22T00:00:01.000Z",
+    tools: [],
+    agents: [{
+      agentId: "codex",
+      name: "Codex",
+      provider: "openai",
+      type: "cli",
+      surfaces: ["cli"],
+      installationStatus: "installed",
+      detectionSource: "command",
+      version: "codex-cli 1.2.3",
+      runtimeStatus: "running",
+      processCount: 2,
+      confidence: "high",
+      lastSeenAt: "2026-07-22T00:09:00.000Z",
+      observedAt: "2026-07-22T00:09:00.000Z"
+    }]
   };
 }
 

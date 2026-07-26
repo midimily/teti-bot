@@ -1,6 +1,13 @@
 import type { RemoteAiStatusSnapshot } from "../../../../core/ai-status/types.ts";
 import type { RuntimePassportSnapshot } from "../../../../core/passport/snapshot.ts";
 import type { RegistryStatus } from "../../../../core/account/model.ts";
+import type { AgentManagementSnapshot } from "../../../../core/observation/management.ts";
+import type {
+  CollaborationTaskSummarySnapshot,
+  CollaborationTaskTransportRecord,
+  CollaborationTaskTransportSnapshot
+} from "../../../../core/task/transport.ts";
+import type { TaskImagePart } from "../../../../core/task/types.ts";
 
 export const LIFECYCLE_PROTOCOL_VERSION = 1;
 export const LIFECYCLE_MAX_LINE_BYTES = 64 * 1024;
@@ -17,8 +24,20 @@ export type LifecycleMethod =
   | "connection.request"
   | "connection.accept"
   | "connection.reject"
+  | "task.send"
+  | "task.list"
+  | "task.summary"
+  | "task.get"
+  | "task.attachment.stage"
+  | "task.attachment.resolve"
+  | "task.approve"
+  | "task.reject"
+  | "task.cancel"
   | "passport.get"
-  | "passport.sharing.set";
+  | "passport.sharing.set"
+  | "agent.observation.get"
+  | "agent.observation.scan"
+  | "agent.observation.override.set";
 
 export const LIFECYCLE_METHODS: readonly LifecycleMethod[] = [
   "lifecycle.health",
@@ -32,8 +51,20 @@ export const LIFECYCLE_METHODS: readonly LifecycleMethod[] = [
   "connection.request",
   "connection.accept",
   "connection.reject",
+  "task.send",
+  "task.list",
+  "task.summary",
+  "task.get",
+  "task.attachment.stage",
+  "task.attachment.resolve",
+  "task.approve",
+  "task.reject",
+  "task.cancel",
   "passport.get",
-  "passport.sharing.set"
+  "passport.sharing.set",
+  "agent.observation.get",
+  "agent.observation.scan",
+  "agent.observation.override.set"
 ];
 
 export interface LifecycleRequest {
@@ -64,7 +95,24 @@ export type LifecycleResult =
   | PublicTetiIdentity
   | PeerConnectionResult
   | RuntimePassportSnapshot
+  | AgentManagementSnapshot
+  | CollaborationTaskTransportRecord
+  | CollaborationTaskTransportSnapshot
+  | CollaborationTaskSummarySnapshot
+  | StagedTaskImageDto
+  | ResolvedTaskImageDto
   | null;
+
+export interface StagedTaskImageDto {
+  part: TaskImagePart;
+  path: string;
+  safeFileName: string;
+}
+
+export interface ResolvedTaskImageDto {
+  attachmentId: string;
+  path: string;
+}
 
 export interface LifecycleHealthResult {
   status: "ok";
@@ -157,6 +205,7 @@ export type LifecycleErrorCode =
   | "DISCOVERY_HEARTBEAT_FAILED"
   | "CONNECTION_RESOLVE_FAILED"
   | "CONNECTION_REQUEST_FAILED"
+  | "TASK_TRANSPORT_FAILED"
   | "SIDECAR_UNAVAILABLE"
   | "REQUEST_TIMEOUT"
   | "INTERNAL_ERROR";
@@ -173,8 +222,20 @@ export const LIFECYCLE_TIMEOUT_MS: Record<LifecycleMethod, number> = {
   "connection.request": 30_000,
   "connection.accept": 30_000,
   "connection.reject": 30_000,
+  "task.send": 30_000,
+  "task.list": 2_000,
+  "task.summary": 2_000,
+  "task.get": 2_000,
+  "task.attachment.stage": 10_000,
+  "task.attachment.resolve": 2_000,
+  "task.approve": 10_000,
+  "task.reject": 10_000,
+  "task.cancel": 10_000,
   "passport.get": 2_000,
-  "passport.sharing.set": 5_000
+  "passport.sharing.set": 5_000,
+  "agent.observation.get": 2_000,
+  "agent.observation.scan": 10_000,
+  "agent.observation.override.set": 10_000
 };
 
 export function isLifecycleMethod(value: unknown): value is LifecycleMethod {

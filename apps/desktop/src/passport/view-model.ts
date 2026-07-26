@@ -10,8 +10,16 @@ import {
   TETI_PUBLIC_ID_CODE_LENGTH,
   TETI_PUBLIC_ID_PREFIX
 } from "../../../../core/identity/public-id.ts";
-import type { AiResource, TetiAvailability } from "../../../../core/passport/types.ts";
+import type {
+  AiAgent,
+  AiResource,
+  CallablePassportAgent,
+  TetiCapability,
+  TetiAvailability
+} from "../../../../core/passport/types.ts";
 import type { PassportControllerSnapshot } from "./controller.ts";
+import type { AgentObservation } from "../../../../core/observation/types.ts";
+import { emptyAgentManagementSnapshot } from "../../../../core/observation/management.ts";
 
 export type ResourceTone = "free" | "plus" | "pro" | "unknown" | "unavailable";
 export type ResourceIcon = "codex" | "generic";
@@ -30,10 +38,46 @@ export interface ResourceViewModel {
   icon: ResourceIcon;
 }
 
+export type AgentTone = "running" | "installed" | "absent" | "unknown";
+
+export interface AgentViewModel {
+  id: string;
+  name: string;
+  providerName: string;
+  statusLabel: string;
+  detailLabel: string;
+  tone: AgentTone;
+}
+
+export interface CapabilityViewModel {
+  id: string;
+  name: string;
+  categoryLabel: string;
+  availabilityLabel: string;
+  stale: boolean;
+}
+
+export interface ManagedAgentViewModel extends AgentViewModel {
+  pathOverride: string;
+  pathPlaceholder: string;
+  canOverride: boolean;
+  busy: boolean;
+}
+
+export interface AgentManagementViewModel {
+  readyToDisplay: boolean;
+  scanning: boolean;
+  statusLabel: string;
+  agents: ManagedAgentViewModel[];
+  error?: string;
+}
+
 export interface AiPassportPanelViewModel {
   title: string;
   open: boolean;
   resources: ResourceViewModel[];
+  agents: AgentViewModel[];
+  capabilities: CapabilityViewModel[];
 }
 
 export interface PassportSettingsViewModel {
@@ -46,6 +90,7 @@ export interface PassportSettingsViewModel {
   enabled: boolean;
   busy: boolean;
   error?: string;
+  agentManagement: AgentManagementViewModel;
 }
 
 export interface RemotePassportViewModel {
@@ -53,6 +98,8 @@ export interface RemotePassportViewModel {
   note?: string;
   stale: boolean;
   resources: ResourceViewModel[];
+  agents: AgentViewModel[];
+  capabilities: CapabilityViewModel[];
 }
 
 export interface ConnectionCardViewModel {
@@ -81,7 +128,9 @@ export function toPassportViewModel(
     aiPanel: {
       title: "AI Passport",
       open: snapshot.openPanel === "passport",
-      resources: snapshot.passport.localPassport.resources.map(toResourceViewModel)
+      resources: snapshot.passport.localPassport.resources.map(toResourceViewModel),
+      agents: snapshot.passport.localPassport.agents.map(toAgentViewModel),
+      capabilities: snapshot.passport.localPassport.capabilities.map(toCapabilityViewModel)
     },
     settings: {
       title: "设置",
@@ -89,11 +138,102 @@ export function toPassportViewModel(
       ...formatRegistryStatus(snapshot.passport.registry),
       toggleLabel: "Passport 分享",
       open: snapshot.openPanel === "sharing",
-      enabled: snapshot.passport.sharing.resourceSummary && snapshot.passport.sharing.resourceQuota,
+      enabled: snapshot.passport.sharing.resourceSummary
+        && snapshot.passport.sharing.resourceQuota
+        && snapshot.passport.sharing.agents
+        && snapshot.passport.sharing.capabilities,
       busy: snapshot.sharingBusy,
-      ...(snapshot.sharingError ? { error: snapshot.sharingError } : {})
+      ...(snapshot.sharingError ? { error: snapshot.sharingError } : {}),
+      agentManagement: toAgentManagementViewModel(snapshot)
     },
     connections: snapshot.passport.connections.map((connection) => toConnectionCardViewModel(connection, now))
+  };
+}
+
+const BUILTIN_MANAGED_AGENT_IDS = new Set([
+  "codex",
+  "claude-code",
+  "gemini-cli",
+  "cursor",
+  "codebuddy"
+]);
+
+function toAgentManagementViewModel(snapshot: PassportControllerSnapshot): AgentManagementViewModel {
+  const management = snapshot.agentManagement ?? emptyAgentManagementSnapshot();
+  const readyToDisplay = management.revision > 0;
+  const scanning = snapshot.agentBusy || management.state === "discovering";
+  const installedCount = management.agents.filter(
+    (agent) => agent.installation?.state === "installed"
+  ).length;
+  const statusLabel = !readyToDisplay
+    ? "正在发现本机 Agent…"
+    : management.state === "discovering"
+      ? "正在重新扫描…"
+      : management.state === "disabled"
+        ? "Agent 发现已关闭"
+        : management.state === "degraded"
+          ? `已发现 ${installedCount}/${management.agents.length} · 部分检测未完成`
+          : `已发现 ${installedCount}/${management.agents.length}`;
+  const safeError = snapshot.agentError
+    ?? (readyToDisplay && management.errors.length > 0
+      ? "部分检测器未完成，不影响其他 Agent。"
+      : undefined);
+  return {
+    readyToDisplay,
+    scanning,
+    statusLabel,
+    agents: readyToDisplay
+      ? management.agents
+          .map((agent) => toManagedAgentViewModel(
+            agent,
+            management.pathOverrides[agent.agentId] ?? "",
+            snapshot.agentBusyId === agent.agentId
+          ))
+          .sort(compareManagedAgents)
+      : [],
+    ...(safeError ? { error: safeError } : {})
+  };
+}
+
+const MANAGED_AGENT_TONE_PRIORITY: Record<AgentTone, number> = {
+  running: 0,
+  installed: 1,
+  unknown: 2,
+  absent: 3
+};
+
+function compareManagedAgents(left: ManagedAgentViewModel, right: ManagedAgentViewModel): number {
+  return MANAGED_AGENT_TONE_PRIORITY[left.tone] - MANAGED_AGENT_TONE_PRIORITY[right.tone];
+}
+
+function toManagedAgentViewModel(
+  observation: AgentObservation,
+  pathOverride: string,
+  busy: boolean
+): ManagedAgentViewModel {
+  const agent = toAgentViewModel({
+    id: observation.agentId,
+    name: observation.displayName,
+    provider: observation.provider,
+    type: observation.surfaces[0] ?? "local_service",
+    surfaces: observation.surfaces,
+    installationStatus: observation.installation?.state ?? "unknown",
+    ...(observation.installation?.version ? { version: observation.installation.version } : {}),
+    ...(observation.runtime ? { runtimeStatus: observation.runtime.state } : {}),
+    ...(observation.runtime?.processCount === undefined
+      ? {}
+      : { processCount: observation.runtime.processCount }),
+    observedAt: observation.observedAt
+  });
+  const desktop = observation.surfaces.includes("desktop");
+  return {
+    ...agent,
+    pathOverride,
+    pathPlaceholder: desktop
+      ? `/Applications/${observation.displayName}.app`
+      : `/path/to/${observation.agentId === "claude-code" ? "claude" : observation.agentId.replace(/-cli$/, "")}`,
+    canOverride: BUILTIN_MANAGED_AGENT_IDS.has(observation.agentId),
+    busy
   };
 }
 
@@ -190,21 +330,109 @@ export function toResourceViewModel(resource: AiResource): ResourceViewModel {
   };
 }
 
+export function toAgentViewModel(agent: AiAgent | CallablePassportAgent): AgentViewModel {
+  if (isCallablePassportAgent(agent)) {
+    const stale = agent.availability === "stale";
+    return {
+      id: agent.id,
+      name: agent.name,
+      providerName: formatAgentProvider(agent.provider),
+      statusLabel: stale ? "信息已过期" : "可调用",
+      detailLabel: [
+        formatAgentProvider(agent.provider),
+        agent.capabilityIds.map(formatCapabilityId).join("、")
+      ].filter(Boolean).join(" · "),
+      tone: stale ? "unknown" : "running"
+    };
+  }
+  const running = agent.runtimeStatus === "running";
+  const installed = agent.installationStatus === "installed";
+  const absent = agent.installationStatus === "not_installed";
+  const tone: AgentTone = running
+    ? "running"
+    : installed
+      ? "installed"
+      : absent
+        ? "absent"
+        : "unknown";
+  const statusLabel = running
+    ? "运行中"
+    : installed
+      ? agent.runtimeStatus === "unknown" ? "已安装 · 状态未知" : "已安装"
+      : absent
+        ? "未发现"
+        : "未确认";
+  const providerName = formatAgentProvider(agent.provider);
+  const details = [
+    providerName,
+    agent.version?.trim() || "",
+    running && (agent.processCount ?? 0) > 1 ? `${agent.processCount} 个进程` : ""
+  ].filter(Boolean);
+  return {
+    id: agent.id,
+    name: agent.name,
+    providerName,
+    statusLabel,
+    detailLabel: details.join(" · "),
+    tone
+  };
+}
+
+export function toCapabilityViewModel(capability: TetiCapability): CapabilityViewModel {
+  return {
+    id: capability.id,
+    name: capability.name,
+    categoryLabel: formatCapabilityId(capability.category),
+    availabilityLabel: capability.availability === "stale" ? "信息已过期" : "可调用",
+    stale: capability.availability === "stale"
+  };
+}
+
+function isCallablePassportAgent(
+  agent: AiAgent | CallablePassportAgent
+): agent is CallablePassportAgent {
+  return "capabilityIds" in agent && "availability" in agent;
+}
+
+function formatCapabilityId(value: string): string {
+  const known: Record<string, string> = {
+    coding: "编程",
+    "code-analysis": "代码分析"
+  };
+  return known[value] ?? value.replace(/[._-]+/g, " ");
+}
+
+function formatAgentProvider(provider: string | undefined): string {
+  const value = provider?.trim() || "";
+  const known: Record<string, string> = {
+    openai: "OpenAI",
+    anthropic: "Anthropic",
+    cursor: "Cursor",
+    tencent: "Tencent",
+    google: "Google"
+  };
+  return known[value.toLowerCase()] ?? value;
+}
+
 function toRemotePassportViewModel(passport: RemotePassportSnapshot): RemotePassportViewModel {
   const note = passport.state === "stale"
     ? "AI Passport 已过期"
     : passport.state === "disabled"
       ? "对方未分享 AI Passport"
       : passport.state === "unknown"
-        ? "暂无 AI Passport"
+      ? "暂无 AI Passport"
         : passport.resources.length === 0
+          && passport.agents.length === 0
+          && (passport.capabilities?.length ?? 0) === 0
           ? "暂无 AI Passport"
           : undefined;
   return {
     state: passport.state,
     ...(note ? { note } : {}),
     stale: passport.state === "stale",
-    resources: passport.resources.slice(0, 2).map(toResourceViewModel)
+    resources: passport.resources.slice(0, 2).map(toResourceViewModel),
+    agents: passport.agents.map(toAgentViewModel),
+    capabilities: (passport.capabilities ?? []).map(toCapabilityViewModel)
   };
 }
 

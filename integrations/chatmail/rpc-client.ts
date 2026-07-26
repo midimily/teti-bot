@@ -16,11 +16,20 @@ import type {
 } from "./types.ts";
 
 export interface JsonRpcTransport {
-  request<TResponse>(method: string, params?: unknown): Promise<TResponse>;
+  request<TResponse>(
+    method: string,
+    params?: unknown,
+    options?: JsonRpcRequestOptions
+  ): Promise<TResponse>;
 }
 
 export interface JsonRpcConnection {
-  send(payload: JsonRpcRequest): Promise<JsonRpcResponse>;
+  send(payload: JsonRpcRequest, options?: JsonRpcRequestOptions): Promise<JsonRpcResponse>;
+}
+
+export interface JsonRpcRequestOptions {
+  /** `null` disables the transport's default timeout for a deliberate long poll. */
+  timeoutMs?: number | null;
 }
 
 export interface JsonRpcRequest {
@@ -51,14 +60,21 @@ export class JsonRpcClientTransport implements JsonRpcTransport {
     this.connection = connection;
   }
 
-  async request<TResponse>(method: string, params?: unknown): Promise<TResponse> {
+  async request<TResponse>(
+    method: string,
+    params?: unknown,
+    options?: JsonRpcRequestOptions
+  ): Promise<TResponse> {
     const id = this.nextId++;
-    const response = await this.connection.send({
-      jsonrpc: "2.0",
-      id,
-      method,
-      params
-    });
+    const response = await this.connection.send(
+      {
+        jsonrpc: "2.0",
+        id,
+        method,
+        params
+      },
+      options
+    );
 
     if (response.error) {
       throw new ChatmailRpcError(method, response.error.message, response.error.code, response.error.data);
@@ -71,6 +87,10 @@ export class JsonRpcClientTransport implements JsonRpcTransport {
 export class JsonRpcChatmailClient implements ChatmailRpcClient {
   private readonly transport: JsonRpcTransport;
   private readonly observedMessageIds = new Set<string>();
+  private eventBatchRequest?: Promise<void>;
+  private readyEventBatch?: ChatmailEvent[];
+  private eventBatchError?: unknown;
+  private readonly eventBatchWaiters = new Set<() => void>();
 
   constructor(transport: JsonRpcTransport) {
     this.transport = transport;
@@ -186,6 +206,30 @@ export class JsonRpcChatmailClient implements ChatmailRpcClient {
     };
   }
 
+  async sendFileMessage(
+    input: SendChatmailMessageInput & { attachment: NonNullable<SendChatmailMessageInput["attachment"]> }
+  ): Promise<ChatmailSentMessage> {
+    const contactId = await this.resolvePeerContactId(input);
+    const chatId = await this.createChatByContactId({
+      accountId: input.accountId,
+      contactId
+    });
+    const result = await this.transport.request<[number, ChatmailMessageObject]>("misc_send_msg", [
+      input.accountId,
+      chatId,
+      input.text,
+      input.attachment.path,
+      input.attachment.filename,
+      null,
+      null
+    ]);
+    const messageId = numberValue(result[0] ?? result[1]?.id);
+    if (messageId === undefined) {
+      throw new ChatmailRpcError("misc_send_msg", "DeltaChat did not return a message ID.", -32000);
+    }
+    return { messageId, chatId };
+  }
+
   private async resolvePeerContactId(input: SendChatmailMessageInput): Promise<number> {
     if (input.peerPublicKey) {
       const contactIds = await this.importVcardContents({
@@ -225,7 +269,7 @@ export class JsonRpcChatmailClient implements ChatmailRpcClient {
     }
 
     try {
-      events = await this.transport.request<ChatmailEvent[]>("get_next_event_batch", []);
+      events = await this.takeAvailableEventBatch();
       input.onDiagnostic?.({
         type: "eventBatch",
         accountId: input.accountId,
@@ -276,6 +320,80 @@ export class JsonRpcChatmailClient implements ChatmailRpcClient {
     return messages;
   }
 
+  /**
+   * DeltaChat deliberately keeps get_next_event_batch open until an event
+   * arrives. Keep exactly one such request alive across Runtime poll ticks;
+   * applying the normal RPC deadline would abandon requests that can later
+   * consume events whose responses no longer have a receiver.
+   */
+  private async takeAvailableEventBatch(): Promise<ChatmailEvent[]> {
+    this.ensureEventBatchRequest();
+
+    if (this.readyEventBatch === undefined && this.eventBatchError === undefined) {
+      await this.waitForEventBatchTurn();
+    }
+
+    if (this.eventBatchError !== undefined) {
+      const error = this.eventBatchError;
+      this.eventBatchError = undefined;
+      throw error;
+    }
+
+    if (this.readyEventBatch === undefined) {
+      return [];
+    }
+
+    const events = this.readyEventBatch;
+    this.readyEventBatch = undefined;
+    return events;
+  }
+
+  private ensureEventBatchRequest(): void {
+    if (
+      this.eventBatchRequest
+      || this.readyEventBatch !== undefined
+      || this.eventBatchError !== undefined
+    ) {
+      return;
+    }
+
+    const request = this.transport
+      .request<ChatmailEvent[]>("get_next_event_batch", [], { timeoutMs: null })
+      .then((events) => {
+        this.readyEventBatch = events;
+      })
+      .catch((error: unknown) => {
+        this.eventBatchError = error;
+      })
+      .finally(() => {
+        if (this.eventBatchRequest === request) {
+          this.eventBatchRequest = undefined;
+        }
+        this.notifyEventBatchWaiters();
+      });
+
+    this.eventBatchRequest = request;
+  }
+
+  private waitForEventBatchTurn(): Promise<void> {
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        this.eventBatchWaiters.delete(finish);
+        resolve();
+      };
+
+      this.eventBatchWaiters.add(finish);
+      setImmediate(finish);
+    });
+  }
+
+  private notifyEventBatchWaiters(): void {
+    for (const waiter of [...this.eventBatchWaiters]) waiter();
+  }
+
   private async appendNextMessages(
     input: ReceiveChatmailMessagesInput,
     messages: ChatmailReceivedMessage[]
@@ -313,6 +431,18 @@ export class JsonRpcChatmailClient implements ChatmailRpcClient {
     };
   }
 
+  async downloadFullMessage(accountId: number, messageId: number): Promise<void> {
+    await this.transport.request<null>("download_full_message", [accountId, messageId]);
+  }
+
+  async getReceivedMessage(accountId: number, messageId: number): Promise<ChatmailReceivedMessage> {
+    const message = await this.transport.request<ChatmailMessageObject>("get_message", [
+      accountId,
+      messageId
+    ]);
+    return toChatmailReceivedMessage(messageId, undefined, message);
+  }
+
   async getNextMessageIds(accountId: number): Promise<number[]> {
     try {
       return await this.transport.request<number[]>("get_next_msgs", [accountId]);
@@ -340,12 +470,15 @@ export class JsonRpcChatmailClient implements ChatmailRpcClient {
       accountId,
       messageId
     ]);
-    this.observedMessageIds.add(key);
     if (isOutgoingMessageState(numberValue(message.state))) {
+      this.observedMessageIds.add(key);
       return null;
     }
 
     const received = toChatmailReceivedMessage(messageId, eventBody, message);
+    if (received.downloadState !== "Available" && received.downloadState !== "InProgress") {
+      this.observedMessageIds.add(key);
+    }
     input.onDiagnostic?.({
       type: "messageFetched",
       accountId,
@@ -414,6 +547,12 @@ export class UnconfiguredChatmailRpcClient implements ChatmailRpcClient {
     throw rpcNotConfigured();
   }
 
+  async sendFileMessage(
+    _input: SendChatmailMessageInput & { attachment: NonNullable<SendChatmailMessageInput["attachment"]> }
+  ): Promise<ChatmailSentMessage> {
+    throw rpcNotConfigured();
+  }
+
   async receiveMessages(
     _input: ReceiveChatmailMessagesInput
   ): Promise<ChatmailReceivedMessage[]> {
@@ -425,6 +564,14 @@ export class UnconfiguredChatmailRpcClient implements ChatmailRpcClient {
   }
 
   async getMessageStatus(_accountId: number, _messageId: number): Promise<ChatmailMessageStatus> {
+    throw rpcNotConfigured();
+  }
+
+  async downloadFullMessage(_accountId: number, _messageId: number): Promise<void> {
+    throw rpcNotConfigured();
+  }
+
+  async getReceivedMessage(_accountId: number, _messageId: number): Promise<ChatmailReceivedMessage> {
     throw rpcNotConfigured();
   }
 
@@ -507,6 +654,12 @@ interface ChatmailMessageObject {
   showPadlock?: boolean;
   show_padlock?: boolean;
   error?: string | null;
+  file?: string | null;
+  fileName?: string | null;
+  fileMime?: string | null;
+  fileBytes?: number;
+  downloadState?: "Done" | "Available" | "Failure" | "Undecipherable" | "InProgress";
+  viewType?: string;
   sender?: {
     address?: string;
     addr?: string;
@@ -632,6 +785,12 @@ function toChatmailReceivedMessage(
     chatId: numberValue(message.chatId ?? message.chat_id ?? event?.chatId ?? event?.chat_id) ?? 0,
     fromAddress: message.sender?.address ?? message.sender?.addr,
     text: message.text,
+    ...(stringValue(message.file) ? { filePath: stringValue(message.file) } : {}),
+    ...(stringValue(message.fileName) ? { fileName: stringValue(message.fileName) } : {}),
+    ...(stringValue(message.fileMime) ? { fileMime: stringValue(message.fileMime) } : {}),
+    ...(numberValue(message.fileBytes) === undefined ? {} : { fileBytes: numberValue(message.fileBytes) }),
+    ...(message.downloadState ? { downloadState: message.downloadState } : {}),
+    ...(stringValue(message.viewType) ? { viewType: stringValue(message.viewType) } : {}),
     receivedAt: unixTimestampToIso(receivedTimestamp || timestamp)
   };
 }
@@ -656,7 +815,9 @@ function isOutgoingMessageState(state: number | undefined): boolean {
 }
 
 function isJsonRpcTimeout(error: unknown): boolean {
-  return error instanceof Error && /JSON-RPC request .* timed out/.test(error.message);
+  if (!(error instanceof Error)) return false;
+  if ((error as Error & { code?: unknown }).code === "CM_RPC_TIMEOUT") return true;
+  return /JSON-RPC request(?: .*?)? timed out\.?$/.test(error.message);
 }
 
 function numberValue(value: unknown): number | undefined {

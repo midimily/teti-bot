@@ -5,6 +5,15 @@ import {
 } from "./types.ts";
 import { isCanonicalTetiPublicId } from "../identity/public-id.ts";
 import { validateAiStatusSyncPayload } from "../ai-status/protocol.ts";
+import { validateCollaborationTaskRequest } from "../task/validation.ts";
+import {
+  validateTaskProtocolVersions,
+  validateTaskArtifactPayload,
+  validateTaskAttachmentPayload,
+  validateTaskCancelPayload,
+  validateTaskReceiptPayload,
+  validateTaskStatusPayload
+} from "../task/transport-validation.ts";
 
 export class TetiApplicationProtocolError extends Error {}
 
@@ -79,6 +88,13 @@ function validatePayload(type: TetiApplicationMessageType, payload: Record<strin
   if (type === "teti.presence") {
     requireNonEmptyString(payload.status, "status");
     requireNonEmptyString(payload.timestamp, "timestamp");
+    if (payload.taskProtocolVersions !== undefined) {
+      try {
+        validateTaskProtocolVersions(payload.taskProtocolVersions);
+      } catch {
+        throw new TetiApplicationProtocolError("Presence task protocol versions are invalid.");
+      }
+    }
     return;
   }
 
@@ -88,6 +104,34 @@ function validatePayload(type: TetiApplicationMessageType, payload: Record<strin
     } catch {
       throw new TetiApplicationProtocolError("AI status sync payload is invalid.");
     }
+    return;
+  }
+
+  if (type === "teti.task.request") {
+    try {
+      validateCollaborationTaskRequest(payload);
+    } catch {
+      throw new TetiApplicationProtocolError("Task request payload is invalid.");
+    }
+    return;
+  }
+
+  if (type === "teti.task.receipt") {
+    try {
+      validateTaskReceiptPayload(payload);
+    } catch {
+      throw new TetiApplicationProtocolError("Task receipt payload is invalid.");
+    }
+    return;
+  }
+
+  try {
+    if (type === "teti.task.attachment") validateTaskAttachmentPayload(payload);
+    else if (type === "teti.task.status") validateTaskStatusPayload(payload);
+    else if (type === "teti.task.cancel") validateTaskCancelPayload(payload);
+    else if (type === "teti.task.artifact") validateTaskArtifactPayload(payload);
+  } catch {
+    throw new TetiApplicationProtocolError("Task application payload is invalid.");
   }
 }
 
@@ -112,7 +156,13 @@ function isSupportedApplicationType(value: string): value is TetiApplicationMess
     "teti.profile.sync",
     "teti.capability.offer",
     "teti.presence",
-    "teti.ai.status.sync"
+    "teti.ai.status.sync",
+    "teti.task.request",
+    "teti.task.receipt",
+    "teti.task.attachment",
+    "teti.task.status",
+    "teti.task.cancel",
+    "teti.task.artifact"
   ].includes(value);
 }
 

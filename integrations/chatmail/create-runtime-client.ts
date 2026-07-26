@@ -29,11 +29,11 @@ export function createRuntimeChatmailRpcClient(
 }
 
 class ClosableRuntimeChatmailRpcClient implements RuntimeChatmailRpcClient {
-  private readonly client: ChatmailRpcClient;
+  private readonly client: JsonRpcChatmailClient;
   private readonly stdioTransport: StdioJsonRpcTransport;
 
   constructor(
-    client: ChatmailRpcClient,
+    client: JsonRpcChatmailClient,
     stdioTransport: StdioJsonRpcTransport
   ) {
     this.client = client;
@@ -109,6 +109,12 @@ class ClosableRuntimeChatmailRpcClient implements RuntimeChatmailRpcClient {
     return this.client.sendTextMessage(input);
   }
 
+  sendFileMessage(
+    input: Parameters<JsonRpcChatmailClient["sendFileMessage"]>[0]
+  ): ReturnType<JsonRpcChatmailClient["sendFileMessage"]> {
+    return this.client.sendFileMessage(input);
+  }
+
   receiveMessages(
     input: Parameters<ChatmailRpcClient["receiveMessages"]>[0]
   ): ReturnType<ChatmailRpcClient["receiveMessages"]> {
@@ -126,6 +132,20 @@ class ClosableRuntimeChatmailRpcClient implements RuntimeChatmailRpcClient {
     messageId: Parameters<ChatmailRpcClient["getMessageStatus"]>[1]
   ): ReturnType<ChatmailRpcClient["getMessageStatus"]> {
     return this.client.getMessageStatus(accountId, messageId);
+  }
+
+  downloadFullMessage(
+    accountId: Parameters<JsonRpcChatmailClient["downloadFullMessage"]>[0],
+    messageId: Parameters<JsonRpcChatmailClient["downloadFullMessage"]>[1]
+  ): ReturnType<JsonRpcChatmailClient["downloadFullMessage"]> {
+    return this.client.downloadFullMessage(accountId, messageId);
+  }
+
+  getReceivedMessage(
+    accountId: Parameters<JsonRpcChatmailClient["getReceivedMessage"]>[0],
+    messageId: Parameters<JsonRpcChatmailClient["getReceivedMessage"]>[1]
+  ): ReturnType<JsonRpcChatmailClient["getReceivedMessage"]> {
+    return this.client.getReceivedMessage(accountId, messageId);
   }
 
   removeAccount(

@@ -24,17 +24,40 @@ import {
 } from "../../../core/connection/types.ts";
 import { parseApplicationEnvelope } from "../../../core/protocol/envelope.ts";
 import type { TetiPresencePayload } from "../../../core/protocol/types.ts";
+import type { TetiApplicationEnvelope } from "../../../core/protocol/types.ts";
+import type { CollaborationTaskRequest } from "../../../core/task/types.ts";
+import {
+  TETI_SUPPORTED_TASK_PROTOCOL_VERSIONS,
+  type CollaborationTaskTransportRecord,
+  type CollaborationTaskTransportSnapshot,
+  type CollaborationTaskSummarySnapshot,
+  type SendCollaborationTaskInput,
+  type TetiTaskArtifactPayload,
+  type TetiTaskAttachmentPayload,
+  type TetiTaskCancelPayload,
+  type TetiTaskReceiptPayload,
+  type TetiTaskStatusPayload
+} from "../../../core/task/transport.ts";
 import type {
   AiStatusSyncPayload,
+  CallablePassportAiStatusSyncPayload,
+  LegacyAiStatusSyncPayload,
+  PassportAiStatusSyncPayload,
   AiToolStatusSnapshot,
   RemoteAiStatusSnapshot
 } from "../../../core/ai-status/types.ts";
+import { selectAiStatusSchemasForPeer } from "../../../core/ai-status/negotiation.ts";
+import type { CallableAgent } from "../../../core/callability/types.ts";
+import { projectCallablePassport } from "../../../core/passport/callable-projection.ts";
 import type { PassportSharingPolicy } from "../../../core/passport/types.ts";
 import { TetiApplicationProtocolError } from "../../../core/protocol/validator.ts";
 import { ChatmailConnectionMessagingAdapter } from "../../../integrations/chatmail/connection-messaging.ts";
 import { createRuntimeChatmailRpcClient, type RuntimeChatmailRpcClient } from "../../../integrations/chatmail/create-runtime-client.ts";
 import { RealChatmailAdapter } from "../../../integrations/chatmail/real-adapter.ts";
-import type { ChatmailAdapter } from "../../../integrations/chatmail/types.ts";
+import type {
+  ChatmailAdapter,
+  ChatmailReceivedMessage
+} from "../../../integrations/chatmail/types.ts";
 import { RegistryDiscoveryClient } from "../../../services/discovery/registry-client.ts";
 import { toTetiIdentity, type TetiRegistryReader } from "../../../services/discovery/client.ts";
 import type { TetiIdentity } from "../../../services/discovery/types.ts";
@@ -47,12 +70,23 @@ import type {
 import { resolveTetiProfile } from "./profile.ts";
 import {
   FilePassportSharingStore,
+  hasPassportSharingFields,
   MemoryPassportSharingStore,
-  isResourceSharingEnabled,
   type PassportSharingStore
 } from "./runtime/passport/sharing.ts";
 import { getDefaultCodexUsageService } from "./codex-usage/runtime.ts";
 import { createShareableCodexStatus } from "../src/codex-usage/presentation.ts";
+import {
+  FileTaskTransportStore,
+  MemoryTaskTransportStore,
+  type TaskTransportStore
+} from "./runtime/tasks/store.ts";
+import { TaskTransportRuntime } from "./runtime/tasks/service.ts";
+import type { TaskExecutionBridge } from "./runtime/tasks/service.ts";
+import {
+  FileTaskAttachmentStore,
+  type StagedTaskImage
+} from "./runtime/tasks/attachments.ts";
 
 const HEARTBEAT_INTERVAL_MS = 5_000;
 const AI_STATUS_SYNC_INTERVAL_MS = 10 * 60 * 1_000;
@@ -67,6 +101,15 @@ export interface PeerConnectionService {
   reject(requestId: string): Promise<PeerConnectionResult>;
   getPassportSharing(): Promise<PassportSharingPolicy>;
   setPassportSharing(policy: PassportSharingPolicy): Promise<PassportSharingPolicy>;
+  sendTask?(input: SendCollaborationTaskInput): Promise<CollaborationTaskTransportRecord>;
+  listTasks?(): Promise<CollaborationTaskTransportSnapshot>;
+  listTaskSummaries?(): Promise<CollaborationTaskSummarySnapshot>;
+  getTask?(taskId: string): Promise<CollaborationTaskTransportRecord>;
+  stageTaskImage?(sourcePath: string): Promise<StagedTaskImage>;
+  resolveTaskImage?(taskId: string, attachmentId: string): Promise<string>;
+  approveTask?(taskId: string): Promise<CollaborationTaskTransportRecord>;
+  rejectTask?(taskId: string): Promise<CollaborationTaskTransportRecord>;
+  cancelTask?(taskId: string): Promise<CollaborationTaskTransportRecord>;
 }
 
 interface PeerConnectionRuntimeOptions {
@@ -78,6 +121,11 @@ interface PeerConnectionRuntimeOptions {
   now?: () => Date;
   passportSharing?: PassportSharingStore;
   getLocalAiTools?: () => AiToolStatusSnapshot[];
+  getLocalCallableAgents?: () => CallableAgent[];
+  taskTransportStore?: TaskTransportStore;
+  taskIdFactory?: () => string;
+  taskAttachmentStore?: FileTaskAttachmentStore;
+  taskExecutor?: TaskExecutionBridge;
 }
 
 export class PeerConnectionRuntime implements PeerConnectionService {
@@ -88,10 +136,12 @@ export class PeerConnectionRuntime implements PeerConnectionService {
   private readonly connectionManager: TetiConnectionManager;
   private readonly applicationManager: TetiApplicationManager;
   private readonly messagingAdapter: ChatmailConnectionMessagingAdapter;
+  private readonly taskTransport: TaskTransportRuntime;
   private readonly startIo?: (accountId: number) => Promise<void>;
   private readonly now: () => Date;
   private readonly passportSharing: PassportSharingStore;
   private readonly getLocalAiTools: () => AiToolStatusSnapshot[];
+  private readonly getLocalCallableAgents: () => CallableAgent[];
   private readonly heartbeatSent = new Map<string, string>();
   private readonly heartbeatReceived = new Map<string, string>();
   private readonly aiStatusSent = new Map<string, { at: string; signature: string }>();
@@ -100,7 +150,7 @@ export class PeerConnectionRuntime implements PeerConnectionService {
   private ready = false;
   private queue: Promise<void> = Promise.resolve();
   private settingsQueue: Promise<void> = Promise.resolve();
-  private pendingAiStatusBroadcast: "enabled" | "disabled" | null = null;
+  private pendingAiStatusBroadcast: PassportSharingPolicy | null = null;
   private aiStatusBroadcastQueued = false;
 
   constructor(options: PeerConnectionRuntimeOptions) {
@@ -112,6 +162,7 @@ export class PeerConnectionRuntime implements PeerConnectionService {
     this.now = options.now ?? (() => new Date());
     this.passportSharing = options.passportSharing ?? new MemoryPassportSharingStore();
     this.getLocalAiTools = options.getLocalAiTools ?? (() => []);
+    this.getLocalCallableAgents = options.getLocalCallableAgents ?? (() => []);
     this.messagingAdapter = new ChatmailConnectionMessagingAdapter(this.chatmailAdapter);
     this.connectionManager = new TetiConnectionManager({
       accountStorage: this.accountStorage,
@@ -121,7 +172,19 @@ export class PeerConnectionRuntime implements PeerConnectionService {
     this.applicationManager = new TetiApplicationManager({
       accountStorage: this.accountStorage,
       connectionStorage: this.connectionStorage,
-      chatmailAdapter: this.chatmailAdapter
+      chatmailAdapter: this.chatmailAdapter,
+      now: () => this.now().toISOString()
+    });
+    this.taskTransport = new TaskTransportRuntime({
+      accountStorage: this.accountStorage,
+      connectionStorage: this.connectionStorage,
+      applicationManager: this.applicationManager,
+      store: options.taskTransportStore ?? new MemoryTaskTransportStore(),
+      now: this.now,
+      taskIdFactory: options.taskIdFactory,
+      attachmentStore: options.taskAttachmentStore,
+      executor: options.taskExecutor,
+      enqueueOperation: (operation) => this.serial(operation)
     });
   }
 
@@ -178,17 +241,23 @@ export class PeerConnectionRuntime implements PeerConnectionService {
       let receivedCount = 0;
 
       for (const message of messages) {
-        if (!message.text) continue;
-        if (await this.processConnectionMessage(message.text, message.receivedAt, message.fromAddress)) {
-          receivedCount += 1;
-          continue;
-        }
+        try {
+          if (!message.text) continue;
+          if (await this.processConnectionMessage(message.text, message.receivedAt, message.fromAddress)) {
+            receivedCount += 1;
+            continue;
+          }
 
-        if (await this.processApplicationMessage(message.text, message.fromAddress, message.receivedAt)) {
-          receivedCount += 1;
+          if (await this.processApplicationMessage(message)) {
+            receivedCount += 1;
+          }
+        } catch {
+          // A malformed, corrupt, or unauthorized message is isolated from the
+          // rest of the offline queue. No remote payload may stop Runtime poll.
         }
       }
 
+      await this.taskTransport.flushOutbox();
       const heartbeatCount = await this.sendDueHeartbeats();
       const aiStatusCount = await this.sendDueAiStatus();
       return this.snapshot(receivedCount, heartbeatCount, undefined, aiStatusCount);
@@ -220,13 +289,52 @@ export class PeerConnectionRuntime implements PeerConnectionService {
   setPassportSharing(policy: PassportSharingPolicy): Promise<PassportSharingPolicy> {
     return this.serialSettings(async () => {
       await this.passportSharing.save(policy);
-      this.scheduleAiStatusBroadcast(isResourceSharingEnabled(policy) ? "enabled" : "disabled");
+      this.scheduleAiStatusBroadcast(policy);
       return { ...policy };
     });
   }
 
-  private scheduleAiStatusBroadcast(sharing: "enabled" | "disabled"): void {
-    this.pendingAiStatusBroadcast = sharing;
+  sendTask(input: SendCollaborationTaskInput): Promise<CollaborationTaskTransportRecord> {
+    return this.serial(async () => {
+      await this.ensureReady();
+      return this.taskTransport.send(input);
+    });
+  }
+
+  listTasks(): Promise<CollaborationTaskTransportSnapshot> {
+    return this.serial(() => this.taskTransport.list());
+  }
+
+  listTaskSummaries(): Promise<CollaborationTaskSummarySnapshot> {
+    return this.serial(() => this.taskTransport.listSummaries());
+  }
+
+  getTask(taskId: string): Promise<CollaborationTaskTransportRecord> {
+    return this.serial(() => this.taskTransport.get(taskId));
+  }
+
+  stageTaskImage(sourcePath: string): Promise<StagedTaskImage> {
+    return this.serial(() => this.taskTransport.stageImage(sourcePath));
+  }
+
+  resolveTaskImage(taskId: string, attachmentId: string): Promise<string> {
+    return this.serial(() => this.taskTransport.resolveTaskImage(taskId, attachmentId));
+  }
+
+  approveTask(taskId: string): Promise<CollaborationTaskTransportRecord> {
+    return this.serial(() => this.taskTransport.approve(taskId));
+  }
+
+  rejectTask(taskId: string): Promise<CollaborationTaskTransportRecord> {
+    return this.serial(() => this.taskTransport.reject(taskId));
+  }
+
+  cancelTask(taskId: string): Promise<CollaborationTaskTransportRecord> {
+    return this.serial(() => this.taskTransport.cancel(taskId));
+  }
+
+  private scheduleAiStatusBroadcast(policy: PassportSharingPolicy): void {
+    this.pendingAiStatusBroadcast = structuredClone(policy);
     if (this.aiStatusBroadcastQueued) return;
     this.aiStatusBroadcastQueued = true;
     queueMicrotask(() => {
@@ -235,7 +343,7 @@ export class PeerConnectionRuntime implements PeerConnectionService {
         this.pendingAiStatusBroadcast = null;
         if (!latest) return;
         await this.broadcastAiStatus(latest);
-        if (latest === "disabled") this.aiStatusSent.clear();
+        if (!hasPassportSharingFields(latest)) this.aiStatusSent.clear();
       }).catch(() => undefined).finally(() => {
         this.aiStatusBroadcastQueued = false;
         const latest = this.pendingAiStatusBroadcast;
@@ -304,11 +412,11 @@ export class PeerConnectionRuntime implements PeerConnectionService {
     return true;
   }
 
-  private async processApplicationMessage(
-    text: string,
-    fromAddress?: string,
-    receivedAt?: string
-  ): Promise<boolean> {
+  private async processApplicationMessage(message: ChatmailReceivedMessage): Promise<boolean> {
+    const text = message.text ?? "";
+    const fromAddress = message.fromAddress;
+    const receivedAt = message.receivedAt;
+    const chatmailMessageId = message.messageId;
     let envelope;
     try {
       envelope = parseApplicationEnvelope(text);
@@ -327,6 +435,13 @@ export class PeerConnectionRuntime implements PeerConnectionService {
     if (envelope.type === "teti.presence") {
       const payload = envelope.payload as TetiPresencePayload;
       this.heartbeatReceived.set(connection.requestId, payload.timestamp || envelope.createdAt);
+      if (payload.taskProtocolVersions) {
+        await this.taskTransport.observePeerVersions(
+          connection.remoteTetiId,
+          payload.taskProtocolVersions,
+          payload.timestamp || envelope.createdAt
+        );
+      }
       return true;
     }
 
@@ -334,13 +449,95 @@ export class PeerConnectionRuntime implements PeerConnectionService {
       if (!fromAddress || connection.remoteAddress.toLowerCase() !== fromAddress.toLowerCase()) return false;
       const payload = envelope.payload as AiStatusSyncPayload;
       const existing = this.remoteAiStatus.get(connection.requestId);
-      if (!existing || Date.parse(payload.generatedAt) >= Date.parse(existing.generatedAt)) {
+      if (!existing || shouldReplaceRemoteAiStatus(existing, payload)) {
         this.remoteAiStatus.set(connection.requestId, {
           ...structuredClone(payload),
           receivedAt: receivedAt ?? this.now().toISOString()
         });
       }
+      return true;
     }
+
+    if (!fromAddress || connection.remoteAddress.toLowerCase() !== fromAddress.toLowerCase()) {
+      return false;
+    }
+
+    if (envelope.type === "teti.task.request") {
+      const typedEnvelope = envelope as TetiApplicationEnvelope<CollaborationTaskRequest>;
+      const receipt = await this.taskTransport.receiveRequest({
+        envelope: typedEnvelope,
+        connection,
+        chatmailMessageId,
+        receivedAt
+      });
+      try {
+        await this.applicationManager.sendTaskReceipt(connection.requestId, receipt);
+        await this.taskTransport.markReceiptSent(receipt.taskId, receipt.requesterTetiId);
+      } catch {
+        // Receipt stays in the durable outbox and is retried by Runtime polling.
+      }
+      return true;
+    }
+
+    if (envelope.type === "teti.task.attachment") {
+      let attachmentMessage = message;
+      if (!attachmentMessage.filePath
+        && (attachmentMessage.downloadState === "Available" || attachmentMessage.downloadState === "InProgress")) {
+        const account = await this.requireAccount();
+        if (!this.chatmailAdapter.downloadMessageAttachment) {
+          throw new Error("Chatmail attachment download is unavailable.");
+        }
+        attachmentMessage = await this.chatmailAdapter.downloadMessageAttachment(
+          account.chatmailAccountId,
+          message.messageId
+        );
+      }
+      if (!attachmentMessage.filePath) {
+        throw new Error("Chatmail Task attachment has no local file.");
+      }
+      await this.taskTransport.receiveAttachment({
+        envelope: envelope as TetiApplicationEnvelope<TetiTaskAttachmentPayload>,
+        connection,
+        filePath: attachmentMessage.filePath,
+        receivedAt
+      });
+      return true;
+    }
+
+    if (envelope.type === "teti.task.status") {
+      await this.taskTransport.receiveStatus({
+        envelope: envelope as TetiApplicationEnvelope<TetiTaskStatusPayload>,
+        connection,
+        receivedAt
+      });
+      return true;
+    }
+
+    if (envelope.type === "teti.task.cancel") {
+      await this.taskTransport.receiveCancel({
+        envelope: envelope as TetiApplicationEnvelope<TetiTaskCancelPayload>,
+        connection,
+        receivedAt
+      });
+      return true;
+    }
+
+    if (envelope.type === "teti.task.artifact") {
+      await this.taskTransport.receiveArtifact({
+        envelope: envelope as TetiApplicationEnvelope<TetiTaskArtifactPayload>,
+        connection,
+        receivedAt
+      });
+      return true;
+    }
+
+    if (envelope.type !== "teti.task.receipt") return true;
+
+    await this.taskTransport.receiveReceipt({
+      envelope: envelope as TetiApplicationEnvelope<TetiTaskReceiptPayload>,
+      connection,
+      receivedAt
+    });
     return true;
   }
 
@@ -354,7 +551,8 @@ export class PeerConnectionRuntime implements PeerConnectionService {
       const timestamp = now.toISOString();
       await this.applicationManager.sendPresence(connection.requestId, {
         status: "alpha-heartbeat",
-        timestamp
+        timestamp,
+        taskProtocolVersions: [...TETI_SUPPORTED_TASK_PROTOCOL_VERSIONS]
       });
       this.heartbeatSent.set(connection.requestId, timestamp);
       sent += 1;
@@ -363,18 +561,34 @@ export class PeerConnectionRuntime implements PeerConnectionService {
   }
 
   private async sendDueAiStatus(force = false): Promise<number> {
-    const sharing = await this.passportSharing.load().then(
-      (policy) => isResourceSharingEnabled(policy),
-      () => false
-    );
-    if (!sharing) return 0;
-    return this.broadcastAiStatus("enabled", force);
+    const policy = await this.passportSharing.load().catch(() => null);
+    if (!policy || !hasPassportSharingFields(policy)) return 0;
+    return this.broadcastAiStatus(policy, force);
   }
 
-  private async broadcastAiStatus(sharing: "enabled" | "disabled", force = true): Promise<number> {
+  private async broadcastAiStatus(
+    policy: PassportSharingPolicy,
+    force = true
+  ): Promise<number> {
     const now = this.now();
-    const tools = sharing === "enabled" ? this.getLocalAiTools() : [];
-    const signature = JSON.stringify({ sharing, tools });
+    const sharing = hasPassportSharingFields(policy) ? "enabled" : "disabled";
+    const tools = policy.resourceSummary
+      ? this.getLocalAiTools().map((tool) => ({
+          ...structuredClone(tool),
+          quotas: policy.resourceQuota ? structuredClone(tool.quotas) : []
+        }))
+      : [];
+    const callable = projectCallablePassport(
+      policy.agents ? this.getLocalCallableAgents() : []
+    );
+    const agents = policy.agents ? callable.agents : [];
+    const capabilities = policy.capabilities ? callable.capabilities : [];
+    const bindings = policy.capabilities
+      ? callable.bindings.filter((binding) =>
+          binding.agentIds.every((agentId) => agents.some((agent) => agent.id === agentId))
+        )
+      : [];
+    const signature = JSON.stringify({ sharing, tools, agents, capabilities, bindings });
     let sent = 0;
     for (const connection of await this.connectionStorage.loadAll()) {
       if (connection.state !== TetiConnectionState.Confirmed) continue;
@@ -385,16 +599,51 @@ export class PeerConnectionRuntime implements PeerConnectionService {
         && now.getTime() - Date.parse(previous.at) < AI_STATUS_SYNC_INTERVAL_MS) {
         continue;
       }
-      const payload: AiStatusSyncPayload = {
+      const legacyPayload: LegacyAiStatusSyncPayload = {
         schemaVersion: 1,
         sharing,
         generatedAt: now.toISOString(),
         expiresAt: new Date(now.getTime() + AI_STATUS_TTL_MS).toISOString(),
         tools: structuredClone(tools)
       };
+      const passportPayload: PassportAiStatusSyncPayload = {
+        schemaVersion: 2,
+        sharing,
+        generatedAt: legacyPayload.generatedAt,
+        expiresAt: legacyPayload.expiresAt,
+        tools: structuredClone(tools),
+        // Schema 2 described coarse installation/runtime observation. Callable
+        // Passport never downgrades qualified Agents into that older meaning.
+        agents: []
+      };
+      const callablePassportPayload: CallablePassportAiStatusSyncPayload = {
+        schemaVersion: 3,
+        sharing,
+        generatedAt: legacyPayload.generatedAt,
+        expiresAt: legacyPayload.expiresAt,
+        tools: structuredClone(tools),
+        agents: structuredClone(agents),
+        capabilities: structuredClone(capabilities),
+        bindings: structuredClone(bindings)
+      };
       try {
-        await this.applicationManager.sendAiStatusSync(connection.requestId, payload);
-        this.aiStatusSent.set(connection.requestId, { at: payload.generatedAt, signature });
+        const payloads: Record<number, AiStatusSyncPayload> = {
+          1: legacyPayload,
+          2: passportPayload,
+          3: callablePassportPayload
+        };
+        for (const schemaVersion of selectAiStatusSchemasForPeer(
+          this.remoteAiStatus.get(connection.requestId)
+        )) {
+          await this.applicationManager.sendAiStatusSync(
+            connection.requestId,
+            payloads[schemaVersion]!
+          );
+        }
+        this.aiStatusSent.set(connection.requestId, {
+          at: callablePassportPayload.generatedAt,
+          signature
+        });
         sent += 1;
       } catch {
         // Optional status sharing must not break peer presence or polling.
@@ -485,8 +734,15 @@ let defaultServicePromise: Promise<PeerConnectionService> | undefined;
 let defaultRpcClient: RuntimeChatmailRpcClient | undefined;
 let defaultPassportSharingStorePromise: Promise<FilePassportSharingStore> | undefined;
 
-export function getDefaultPeerConnectionService(): Promise<PeerConnectionService> {
-  defaultServicePromise ??= createDefaultPeerConnectionService();
+export interface DefaultPeerConnectionServiceOptions {
+  getLocalCallableAgents?: () => CallableAgent[];
+  taskExecutor?: TaskExecutionBridge;
+}
+
+export function getDefaultPeerConnectionService(
+  options: DefaultPeerConnectionServiceOptions = {}
+): Promise<PeerConnectionService> {
+  defaultServicePromise ??= createDefaultPeerConnectionService(options);
   return defaultServicePromise;
 }
 
@@ -507,7 +763,9 @@ export async function closeDefaultPeerConnectionService(): Promise<void> {
   await client?.close();
 }
 
-async function createDefaultPeerConnectionService(): Promise<PeerConnectionService> {
+async function createDefaultPeerConnectionService(
+  options: DefaultPeerConnectionServiceOptions
+): Promise<PeerConnectionService> {
   const profile = await resolveTetiProfile();
   defaultRpcClient = createRuntimeChatmailRpcClient({
     runtime: { accountsPath: profile.chatmailAccountsPath },
@@ -523,7 +781,11 @@ async function createDefaultPeerConnectionService(): Promise<PeerConnectionServi
     registry: new RegistryDiscoveryClient(),
     startIo: (accountId) => defaultRpcClient!.startIo(accountId),
     passportSharing: await getDefaultPassportSharingStore(),
-    getLocalAiTools: () => [createShareableCodexStatus(getDefaultCodexUsageService().getCurrentState())]
+    getLocalAiTools: () => [createShareableCodexStatus(getDefaultCodexUsageService().getCurrentState())],
+    getLocalCallableAgents: options.getLocalCallableAgents,
+    taskTransportStore: new FileTaskTransportStore(join(profile.root, "tasks.json")),
+    taskAttachmentStore: new FileTaskAttachmentStore(join(profile.root, "task-attachments")),
+    taskExecutor: options.taskExecutor
   });
 }
 
@@ -571,6 +833,15 @@ function requireMatchingSender(actual: string | undefined, expected: string | un
   if (!actual || !expected || actual.toLowerCase() !== expected.toLowerCase()) {
     throw new Error("Chatmail sender does not match the Teti handshake identity.");
   }
+}
+
+function shouldReplaceRemoteAiStatus(
+  existing: RemoteAiStatusSnapshot,
+  incoming: AiStatusSyncPayload
+): boolean {
+  const timestampDifference = Date.parse(incoming.generatedAt) - Date.parse(existing.generatedAt);
+  if (timestampDifference !== 0) return timestampDifference > 0;
+  return incoming.schemaVersion >= existing.schemaVersion;
 }
 
 function isSameIdentity(

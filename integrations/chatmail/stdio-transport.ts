@@ -2,6 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import type {
   JsonRpcConnection,
   JsonRpcRequest,
+  JsonRpcRequestOptions,
   JsonRpcResponse
 } from "./rpc-client.ts";
 import type { ChatmailRuntimeConfig } from "./runtime-config.ts";
@@ -94,7 +95,10 @@ export class StdioJsonRpcTransport implements JsonRpcConnection {
     return new StdioJsonRpcTransport(child, options);
   }
 
-  async send(payload: JsonRpcRequest): Promise<JsonRpcResponse> {
+  async send(
+    payload: JsonRpcRequest,
+    options?: JsonRpcRequestOptions
+  ): Promise<JsonRpcResponse> {
     if (this.closed) {
       throw this.terminalError
         ?? new ChatmailTransportError("CM_RPC_IO", "deltachat-rpc-server transport is closed.");
@@ -102,11 +106,17 @@ export class StdioJsonRpcTransport implements JsonRpcConnection {
 
     return new Promise<JsonRpcResponse>((resolve, reject) => {
       const pending: PendingRequest = { resolve, reject };
-      if (this.requestTimeoutMs && this.requestTimeoutMs > 0) {
+      const requestTimeoutMs = options?.timeoutMs === null
+        ? undefined
+        : options?.timeoutMs ?? this.requestTimeoutMs;
+      if (requestTimeoutMs && requestTimeoutMs > 0) {
         pending.timeout = setTimeout(() => {
           this.pending.delete(payload.id);
-          reject(new ChatmailTransportError("CM_RPC_TIMEOUT", "Chatmail JSON-RPC request timed out."));
-        }, this.requestTimeoutMs);
+          reject(new ChatmailTransportError(
+            "CM_RPC_TIMEOUT",
+            `Chatmail JSON-RPC request ${payload.method} timed out.`
+          ));
+        }, requestTimeoutMs);
       }
 
       this.pending.set(payload.id, pending);

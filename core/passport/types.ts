@@ -1,4 +1,4 @@
-export const TETI_CAPABILITY_PASSPORT_SCHEMA_VERSION = 1;
+export const TETI_CAPABILITY_PASSPORT_SCHEMA_VERSION = 2;
 export const TETI_PASSPORT_SHARING_POLICY_VERSION = 1;
 
 export type TetiAvailability = "available" | "unavailable" | "stale" | "unknown";
@@ -33,16 +33,41 @@ export interface AiResource {
   expiresAt?: string;
 }
 
-export type AiAgentType = "cli" | "desktop" | "local_service";
+export type AiAgentType = "cli" | "desktop" | "ide_extension" | "local_service";
 export type AiAgentInstallationStatus = "installed" | "not_installed" | "unknown";
-export type AiAgentDetectionSource = "command" | "application";
+export type AiAgentDetectionSource = "command" | "application" | "process";
+export type AiAgentRuntimeStatus = "running" | "not_running" | "unknown";
 
 export interface AiAgent {
   id: string;
   name: string;
+  provider?: string;
   type: AiAgentType;
+  surfaces?: AiAgentType[];
   installationStatus: AiAgentInstallationStatus;
   detectionSource?: AiAgentDetectionSource;
+  version?: string;
+  runtimeStatus?: AiAgentRuntimeStatus;
+  processCount?: number;
+  confidence?: "low" | "medium" | "high";
+  lastSeenAt?: string;
+  observedAt: string;
+}
+
+/**
+ * The Agent shape exposed by Callable Passport v2. Observation details such as
+ * process state, executable path, command, version and installation evidence
+ * deliberately do not cross this boundary. An entry exists only while a
+ * locally qualified Adapter is registered in Runtime.
+ */
+export interface CallablePassportAgent {
+  id: string;
+  name: string;
+  provider: string;
+  capabilityIds: string[];
+  inputModes: Array<"text" | "image">;
+  outputModes: Array<"text" | "image">;
+  availability: TetiAvailability;
   observedAt: string;
 }
 
@@ -67,10 +92,10 @@ export interface CapabilityBinding {
 }
 
 export interface TetiCapabilityPassport {
-  schemaVersion: 1;
+  schemaVersion: 2;
   generatedAt: string;
   resources: AiResource[];
-  agents: AiAgent[];
+  agents: CallablePassportAgent[];
   capabilities: TetiCapability[];
   bindings: CapabilityBinding[];
 }

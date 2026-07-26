@@ -170,6 +170,36 @@ test("capability exchange is handled for confirmed connections", async () => {
   );
 });
 
+test("Task request and receipt use the existing Application Envelope", async () => {
+  const { manager, chatmailAdapter } = await createApplicationHarness({
+    connectionState: TetiConnectionState.Confirmed,
+    messageId: "task-envelope"
+  });
+  const request = {
+    schemaVersion: 1 as const,
+    taskId: "task-001",
+    requesterTetiId: "teti_local0001",
+    targetTetiId: "teti_remote001",
+    offerId: "offer-001",
+    capabilityId: "code-analysis",
+    input: { kind: "text" as const, text: "Review this text." },
+    createdAt: fixedNow,
+    expiresAt: "2026-07-11T01:00:00.000Z"
+  };
+
+  const sent = await manager.sendTaskRequest("request-1", request);
+  assert.equal(sent.envelope.version, 1);
+  assert.equal(sent.envelope.type, "teti.task.request");
+  assert.equal((sent.envelope.payload as typeof request).taskId, "task-001");
+  assert.equal(chatmailAdapter.sendCalls.length, 1);
+
+  assert.throws(() => createApplicationEnvelope({
+    type: "teti.task.request",
+    fromTetiId: "teti_local0001",
+    payload: { ...request, command: "unsafe" }
+  }), /Task request payload is invalid/);
+});
+
 async function createApplicationHarness(input: {
   connectionState: TetiConnectionState;
   messageId: string;

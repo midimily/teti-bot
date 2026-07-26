@@ -99,7 +99,7 @@ function confirmedPeer(
     createdAt: "2026-07-19T03:00:00.000Z",
     updatedAt: "2026-07-19T03:00:00.000Z",
     lastSeen: lastSeen ?? null,
-    passport: { state: "unknown", resources: [] }
+    passport: { state: "unknown", resources: [], agents: [] }
   };
 }
 

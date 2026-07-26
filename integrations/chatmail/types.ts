@@ -33,6 +33,12 @@ export interface SendChatmailMessageInput {
   peerPublicKey?: string;
   peerDisplayName?: string;
   text: string;
+  attachment?: ChatmailFileAttachment;
+}
+
+export interface ChatmailFileAttachment {
+  path: string;
+  filename: string;
 }
 
 export interface ReceiveChatmailMessagesInput {
@@ -61,6 +67,12 @@ export interface ChatmailReceivedMessage {
   chatId: number;
   fromAddress?: string;
   text?: string;
+  filePath?: string;
+  fileName?: string;
+  fileMime?: string;
+  fileBytes?: number;
+  downloadState?: "Done" | "Available" | "Failure" | "Undecipherable" | "InProgress";
+  viewType?: string;
   receivedAt?: string;
 }
 
@@ -133,6 +145,7 @@ export interface ChatmailAdapter {
   sendMessage(input: SendChatmailMessageInput): Promise<ChatmailSentMessage>;
   waitForDelivery?(input: WaitForChatmailDeliveryInput): Promise<ChatmailMessageStatus>;
   receiveMessages(input: ReceiveChatmailMessagesInput): Promise<ChatmailReceivedMessage[]>;
+  downloadMessageAttachment?(accountId: number, messageId: number): Promise<ChatmailReceivedMessage>;
   deleteAccount(input: DeleteChatmailAccountInput): Promise<void>;
 }
 
@@ -149,8 +162,11 @@ export interface ChatmailRpcClient {
   importVcardContents(input: ChatmailVcardImportInput): Promise<number[]>;
   createChatByContactId(input: ChatmailChatCreateInput): Promise<number>;
   sendTextMessage(input: SendChatmailMessageInput): Promise<ChatmailSentMessage>;
+  sendFileMessage?(input: SendChatmailMessageInput & { attachment: ChatmailFileAttachment }): Promise<ChatmailSentMessage>;
   receiveMessages(input: ReceiveChatmailMessagesInput): Promise<ChatmailReceivedMessage[]>;
   getNextMessageIds(accountId: number): Promise<number[]>;
   getMessageStatus(accountId: number, messageId: number): Promise<ChatmailMessageStatus>;
+  downloadFullMessage?(accountId: number, messageId: number): Promise<void>;
+  getReceivedMessage?(accountId: number, messageId: number): Promise<ChatmailReceivedMessage>;
   removeAccount(accountId: number): Promise<void>;
 }

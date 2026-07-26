@@ -6,6 +6,16 @@ import {
 } from "../../../../../core/passport/types.ts";
 
 interface StoredPassportSettings {
+  version: 4;
+  passportSharing: PassportSharingPolicy;
+}
+
+interface PreviousStoredPassportSettings {
+  version: 3;
+  passportSharing: PassportSharingPolicy;
+}
+
+interface LegacyStoredPassportSettings {
   version: 2;
   passportSharing: PassportSharingPolicy;
 }
@@ -55,6 +65,20 @@ export class FilePassportSharingStore implements PassportSharingStore {
         await this.writeStored(migrated);
         return migrated;
       }
+      if (isLegacyPassportSettings(value)) {
+        const legacy = validateLegacyPassportPolicy(value.passportSharing);
+        const migrated = resourceSharingPolicy(legacy.resourceSummary && legacy.resourceQuota);
+        await this.writeStored(migrated);
+        return migrated;
+      }
+      if (isPreviousPassportSettings(value)) {
+        const previous = validatePreviousPassportPolicy(value.passportSharing);
+        const migrated = resourceSharingPolicy(
+          previous.resourceSummary && previous.resourceQuota && previous.agents
+        );
+        await this.writeStored(migrated);
+        return migrated;
+      }
       return validateStoredSettings(value);
     } catch (error) {
       if (isNotFound(error)) return clonePolicy(DEFAULT_PASSPORT_SHARING_POLICY);
@@ -64,7 +88,7 @@ export class FilePassportSharingStore implements PassportSharingStore {
 
   private async writeStored(policy: PassportSharingPolicy): Promise<void> {
     const value: StoredPassportSettings = {
-      version: 2,
+      version: 4,
       passportSharing: clonePolicy(policy)
     };
     await mkdir(dirname(this.path), { recursive: true });
@@ -96,13 +120,17 @@ export function resourceSharingPolicy(enabled: boolean): PassportSharingPolicy {
     audience: "confirmed_peers",
     resourceSummary: enabled,
     resourceQuota: enabled,
-    agents: false,
-    capabilities: false
+    agents: enabled,
+    capabilities: enabled
   };
 }
 
 export function isResourceSharingEnabled(policy: PassportSharingPolicy): boolean {
   return policy.resourceSummary && policy.resourceQuota;
+}
+
+export function hasPassportSharingFields(policy: PassportSharingPolicy): boolean {
+  return policy.resourceSummary || policy.resourceQuota || policy.agents || policy.capabilities;
 }
 
 export function validatePolicy(value: unknown): PassportSharingPolicy {
@@ -120,11 +148,90 @@ export function validatePolicy(value: unknown): PassportSharingPolicy {
   ) {
     throw new Error("Unsupported Teti Passport sharing policy.");
   }
-  if (record.resourceSummary !== record.resourceQuota) {
-    throw new Error("Beta 1.0 requires resource summary and quota sharing to change together.");
+  const values = [
+    record.resourceSummary,
+    record.resourceQuota,
+    record.agents,
+    record.capabilities
+  ];
+  if (!values.every((field) => field === values[0])) {
+    throw new Error("Beta Passport sharing uses one switch for all safe fields.");
   }
-  if (record.agents || record.capabilities) {
-    throw new Error("Agent and capability sharing are not implemented in this release.");
+  return {
+    version: 1,
+    audience: "confirmed_peers",
+    resourceSummary: record.resourceSummary,
+    resourceQuota: record.resourceQuota,
+    agents: record.agents,
+    capabilities: record.capabilities
+  };
+}
+
+function validateStoredSettings(value: unknown): PassportSharingPolicy {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("Teti Passport settings must be an object.");
+  }
+  const record = value as Record<string, unknown>;
+  if (record.version !== 4) throw new Error("Unsupported Teti Passport settings.");
+  return validatePolicy(record.passportSharing);
+}
+
+function isPreviousPassportSettings(value: unknown): value is PreviousStoredPassportSettings {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return record.version === 3 && "passportSharing" in record;
+}
+
+function validatePreviousPassportPolicy(value: unknown): PassportSharingPolicy {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("Teti Passport sharing policy must be an object.");
+  }
+  const record = value as Record<string, unknown>;
+  if (
+    record.version !== 1
+    || record.audience !== "confirmed_peers"
+    || typeof record.resourceSummary !== "boolean"
+    || typeof record.resourceQuota !== "boolean"
+    || typeof record.agents !== "boolean"
+    || record.capabilities !== false
+    || record.resourceSummary !== record.resourceQuota
+    || record.resourceSummary !== record.agents
+  ) {
+    throw new Error("Unsupported previous Teti Passport sharing policy.");
+  }
+  return {
+    version: 1,
+    audience: "confirmed_peers",
+    resourceSummary: record.resourceSummary,
+    resourceQuota: record.resourceQuota,
+    agents: record.agents,
+    capabilities: false
+  };
+}
+
+function isLegacyPassportSettings(value: unknown): value is LegacyStoredPassportSettings {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return record.version === 2 && "passportSharing" in record;
+}
+
+function validateLegacyPassportPolicy(value: unknown): PassportSharingPolicy {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("Teti Passport sharing policy must be an object.");
+  }
+  const record = value as Record<string, unknown>;
+  if (
+    record.version !== 1
+    || record.audience !== "confirmed_peers"
+    || typeof record.resourceSummary !== "boolean"
+    || typeof record.resourceQuota !== "boolean"
+    || typeof record.agents !== "boolean"
+    || typeof record.capabilities !== "boolean"
+    || record.resourceSummary !== record.resourceQuota
+    || record.agents
+    || record.capabilities
+  ) {
+    throw new Error("Unsupported legacy Teti Passport sharing policy.");
   }
   return {
     version: 1,
@@ -134,15 +241,6 @@ export function validatePolicy(value: unknown): PassportSharingPolicy {
     agents: false,
     capabilities: false
   };
-}
-
-function validateStoredSettings(value: unknown): PassportSharingPolicy {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new Error("Teti Passport settings must be an object.");
-  }
-  const record = value as Record<string, unknown>;
-  if (record.version !== 2) throw new Error("Unsupported Teti Passport settings.");
-  return validatePolicy(record.passportSharing);
 }
 
 function isLegacySettings(value: unknown): value is LegacyStoredAiStatusSettings {

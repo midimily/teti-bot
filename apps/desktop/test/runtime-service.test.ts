@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { TetiAccount } from "../../../core/account/model.ts";
+import type { AgentObservationSnapshot } from "../../../core/observation/types.ts";
+import type { AiAgent } from "../../../core/passport/types.ts";
 import type { CodexUsageState } from "../src/codex-usage/types.ts";
 import type {
   PeerConnectionDto,
@@ -14,6 +16,8 @@ import {
   type RuntimeCodexUsageService
 } from "../lifecycle-sidecar/runtime/service.ts";
 import type { LifecycleSidecarDependencies } from "../lifecycle-sidecar/handler.ts";
+import type { RuntimeAgentObserver } from "../lifecycle-sidecar/runtime/agents/types.ts";
+import type { RuntimeAgentConfiguration } from "../lifecycle-sidecar/runtime/agents/types.ts";
 import {
   MemoryPassportSharingStore,
   resourceSharingPolicy
@@ -70,6 +74,55 @@ test("Runtime owns Registry, Chatmail, peer heartbeat, AI sync, and Codex backgr
   await runtime.stop();
   assert.equal(runtime.snapshot.state, "stopped");
   assert.equal(clock.pending().length, 0);
+});
+
+test("Agent discovery starts without an account but never enters Callable Passport", async () => {
+  const gate = deferred<AgentObservationSnapshot>();
+  const observer = new FakeAgentObserver(gate.promise);
+  const runtime = new TetiRuntime({
+    dependencies: {
+      async loadTetiAccount() { return null; },
+      async heartbeatDiscovery() { throw new Error("missing account"); },
+      async getPeerConnectionService() { return new FakePeerService(); },
+      passportSharingStore: new MemoryPassportSharingStore(),
+      codexUsageService: new FakeCodexUsageService(),
+      agentObserver: observer
+    }
+  });
+
+  runtime.start();
+  await drain();
+  assert.equal(observer.discoverCalls, 1);
+  assert.deepEqual((await runtime.getPassportSnapshot()).localPassport.agents, []);
+
+  observer.agents = [observedAgent()];
+  gate.resolve(emptyAgentSnapshot("ready"));
+  await drain();
+  assert.deepEqual((await runtime.getPassportSnapshot()).localPassport.agents, []);
+  await runtime.stop();
+});
+
+test("Agent management rescans after a local-only path override without starting account services", async () => {
+  const observer = new FakeAgentObserver(Promise.resolve(emptyAgentSnapshot("ready")));
+  const configuration = new FakeAgentConfiguration();
+  const runtime = new TetiRuntime({
+    dependencies: {
+      async loadTetiAccount() { return null; },
+      async heartbeatDiscovery() { throw new Error("missing account"); },
+      async getPeerConnectionService() { return new FakePeerService(); },
+      passportSharingStore: new MemoryPassportSharingStore(),
+      codexUsageService: new FakeCodexUsageService(),
+      agentObserver: observer,
+      agentConfiguration: configuration
+    }
+  });
+
+  const updated = await runtime.setAgentPathOverride("codex", "/opt/homebrew/bin/codex");
+  assert.equal(observer.discoverCalls, 1);
+  assert.equal(updated.pathOverrides.codex, "/opt/homebrew/bin/codex");
+  assert.equal(updated.state, "ready");
+  assert.equal((await runtime.getPassportSnapshot()).identity, null);
+  await runtime.stop();
 });
 
 test("Passport reads consume Runtime cache without duplicating network refreshes", async () => {
@@ -249,6 +302,29 @@ test("Runtime shutdown disposes Chatmail and returns at its deadline when a job 
   assert.equal(disposeCalls, 1);
 });
 
+test("Runtime shutdown owns the local Callable Adapter Kernel without exposing remote execution", async () => {
+  let kernelShutdownCalls = 0;
+  const runtime = new TetiRuntime({
+    dependencies: {
+      async loadTetiAccount() { return null; },
+      async heartbeatDiscovery() { throw new Error("missing account"); },
+      async getPeerConnectionService() { return new FakePeerService(); },
+      passportSharingStore: new MemoryPassportSharingStore(),
+      codexUsageService: new FakeCodexUsageService(),
+      callableAdapterKernel: {
+        getCallableAgents() { return []; },
+        async shutdown() { kernelShutdownCalls += 1; }
+      }
+    }
+  });
+
+  runtime.start();
+  await drain();
+  await runtime.stop();
+  await runtime.stop();
+  assert.equal(kernelShutdownCalls, 1);
+});
+
 class FakeCodexUsageService implements RuntimeCodexUsageService {
   refreshCalls = 0;
   private state: CodexUsageState = {
@@ -276,6 +352,45 @@ class FakeCodexUsageService implements RuntimeCodexUsageService {
       }
     };
     return this.getCurrentState();
+  }
+}
+
+class FakeAgentObserver implements RuntimeAgentObserver {
+  discoverCalls = 0;
+  agents: AiAgent[] = [];
+  private readonly result: Promise<AgentObservationSnapshot>;
+  private snapshot = emptyAgentSnapshot("idle");
+
+  constructor(result: Promise<AgentObservationSnapshot>) {
+    this.result = result;
+  }
+
+  async discover(): Promise<AgentObservationSnapshot> {
+    this.discoverCalls += 1;
+    this.snapshot = { ...this.snapshot, state: "discovering" };
+    this.snapshot = clone(await this.result);
+    return clone(this.snapshot);
+  }
+
+  getCurrentSnapshot(): AgentObservationSnapshot {
+    return clone(this.snapshot);
+  }
+
+  getPassportAgents(): AiAgent[] {
+    return structuredClone(this.agents);
+  }
+}
+
+class FakeAgentConfiguration implements RuntimeAgentConfiguration {
+  private readonly overrides: Record<string, string> = {};
+
+  async getPathOverrides(): Promise<Record<string, string>> {
+    return clone(this.overrides);
+  }
+
+  async setPathOverride(agentId: string, path: string | null): Promise<void> {
+    if (path) this.overrides[agentId] = path;
+    else delete this.overrides[agentId];
   }
 }
 
@@ -386,6 +501,38 @@ function fakeClock() {
       return entries.filter((entry) => !entry.cancelled && !entry.fired);
     }
   };
+}
+
+function observedAgent(): AiAgent {
+  return {
+    id: "codex",
+    name: "Codex",
+    type: "cli",
+    installationStatus: "installed",
+    runtimeStatus: "running",
+    observedAt: "2026-07-25T00:00:00.000Z"
+  };
+}
+
+function emptyAgentSnapshot(
+  state: AgentObservationSnapshot["state"]
+): AgentObservationSnapshot {
+  return {
+    schemaVersion: 1,
+    revision: 1,
+    state,
+    generatedAt: "2026-07-25T00:00:00.000Z",
+    agents: [],
+    errors: []
+  };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolveValue) => {
+    resolve = resolveValue;
+  });
+  return { promise, resolve };
 }
 
 async function drain(): Promise<void> {

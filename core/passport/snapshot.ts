@@ -1,8 +1,12 @@
 import type { TetiConnectionDirection, TetiConnectionState } from "../connection/types.ts";
 import type { RegistryStatus } from "../account/model.ts";
 import type {
+  AiAgent,
   AiResource,
+  CallablePassportAgent,
+  CapabilityBinding,
   PassportSharingPolicy,
+  TetiCapability,
   TetiCapabilityPassport
 } from "./types.ts";
 
@@ -19,6 +23,9 @@ export type RemotePassportState = "fresh" | "stale" | "disabled" | "unknown";
 export interface RemotePassportSnapshot {
   state: RemotePassportState;
   resources: AiResource[];
+  agents: Array<AiAgent | CallablePassportAgent>;
+  capabilities: TetiCapability[];
+  bindings: CapabilityBinding[];
   generatedAt?: string;
   expiresAt?: string;
   receivedAt?: string;

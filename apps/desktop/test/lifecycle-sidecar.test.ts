@@ -14,6 +14,11 @@ import {
 import { redactSecretLikeText } from "../lifecycle-sidecar/security.ts";
 import type { RuntimePassportSnapshot } from "../../../core/passport/snapshot.ts";
 import { resourceSharingPolicy } from "../lifecycle-sidecar/runtime/passport/sharing.ts";
+import { emptyAgentManagementSnapshot } from "../../../core/observation/management.ts";
+import type {
+  CollaborationTaskTransportRecord,
+  SendCollaborationTaskInput
+} from "../../../core/task/transport.ts";
 
 test("sidecar returns health response", async () => {
   const response = await handleLifecycleRequest(request("lifecycle.health"), fakeDependencies());
@@ -161,12 +166,81 @@ test("sidecar validates field-level Passport sharing and returns the updated sna
     policy: resourceSharingPolicy(true)
   }), deps);
   const invalid = await handleLifecycleRequest(request("passport.sharing.set", {
-    policy: { ...resourceSharingPolicy(true), agents: true }
+    policy: { ...resourceSharingPolicy(true), capabilities: false }
   }), deps);
 
   assert.deepEqual(enabled.ok && enabled.result.sharing, resourceSharingPolicy(true));
   assert.equal(invalid.ok, false);
   assert.equal(!invalid.ok && invalid.error.code, "INTERNAL_ERROR");
+});
+
+test("sidecar exposes bounded local Agent management commands only", async () => {
+  const deps = fakeDependencies();
+  let pathOverride: string | null = null;
+  let scans = 0;
+  deps.getAgentManagementSnapshot = async () => ({
+    ...emptyAgentManagementSnapshot(),
+    revision: 1,
+    state: "ready"
+  });
+  deps.rescanAgents = async () => ({
+    ...emptyAgentManagementSnapshot(),
+    revision: ++scans,
+    state: "ready"
+  });
+  deps.setAgentPathOverride = async (_agentId, path) => {
+    pathOverride = path;
+    return {
+      ...emptyAgentManagementSnapshot(),
+      revision: 1,
+      state: "ready",
+      pathOverrides: path ? { codex: path } : {}
+    };
+  };
+
+  const current = await handleLifecycleRequest(request("agent.observation.get"), deps);
+  const rescanned = await handleLifecycleRequest(request("agent.observation.scan"), deps);
+  const updated = await handleLifecycleRequest(request("agent.observation.override.set", {
+    agentId: "codex",
+    path: "/opt/homebrew/bin/codex"
+  }), deps);
+  const malformed = await handleLifecycleRequest(request("agent.observation.override.set", {
+    agentId: "../../shell",
+    path: "/tmp/shell"
+  }), deps);
+
+  assert.equal(current.ok && current.result.state, "ready");
+  assert.equal(rescanned.ok && rescanned.result.revision, 1);
+  assert.equal(pathOverride, "/opt/homebrew/bin/codex");
+  assert.equal(updated.ok && updated.result.pathOverrides.codex, "/opt/homebrew/bin/codex");
+  assert.equal(malformed.ok, false);
+});
+
+test("sidecar keeps Task send/list bounded and rejects remote execution fields", async () => {
+  const deps = fakeDependencies({ account: createAccount("Milo") });
+  const sent = await handleLifecycleRequest(request("task.send", {
+    connectionRequestId: "connection-001",
+    taskId: "task-001",
+    capabilityId: "code-analysis",
+    text: "Review this explicit text.",
+    ttlMs: 60_000
+  }), deps);
+  const listed = await handleLifecycleRequest(request("task.list", { limit: 1 }), deps);
+  const unsafe = await handleLifecycleRequest(request("task.send", {
+    connectionRequestId: "connection-001",
+    taskId: "task-002",
+    capabilityId: "code-analysis",
+    text: "Review this.",
+    command: "unsafe"
+  }), deps);
+
+  assert.equal(sent.ok, true);
+  assert.equal(sent.ok && "request" in sent.result && sent.result.request.taskId, "task-001");
+  assert.equal(listed.ok, true);
+  assert.equal(listed.ok && "records" in listed.result && listed.result.records.length, 1);
+  assert.equal(unsafe.ok, false);
+  assert.equal(!unsafe.ok && unsafe.error.code, "TASK_TRANSPORT_FAILED");
+  assert.equal(LIFECYCLE_PROTOCOL_VERSION, 1, "Task transport does not create a second lifecycle protocol");
 });
 
 function request(method: LifecycleRequest["method"], params: Record<string, unknown> = {}): LifecycleRequest {
@@ -187,6 +261,7 @@ function fakeDependencies(options: { account?: TetiAccount | null } = {}): Lifec
   const registerCalls: TetiAccount[] = [];
   let account = options.account ?? null;
   let passport = createPassportSnapshot();
+  const tasks: CollaborationTaskTransportRecord[] = [];
 
   const dependencies: LifecycleSidecarDependencies & {
     createCalls: string[];
@@ -256,6 +331,42 @@ function fakeDependencies(options: { account?: TetiAccount | null } = {}): Lifec
         async setPassportSharing(policy) {
           passport.sharing = clone(policy);
           return clone(policy);
+        },
+        async sendTask(input: SendCollaborationTaskInput) {
+          const now = "2026-07-26T00:00:00.000Z";
+          const record: CollaborationTaskTransportRecord = {
+            schemaVersion: 1,
+            direction: "outgoing",
+            peerTetiId: "teti_peer00001",
+            protocolVersion: 1,
+            envelopeMessageId: "task-envelope-001",
+            request: {
+              schemaVersion: 1,
+              taskId: input.taskId ?? "generated-task",
+              requesterTetiId: "teti_milo00000",
+              targetTetiId: "teti_peer00001",
+              offerId: input.offerId ?? `capability:${input.capabilityId}`,
+              capabilityId: input.capabilityId,
+              input: { kind: "text", text: input.text },
+              createdAt: now,
+              expiresAt: "2026-07-26T01:00:00.000Z"
+            },
+            state: "submitted",
+            approval: "pending",
+            delivery: "sent",
+            createdAt: now,
+            updatedAt: now
+          };
+          tasks.push(record);
+          return clone(record);
+        },
+        async listTasks() {
+          return {
+            schemaVersion: 1 as const,
+            generatedAt: "2026-07-26T00:00:00.000Z",
+            records: clone(tasks),
+            peers: []
+          };
         }
       };
     }
@@ -272,7 +383,7 @@ function createPassportSnapshot(): RuntimePassportSnapshot {
     identity: null,
     registry: { state: "unknown" },
     localPassport: {
-      schemaVersion: 1,
+      schemaVersion: 2,
       generatedAt,
       resources: [{
         id: "openai.codex",

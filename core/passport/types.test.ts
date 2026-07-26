@@ -3,8 +3,8 @@ import test from "node:test";
 import {
   DEFAULT_PASSPORT_SHARING_POLICY,
   TETI_CAPABILITY_PASSPORT_SCHEMA_VERSION,
-  type AiAgent,
   type AiResource,
+  type CallablePassportAgent,
   type TetiCapabilityPassport
 } from "./types.ts";
 
@@ -32,12 +32,14 @@ test("Resource, Agent, Capability, and Binding remain separate Passport entities
     assurance: "provider_observed",
     observedAt: "2026-07-21T00:00:00.000Z"
   };
-  const agent: AiAgent = {
-    id: "openai.codex-cli",
-    name: "Codex CLI",
-    type: "cli",
-    installationStatus: "installed",
-    detectionSource: "command",
+  const agent: CallablePassportAgent = {
+    id: "codex",
+    name: "Codex",
+    provider: "OpenAI",
+    capabilityIds: ["coding"],
+    inputModes: ["text"],
+    outputModes: ["text"],
+    availability: "available",
     observedAt: "2026-07-21T00:00:00.000Z"
   };
   const passport: TetiCapabilityPassport = {
@@ -61,10 +63,10 @@ test("Resource, Agent, Capability, and Binding remain separate Passport entities
   };
 
   assert.equal(passport.resources[0]?.id, "openai.codex.subscription");
-  assert.equal(passport.agents[0]?.installationStatus, "installed");
+  assert.deepEqual(passport.agents[0]?.capabilityIds, ["coding"]);
   assert.deepEqual(passport.bindings[0], {
     capabilityId: "coding",
-    agentIds: ["openai.codex-cli"],
+    agentIds: ["codex"],
     resourceIds: ["openai.codex.subscription"]
   });
 });

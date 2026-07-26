@@ -1,6 +1,14 @@
 # Teti Beta MVP 1.0 Architecture Freeze
 
-Status: Accepted; Tasks 1–4 implemented
+Historical product boundary: Beta 0.1.1 and its compatible 0.1.2 runtime behavior.
+Future collaboration architecture: see
+[`TETI_BETA_0_2_0_ROADMAP.md`](TETI_BETA_0_2_0_ROADMAP.md) and
+[`TETI_BETA_0_1_2_BOUNDARY_FREEZE.md`](implementation/TETI_BETA_0_1_2_BOUNDARY_FREEZE.md).
+The newer documents do not connect task execution in 0.1.2; they separate the
+contracts required for later milestones.
+
+Status: Accepted; Tasks 1–4, Agent Observation Phase 0–1, and Passport Sharing
+Phase 5 implemented
 Scope: Product boundary, local runtime boundary, domain model, privacy boundary, and migration constraints
 Implementation baseline: `05de174824374738690793361bec849b49ea4d0a`
 
@@ -16,6 +24,12 @@ It allows two confirmed Teti identities to exchange a user-controlled view of:
 - which capabilities can be derived from those resources and agents.
 
 Beta 1.0 is not an Agent Gateway. It does not remotely invoke an agent, accept a task, transfer a prompt or source code, or return an agent artifact.
+
+Evolution note: Beta 0.1.11, governed by the newer 0.2.0 collaboration roadmap,
+adds bounded explicit Task text transport and durable receipt over Chatmail. It
+does not alter this document's no-remote-execution boundary: received Tasks
+remain pending local authorization and cannot invoke an Agent until a later,
+separately reviewed milestone.
 
 ## Preserved product capabilities
 
@@ -50,7 +64,8 @@ The following working capabilities remain authoritative and must not be redesign
 - MCP client or server integration;
 - A2A endpoint or published Agent Card;
 - Teti Agent, Command, or Message Protocol;
-- Agent running/activity observation;
+- Agent task, session, model, prompt, or activity observation beyond a coarse
+  process-running signal;
 - per-peer policy overrides;
 - a public SDK or adapter marketplace;
 - a launchd-managed daemon;
@@ -86,7 +101,8 @@ As implemented in Task 2, Runtime owns:
 - confirmed-peer presence heartbeat;
 - existing AI status synchronization;
 - Codex resource refresh lifecycle;
-- later Resource, Agent, Capability, and policy services.
+- local Agent observation;
+- later Capability and expanded policy services.
 
 Desktop remains responsible for UI state, presentation, and explicit user operations. As implemented in Task 3, Desktop periodically reads local Runtime snapshots, but those reads do not drive Registry, Chatmail, or provider network I/O.
 
@@ -140,12 +156,16 @@ An `AIAgent` represents supported software detected on the local device.
 Beta observation is limited to:
 
 - stable ID and name;
-- CLI, desktop, or local-service type;
+- CLI, desktop, IDE-extension, or local-service surface;
 - installed, not installed, or unknown;
-- command or application detection source;
+- sanitized version when locally observable;
+- running, not running, or unknown from a coarse exact process-name check;
+- command, application, or process detection source and confidence;
 - observation time.
 
-Installed does not mean running, active, authenticated, or remotely callable.
+Installed does not mean authenticated or remotely callable. Running means only
+that an exact process name was observed; it does not mean active, operating on a
+project, handling a task, or available for remote work.
 
 ### Capability
 
@@ -181,13 +201,18 @@ All fields default to false. Per-peer and execution policies are outside Beta 1.
 
 ### Existing setting migration
 
-When Phase 2 replaces `statusSharing:boolean`:
+Phase 5 keeps the current single Passport switch and gives it one unambiguous
+meaning: the complete privacy-safe Passport.
 
 - `false` becomes all four sharing fields false;
-- `true` becomes `resourceSummary=true` and `resourceQuota=true`;
-- `agents` and `capabilities` remain false until the user enables them.
+- `true` becomes `resourceSummary=true`, `resourceQuota=true`, and
+  `agents=true`;
+- `capabilities` remains false because no Capability catalog is produced yet.
 
-This preserves existing Codex sharing consent without silently exposing new data.
+This is an explicit product decision to broaden an enabled Passport switch from
+Codex-only status to all currently discoverable privacy-safe Agent fields. It
+does not broaden the audience beyond confirmed peers and does not cross the
+Phase 0 privacy denylist.
 
 ## Data placement and privacy
 
@@ -198,6 +223,7 @@ This preserves existing Codex sharing consent without silently exposing new data
 | AI Resource summary | Yes | Policy-controlled | No |
 | Resource quota | Yes | Separately policy-controlled | No |
 | Installed Agent observation | Yes | Policy-controlled | No |
+| Coarse Agent process-running observation | Yes | Passport-switch controlled | No |
 | Capability descriptor | Yes | Policy-controlled | No |
 | Credentials or login token | Local adapter boundary only | Never | Never |
 | Prompt, source, file, conversation, Agent log | Never collected for Passport | Never | Never |
@@ -216,20 +242,30 @@ Task 4 replaces the fragmented Desktop read surface with:
 
 There was no released Desktop/Runtime pair before this migration, so Task 4 does not preserve cross-version private IPC. The obsolete `connection.list`, `connection.poll`, `usage.get`, `usage.refresh`, `sharing.get`, and `sharing.set` reads are removed from the allowed Desktop IPC surface.
 
-This private IPC cutover does not change the Teti network boundary:
+Task 4 did not change the Teti network boundary. Phase 5 later extended only the
+existing private AI-status adapter:
 
-- `teti.ai.status.sync` remains unchanged;
+- `teti.ai.status.sync` remains the only message type and sends compatible
+  schema v1 Resource data followed by schema v2 Resource plus Agent data;
 - existing AI-status TTL behavior remains unchanged;
 - Chatmail, Registry, connection, and presence payloads remain unchanged;
 - `teti.capability.offer` is not expanded.
 
 Runtime uses one process-local scheduler with these frozen Beta intervals:
 
+- local Agent discovery: 5 minutes, including an immediate account-independent
+  scan when Runtime starts;
 - Registry activity heartbeat: 5 minutes, including an immediate attempt when Runtime starts with an account;
 - Chatmail backlog, peer presence, and AI-status poll: 3 seconds, including an immediate attempt when Runtime starts with an account;
 - Codex resource refresh: 10 minutes, including an immediate attempt when Runtime starts.
 
 Account-bound jobs remain idle before first account creation and are triggered after a successful creation or Registry retry. One failed job is logged with secret-like text redacted and does not stop the other jobs. Runtime stops scheduling and drains in-flight jobs when the lifecycle sidecar exits.
+
+Agent discovery is not account-bound. Its first result remains absent from the
+Passport and UI until the complete initial scan finishes. Detector definitions,
+privacy rules, override boundaries, kill switches, and failure isolation are
+frozen in
+[`docs/implementation/TETI_AGENT_OBSERVATION_PHASE_0_1.md`](implementation/TETI_AGENT_OBSERVATION_PHASE_0_1.md).
 
 ### Local account and Registry recovery boundary
 
@@ -287,6 +323,21 @@ Implementation status: complete locally. The obsolete Desktop Discovery heartbea
 
 Implementation status: complete locally. Runtime owns Passport aggregation, Desktop has one Passport controller, and Renderer no longer consumes Codex usage, remote AI-status, Chatmail, Registry, or `statusSharing` DTOs.
 
+### Agent Observation Phase 0: Contract and compatibility freeze
+
+- freeze Observation, Resource, Entitlement, Quota, and Exposure schema version 1;
+- enforce the privacy denylist;
+- record the existing internal Codex usage endpoint risk;
+- preserve the legacy AI Status → Passport mapping in regression tests.
+
+### Agent Observation Phase 1: Config-driven coarse discovery
+
+- add declarative Codex, Claude Code, Gemini CLI, Cursor, and CodeBuddy definitions;
+- observe only install, sanitized version, and coarse process-running state;
+- isolate detectors behind Supervisor timeouts, output bounds, safe errors,
+  overrides, and kill switches;
+- keep the Agent list absent from UI until first discovery completes.
+
 ## Task 1 acceptance criteria
 
 - no production entrypoint imports or starts `TetiRuntimeHost`;
@@ -333,11 +384,21 @@ Implementation status: complete locally. Runtime owns Passport aggregation, Desk
 
 - `passport.get` performs local aggregation only and triggers no Registry, Chatmail, heartbeat, AI sync, or provider request;
 - Snapshot identity may be null before account creation;
-- local resources use the frozen `AiResource` contract and Agent/Capability/Binding arrays remain empty;
+- local resources use the frozen `AiResource` contract; Agent arrays remain
+  empty until the initial local observation completes, while
+  Capability/Binding arrays remain empty;
 - remote Passport state is exactly `fresh`, `stale`, `disabled`, or `unknown`;
 - expiry remains resource- or remote-Passport-scoped rather than invalidating the whole Snapshot;
-- sharing persists as `PassportSharingPolicy`, defaults off, and migrates the previous boolean once without broadening consent;
+- sharing persists as `PassportSharingPolicy`, defaults off, and Phase 5
+  migrates an already-enabled Passport switch to Resource plus privacy-safe
+  Agent sharing;
 - Desktop has one three-second local Passport reader and no connection, usage, or sharing read controller;
 - connection request, accept, reject, account creation, and Registry retry remain explicit commands;
 - Renderer receives Passport ViewModels and contains no legacy AI-status interpretation;
-- all existing Teti network payloads and TTLs remain unchanged.
+- Chatmail, Registry, connection, presence, and AI-status TTLs remain
+  unchanged; Phase 5 adds the compatible v2 Agent section to
+  `teti.ai.status.sync`.
+
+The Phase 5 wire, consent, privacy, expiry, and Phase 2–4 planning details are
+frozen in
+[`docs/implementation/TETI_PASSPORT_PHASE_5_SHARING.md`](implementation/TETI_PASSPORT_PHASE_5_SHARING.md).

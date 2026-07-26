@@ -40,7 +40,9 @@ export class RpcChatmailAdapter implements ChatmailAdapter {
   }
 
   async sendMessage(input: SendChatmailMessageInput): Promise<ChatmailSentMessage> {
-    return this.rpc.sendTextMessage(input);
+    if (!input.attachment) return this.rpc.sendTextMessage(input);
+    if (!this.rpc.sendFileMessage) throw new Error("Chatmail file messages are unavailable.");
+    return this.rpc.sendFileMessage({ ...input, attachment: input.attachment });
   }
 
   async receiveMessages(

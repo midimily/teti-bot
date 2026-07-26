@@ -1,26 +1,71 @@
 import {
+  TETI_AI_STATUS_AGENT_SCHEMA_VERSION,
+  TETI_AI_STATUS_LEGACY_SCHEMA_VERSION,
   TETI_AI_STATUS_SCHEMA_VERSION,
+  type AiAgentStatusSnapshot,
   type AiStatusSyncPayload,
   type AiToolQuotaStatus,
   type AiToolStatusSnapshot
 } from "./types.ts";
+import type {
+  CallablePassportAgent,
+  CapabilityBinding,
+  TetiCapability
+} from "../passport/types.ts";
 
 const MAX_TOOLS = 8;
+const MAX_AGENTS = 64;
+const MAX_CAPABILITIES = 64;
+const MAX_BINDINGS = 64;
 const MAX_QUOTAS_PER_TOOL = 8;
+const MAX_PAYLOAD_BYTES = 64 * 1024;
 const MAX_TOOL_ID_LENGTH = 64;
+const MAX_AGENT_ID_LENGTH = 64;
+const MAX_AGENT_NAME_LENGTH = 80;
+const MAX_AGENT_PROVIDER_LENGTH = 64;
+const MAX_VERSION_LENGTH = 160;
+const MAX_DESCRIPTION_LENGTH = 240;
 const MAX_SHORT_VALUE_LENGTH = 32;
 const MAX_TTL_MS = 60 * 60 * 1_000;
 const TOOL_ID_PATTERN = /^[a-z0-9]+(?:[.-][a-z0-9]+)*$/;
 const SHORT_KEY_PATTERN = /^[a-z0-9]+(?:[._-][a-z0-9]+)*$/;
+const AGENT_TYPES = new Set(["cli", "desktop", "ide_extension", "local_service"]);
+const INSTALLATION_STATES = new Set(["installed", "not_installed", "unknown"]);
+const RUNTIME_STATES = new Set(["running", "not_running", "unknown"]);
+const DETECTION_SOURCES = new Set(["command", "application", "process"]);
+const CONFIDENCE_VALUES = new Set(["low", "medium", "high"]);
 
 export class AiStatusProtocolError extends Error {}
 
 export function validateAiStatusSyncPayload(value: unknown): asserts value is AiStatusSyncPayload {
+  if (encodedSize(value) > MAX_PAYLOAD_BYTES) {
+    throw new AiStatusProtocolError("AI status payload exceeds the allowed size.");
+  }
   const payload = record(value, "AI status payload");
-  exactKeys(payload, ["schemaVersion", "sharing", "generatedAt", "expiresAt", "tools"], "AI status payload");
-  if (payload.schemaVersion !== TETI_AI_STATUS_SCHEMA_VERSION) {
+  const current = payload.schemaVersion === TETI_AI_STATUS_SCHEMA_VERSION;
+  const observedAgent = payload.schemaVersion === TETI_AI_STATUS_AGENT_SCHEMA_VERSION;
+  const legacy = payload.schemaVersion === TETI_AI_STATUS_LEGACY_SCHEMA_VERSION;
+  if (!current && !observedAgent && !legacy) {
     throw new AiStatusProtocolError("Unsupported AI status schema version.");
   }
+  exactKeys(
+    payload,
+    current
+      ? [
+          "schemaVersion",
+          "sharing",
+          "generatedAt",
+          "expiresAt",
+          "tools",
+          "agents",
+          "capabilities",
+          "bindings"
+        ]
+      : observedAgent
+        ? ["schemaVersion", "sharing", "generatedAt", "expiresAt", "tools", "agents"]
+      : ["schemaVersion", "sharing", "generatedAt", "expiresAt", "tools"],
+    "AI status payload"
+  );
   if (payload.sharing !== "enabled" && payload.sharing !== "disabled") {
     throw new AiStatusProtocolError("AI status sharing state is invalid.");
   }
@@ -39,6 +84,189 @@ export function validateAiStatusSyncPayload(value: unknown): asserts value is Ai
     throw new AiStatusProtocolError("A disabled AI status payload cannot contain tools.");
   }
   for (const tool of payload.tools) validateTool(tool);
+  if (current || observedAgent) {
+    if (!Array.isArray(payload.agents) || payload.agents.length > MAX_AGENTS) {
+      throw new AiStatusProtocolError("AI status agents must be a bounded array.");
+    }
+    if (payload.sharing === "disabled" && payload.agents.length !== 0) {
+      throw new AiStatusProtocolError("A disabled AI status payload cannot contain agents.");
+    }
+    for (const agent of payload.agents) {
+      if (current) validateCallableAgent(agent);
+      else validateAgent(agent);
+    }
+  }
+  if (current) {
+    if (!Array.isArray(payload.capabilities) || payload.capabilities.length > MAX_CAPABILITIES) {
+      throw new AiStatusProtocolError("AI status capabilities must be a bounded array.");
+    }
+    if (!Array.isArray(payload.bindings) || payload.bindings.length > MAX_BINDINGS) {
+      throw new AiStatusProtocolError("AI status bindings must be a bounded array.");
+    }
+    if (payload.sharing === "disabled"
+      && (payload.capabilities.length !== 0 || payload.bindings.length !== 0)) {
+      throw new AiStatusProtocolError("A disabled AI status payload cannot contain capabilities.");
+    }
+    for (const capability of payload.capabilities) validateCapability(capability);
+    for (const binding of payload.bindings) validateBinding(binding);
+    validateCallableReferences(payload);
+  }
+}
+
+function validateCallableAgent(value: unknown): asserts value is CallablePassportAgent {
+  const agent = record(value, "Callable Passport Agent");
+  exactKeys(agent, [
+    "id",
+    "name",
+    "provider",
+    "capabilityIds",
+    "inputModes",
+    "outputModes",
+    "availability",
+    "observedAt"
+  ], "Callable Passport Agent");
+  slug(agent.id, "Callable Agent ID", MAX_AGENT_ID_LENGTH);
+  safeLabel(agent.name, "Callable Agent name", MAX_AGENT_NAME_LENGTH);
+  safeLabel(agent.provider, "Callable Agent provider", MAX_AGENT_PROVIDER_LENGTH);
+  safeIdArray(agent.capabilityIds, "Callable Agent capability IDs", 32);
+  if (agent.capabilityIds.length === 0) {
+    throw new AiStatusProtocolError("Callable Agent capability IDs are invalid.");
+  }
+  contentModeArray(agent.inputModes, "Callable Agent input modes");
+  contentModeArray(agent.outputModes, "Callable Agent output modes");
+  if (agent.availability !== "available") {
+    throw new AiStatusProtocolError("Callable Agent availability is invalid.");
+  }
+  isoTimestamp(agent.observedAt, "Callable Agent observedAt");
+}
+
+function validateCapability(value: unknown): asserts value is TetiCapability {
+  const capability = record(value, "Callable Passport capability");
+  exactKeys(capability, [
+    "id",
+    "name",
+    "category",
+    "description",
+    "availability",
+    "observedAt"
+  ], "Callable Passport capability");
+  slug(capability.id, "Capability ID", MAX_AGENT_ID_LENGTH);
+  safeLabel(capability.name, "Capability name", MAX_AGENT_NAME_LENGTH);
+  slug(capability.category, "Capability category", MAX_AGENT_PROVIDER_LENGTH);
+  safeLabel(capability.description, "Capability description", MAX_DESCRIPTION_LENGTH);
+  if (capability.availability !== "available") {
+    throw new AiStatusProtocolError("Capability availability is invalid.");
+  }
+  isoTimestamp(capability.observedAt, "Capability observedAt");
+}
+
+function validateBinding(value: unknown): asserts value is CapabilityBinding {
+  const binding = record(value, "Callable Passport binding");
+  exactKeys(binding, ["capabilityId", "agentIds", "resourceIds"], "Callable Passport binding");
+  slug(binding.capabilityId, "Binding capability ID", MAX_AGENT_ID_LENGTH);
+  safeIdArray(binding.agentIds, "Binding Agent IDs", MAX_AGENTS);
+  safeIdArray(binding.resourceIds, "Binding Resource IDs", MAX_TOOLS);
+}
+
+function validateCallableReferences(payload: Record<string, unknown>): void {
+  const tools = payload.tools as AiToolStatusSnapshot[];
+  const agents = payload.agents as CallablePassportAgent[];
+  const capabilities = payload.capabilities as TetiCapability[];
+  const bindings = payload.bindings as CapabilityBinding[];
+  const toolIds = new Set(tools.map((tool) => tool.toolId));
+  const agentIds = new Set(agents.map((agent) => agent.id));
+  const capabilityIds = new Set(capabilities.map((capability) => capability.id));
+  if (toolIds.size !== tools.length
+    || agentIds.size !== agents.length
+    || capabilityIds.size !== capabilities.length) {
+    throw new AiStatusProtocolError("Callable Passport entity IDs must be unique.");
+  }
+  const boundCapabilities = new Set<string>();
+  const bindingByCapability = new Map<string, CapabilityBinding>();
+  for (const binding of bindings) {
+    if (!capabilityIds.has(binding.capabilityId)
+      || binding.agentIds.length === 0
+      || binding.agentIds.some((id) => !agentIds.has(id))
+      || binding.resourceIds.some((id) => !toolIds.has(id))
+      || boundCapabilities.has(binding.capabilityId)) {
+      throw new AiStatusProtocolError("Callable Passport binding references are invalid.");
+    }
+    boundCapabilities.add(binding.capabilityId);
+    bindingByCapability.set(binding.capabilityId, binding);
+    for (const agentId of binding.agentIds) {
+      const agent = agents.find((candidate) => candidate.id === agentId)!;
+      if (!agent.capabilityIds.includes(binding.capabilityId)) {
+        throw new AiStatusProtocolError("Callable Passport binding references are invalid.");
+      }
+    }
+  }
+  for (const agent of agents) {
+    if (agent.capabilityIds.some((id) =>
+      !capabilityIds.has(id) || !bindingByCapability.get(id)?.agentIds.includes(agent.id)
+    )) {
+      throw new AiStatusProtocolError("Callable Agent capability reference is invalid.");
+    }
+  }
+  if (boundCapabilities.size !== capabilityIds.size) {
+    throw new AiStatusProtocolError("Every Callable Passport capability must have one binding.");
+  }
+}
+
+function validateAgent(value: unknown): asserts value is AiAgentStatusSnapshot {
+  const agent = record(value, "AI Agent status");
+  exactKeys(agent, [
+    "agentId",
+    "name",
+    "provider",
+    "type",
+    "surfaces",
+    "installationStatus",
+    "detectionSource",
+    "version",
+    "runtimeStatus",
+    "processCount",
+    "confidence",
+    "lastSeenAt",
+    "observedAt"
+  ], "AI Agent status");
+  slug(agent.agentId, "Agent ID", MAX_AGENT_ID_LENGTH);
+  safeLabel(agent.name, "Agent name", MAX_AGENT_NAME_LENGTH);
+  if (agent.provider !== null) slug(agent.provider, "Agent provider", MAX_AGENT_PROVIDER_LENGTH);
+  if (typeof agent.type !== "string" || !AGENT_TYPES.has(agent.type)) {
+    throw new AiStatusProtocolError("AI Agent type is invalid.");
+  }
+  if (!Array.isArray(agent.surfaces)
+    || agent.surfaces.length === 0
+    || agent.surfaces.length > AGENT_TYPES.size
+    || agent.surfaces.some((surface) => typeof surface !== "string" || !AGENT_TYPES.has(surface))
+    || new Set(agent.surfaces).size !== agent.surfaces.length) {
+    throw new AiStatusProtocolError("AI Agent surfaces are invalid.");
+  }
+  if (typeof agent.installationStatus !== "string"
+    || !INSTALLATION_STATES.has(agent.installationStatus)) {
+    throw new AiStatusProtocolError("AI Agent installation status is invalid.");
+  }
+  if (agent.detectionSource !== null
+    && (typeof agent.detectionSource !== "string"
+      || !DETECTION_SOURCES.has(agent.detectionSource))) {
+    throw new AiStatusProtocolError("AI Agent detection source is invalid.");
+  }
+  if (agent.version !== null) safeVersion(agent.version);
+  if (typeof agent.runtimeStatus !== "string" || !RUNTIME_STATES.has(agent.runtimeStatus)) {
+    throw new AiStatusProtocolError("AI Agent runtime status is invalid.");
+  }
+  if (agent.processCount !== null
+    && (!Number.isInteger(agent.processCount)
+      || (agent.processCount as number) < 0
+      || (agent.processCount as number) > 1_024)) {
+    throw new AiStatusProtocolError("AI Agent process count is invalid.");
+  }
+  if (agent.confidence !== null
+    && (typeof agent.confidence !== "string" || !CONFIDENCE_VALUES.has(agent.confidence))) {
+    throw new AiStatusProtocolError("AI Agent confidence is invalid.");
+  }
+  if (agent.lastSeenAt !== null) isoTimestamp(agent.lastSeenAt, "Agent lastSeenAt");
+  isoTimestamp(agent.observedAt, "Agent observedAt");
 }
 
 function validateTool(value: unknown): asserts value is AiToolStatusSnapshot {
@@ -113,9 +341,52 @@ function shortString(value: unknown, label: string, maxLength: number): asserts 
 }
 
 function shortKey(value: unknown, label: string): asserts value is string {
-  shortString(value, label, MAX_SHORT_VALUE_LENGTH);
+  slug(value, label, MAX_SHORT_VALUE_LENGTH);
+}
+
+function slug(
+  value: unknown,
+  label: string,
+  maxLength: number
+): asserts value is string {
+  shortString(value, label, maxLength);
   if (!SHORT_KEY_PATTERN.test(value)) {
     throw new AiStatusProtocolError(`${label} is invalid.`);
+  }
+}
+
+function safeLabel(value: unknown, label: string, maxLength: number): asserts value is string {
+  shortString(value, label, maxLength);
+  if (/[\u0000-\u001f\u007f]/.test(value)) {
+    throw new AiStatusProtocolError(`${label} is invalid.`);
+  }
+}
+
+function safeVersion(value: unknown): asserts value is string {
+  safeLabel(value, "Agent version", MAX_VERSION_LENGTH);
+  if (/[\\/@]/.test(value)
+    || /\b(?:token|cookie|credential|password|api[_ -]?key)\b/i.test(value)) {
+    throw new AiStatusProtocolError("AI Agent version is invalid.");
+  }
+}
+
+function safeIdArray(value: unknown, label: string, maximum: number): asserts value is string[] {
+  if (!Array.isArray(value)
+    || value.length > maximum
+    || new Set(value).size !== value.length) {
+    throw new AiStatusProtocolError(`${label} are invalid.`);
+  }
+  for (const id of value) slug(id, label, MAX_AGENT_ID_LENGTH);
+}
+
+function contentModeArray(value: unknown, label: string): asserts value is Array<"text" | "image"> {
+  if (!Array.isArray(value)
+    || value.length === 0
+    || value.length > 2
+    || value[0] !== "text"
+    || new Set(value).size !== value.length
+    || value.some((mode) => mode !== "text" && mode !== "image")) {
+    throw new AiStatusProtocolError(`${label} are invalid.`);
   }
 }
 
@@ -126,4 +397,12 @@ function isoTimestamp(value: unknown, label: string): number {
   const parsed = Date.parse(value);
   if (!Number.isFinite(parsed)) throw new AiStatusProtocolError(`AI status ${label} is invalid.`);
   return parsed;
+}
+
+function encodedSize(value: unknown): number {
+  try {
+    return new TextEncoder().encode(JSON.stringify(value)).byteLength;
+  } catch {
+    throw new AiStatusProtocolError("AI status payload is not serializable.");
+  }
 }

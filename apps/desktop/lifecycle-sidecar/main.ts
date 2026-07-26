@@ -1,5 +1,6 @@
 import { createInterface } from "node:readline";
 import { stdin, stdout, stderr } from "node:process";
+import { join } from "node:path";
 import {
   LIFECYCLE_PROTOCOL_VERSION,
   type LifecycleResponse
@@ -21,9 +22,20 @@ import {
 import { ensureProfileDirectories, resolveTetiProfile } from "./profile.ts";
 import {
   closeDefaultPeerConnectionService,
+  getDefaultPeerConnectionService,
   getDefaultPassportSharingStore
 } from "./connections.ts";
 import { writeRuntimeDiagnostic } from "./diagnostics.ts";
+import {
+  FileAgentDetectorConfiguration,
+  loadAgentDetectorCatalog
+} from "./runtime/agents/config.ts";
+import { AgentObserverSupervisor } from "./runtime/agents/supervisor.ts";
+import { createMacAgentObserverSystem } from "./runtime/agents/system.ts";
+import { CallableAdapterKernel } from "./runtime/callable/kernel.ts";
+import { CallableQualificationSupervisor } from "./runtime/callable/qualification-supervisor.ts";
+import { qualifyCodexCallableAdapter } from "../../../integrations/agents/codex/adapter.ts";
+import { qualifyCodeBuddyCallableAdapter } from "../../../integrations/agents/codebuddy/qualification.ts";
 
 const PROCESS_SHUTDOWN_HARD_LIMIT_MS = 4_000;
 const inFlightRequestIds = new Set<string>();
@@ -60,14 +72,90 @@ async function startSidecar(): Promise<void> {
   await ensureProfileDirectories(profile);
   profileLock = await acquireTetiRuntimeProfileLock(profile);
   const codexUsageService = getDefaultCodexUsageService();
+  const agentConfigPath = join(profile.root, "agent-detectors.override.json");
+  const agentConfiguration = new FileAgentDetectorConfiguration(agentConfigPath);
+  const agentObserver = new AgentObserverSupervisor({
+    loadCatalog: () => loadAgentDetectorCatalog({
+      path: agentConfigPath
+    }),
+    system: createMacAgentObserverSystem()
+  });
+  const callableAdapterKernel = new CallableAdapterKernel();
+  let pathOverridesPromise: Promise<Record<string, string>> | undefined;
+  const loadPathOverrides = () => {
+    pathOverridesPromise ??= agentConfiguration.getPathOverrides().catch(() => ({}));
+    return pathOverridesPromise;
+  };
+  const qualificationSupervisor = new CallableQualificationSupervisor({
+    jobs: [
+      async (signal) => {
+        const pathOverrides = await loadPathOverrides();
+        if (signal.aborted) return;
+        const qualification = await qualifyCodexCallableAdapter({
+          pathOverride: pathOverrides.codex,
+          signal
+        });
+        if (signal.aborted) return;
+        writeRuntimeDiagnostic("callable.codex", {
+          state: qualification.readiness.state,
+          code: qualification.readiness.reasonCode,
+          adapterRevision: qualification.readiness.adapterRevision
+        });
+        if (qualification.adapter) {
+          callableAdapterKernel.registerAdapter(
+            qualification.adapter,
+            qualification.readiness.checkedAt
+          );
+        }
+      },
+      async (signal) => {
+        const pathOverrides = await loadPathOverrides();
+        if (signal.aborted) return;
+        const qualification = await qualifyCodeBuddyCallableAdapter({
+          pathOverride: pathOverrides.codebuddy,
+          signal
+        });
+        if (signal.aborted) return;
+        writeRuntimeDiagnostic("callable.codebuddy", {
+          state: qualification.readiness.state,
+          code: qualification.readiness.reasonCode,
+          adapterRevision: qualification.readiness.adapterRevision,
+          desktopDetected: qualification.evidence.desktopDetected,
+          officialCliDetected: qualification.evidence.officialCliDetected
+        });
+        if (qualification.adapter) {
+          callableAdapterKernel.registerAdapter(
+            qualification.adapter,
+            qualification.readiness.checkedAt
+          );
+        }
+      }
+    ],
+    onJobError: ({ index, error }) => {
+      writeRuntimeDiagnostic("callable.qualification", {
+        state: "failed",
+        job: index === 0 ? "codex" : "codebuddy",
+        message: redactSecretLikeText(error instanceof Error ? error.message : String(error))
+      });
+    }
+  });
   runtime = new TetiRuntime({
     dependencies: {
       loadTetiAccount: defaultLifecycleSidecarDependencies.loadTetiAccount,
       heartbeatDiscovery: defaultLifecycleSidecarDependencies.heartbeatDiscovery,
-      getPeerConnectionService: defaultLifecycleSidecarDependencies.getPeerConnectionService,
+      getPeerConnectionService: () => getDefaultPeerConnectionService({
+        getLocalCallableAgents: () => callableAdapterKernel.getCallableAgents(),
+        taskExecutor: callableAdapterKernel
+      }),
       passportSharingStore: await getDefaultPassportSharingStore(),
       codexUsageService,
-      dispose: closeDefaultPeerConnectionService
+      agentObserver,
+      agentConfiguration,
+      callableAdapterKernel,
+      dispose: async () => {
+        await qualificationSupervisor.stop();
+        await closeDefaultPeerConnectionService();
+      }
     },
     onJobError: ({ jobId, error }) => {
       const message = error instanceof Error ? error.message : String(error);
@@ -92,7 +180,6 @@ async function startSidecar(): Promise<void> {
     defaultLifecycleSidecarDependencies,
     runtime
   );
-  runtime.start();
 
   const reader = createInterface({
     input: stdin,
@@ -101,6 +188,8 @@ async function startSidecar(): Promise<void> {
   });
   reader.on("line", (line) => { void handleLine(line); });
   reader.once("close", () => { void beginShutdown(0); });
+  runtime.start();
+  qualificationSupervisor.start();
 }
 
 function readErrorCode(error: unknown): string | undefined {

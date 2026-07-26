@@ -1,5 +1,5 @@
 import { FirstLaunchCoordinator } from "./first-launch/coordinator.ts";
-import { Check, Link2, X, createElement } from "lucide";
+import { Check, ClipboardList, Link2, X, createElement } from "lucide";
 import { countUnicodeCharacters, truncateTetiDisplayName } from "../../../core/account/display-name.ts";
 import type { FirstLaunchSnapshot } from "./first-launch/state-machine.ts";
 import { toFirstLaunchViewModel, type FirstLaunchViewModel } from "./first-launch/view-model.ts";
@@ -36,11 +36,18 @@ import {
   toPassportViewModel,
   type ConnectionCardViewModel
 } from "./passport/view-model.ts";
+import { emptyAgentManagementSnapshot } from "../../../core/observation/management.ts";
 import {
   createTetiBotBrandLink,
   TETI_BOT_OPENING_EVENT,
   TETI_BOT_OPEN_SETTLED_EVENT
 } from "./brand/teti-bot-brand-link.ts";
+import {
+  BridgeTaskClient,
+  MockTaskClient,
+  TaskController
+} from "./tasks/controller.ts";
+import { createTaskWorkspace } from "./tasks/view.ts";
 import "./styles.css";
 
 const aiToolsButtonIconUrl = new URL("../assets/ai-tools-btn.png", import.meta.url).href;
@@ -57,9 +64,31 @@ export interface DesktopApp {
   coordinator: FirstLaunchCoordinator;
   connections: PeerConnectionController;
   passport: PassportController;
+  tasks: TaskController;
   config: ProvisioningModeConfig;
   render(): void;
   dispose(): void;
+}
+
+export function renderDesktopStartupFailure(
+  root: HTMLElement,
+  env: Record<string, string | undefined>
+): void {
+  renderSnapshot(
+    root,
+    {
+      state: "fatal_error",
+      nameInput: "",
+      submitting: false,
+      error: {
+        kind: "unrecoverable_internal_state",
+        message: "本机 Runtime 未能完成启动，请退出 Teti 后重试。",
+        recoverable: false,
+        diagnosticCode: "RUNTIME-START"
+      }
+    },
+    readProvisioningMode(env, "real")
+  );
 }
 
 export async function createDesktopApp(options: DesktopAppOptions): Promise<DesktopApp> {
@@ -130,6 +159,13 @@ export async function createDesktopApp(options: DesktopAppOptions): Promise<Desk
     onChange: () => app?.render(),
     refreshPassport: () => passport.refreshAfterMutation()
   });
+  const tasks = new TaskController({
+    client: bridge ? new BridgeTaskClient(bridge) : new MockTaskClient(),
+    tauri: options.tauri,
+    notchWindow,
+    onChange: () => app?.render(),
+    schedule: baseSchedule
+  });
   if (options.tauri.onFocusChanged) {
     stopFocusListener = await options.tauri.onFocusChanged((focused) => {
       if (!focused) {
@@ -138,6 +174,7 @@ export async function createDesktopApp(options: DesktopAppOptions): Promise<Desk
           return;
         }
         passport.closePanel();
+        tasks.dismissFromOutside();
         connections.dismissFromOutside();
       }
     });
@@ -150,6 +187,7 @@ export async function createDesktopApp(options: DesktopAppOptions): Promise<Desk
         return;
       }
       passport.closePanel(false);
+      tasks.close("dock-activate-reset");
       connections.open();
     });
   }
@@ -158,9 +196,10 @@ export async function createDesktopApp(options: DesktopAppOptions): Promise<Desk
     coordinator,
     connections,
     passport,
+    tasks,
     config: selection.config,
     render: () => {
-      renderSnapshot(options.root, coordinator.snapshot, selection.config, coordinator, connections, passport);
+      renderSnapshot(options.root, coordinator.snapshot, selection.config, coordinator, connections, passport, tasks);
     },
     dispose: () => {
       if (disposed) return;
@@ -171,12 +210,14 @@ export async function createDesktopApp(options: DesktopAppOptions): Promise<Desk
       options.root.removeEventListener(TETI_BOT_OPENING_EVENT, handleBrandWebsiteOpening);
       options.root.removeEventListener(TETI_BOT_OPEN_SETTLED_EVENT, handleBrandWebsiteOpenSettled);
       passport.stop();
+      tasks.dispose();
       connections.dispose();
     }
   };
 
-  const initial = await coordinator.initialize();
-  if (initial.account) passport.start();
+  await coordinator.initialize();
+  passport.start();
+  tasks.start();
   app.render();
   await notchWindow.setMode(visualModeForViewModel(toFirstLaunchViewModel(coordinator.snapshot)), "initial-render");
 
@@ -189,15 +230,23 @@ export function renderSnapshot(
   config: ProvisioningModeConfig = readProvisioningMode({}),
   coordinator?: FirstLaunchCoordinator,
   connections?: PeerConnectionController,
-  passport?: PassportController
+  passport?: PassportController,
+  tasks?: TaskController
 ): void {
   const viewModel = toFirstLaunchViewModel(snapshot);
+  const taskOpen = viewModel.panel === "collapsed" && tasks?.snapshot.open;
   const peerPanelOpen = viewModel.panel === "collapsed" && connections?.snapshot.open;
-  root.className = `teti-shell teti-shell--${peerPanelOpen ? "expanded" : viewModel.panel}`;
+  root.className = `teti-shell teti-shell--${taskOpen || peerPanelOpen ? "expanded" : viewModel.panel}`;
   root.replaceChildren(
-    peerPanelOpen
-      ? createConnectionIsland(config, connections, passport)
-      : createIsland(viewModel, config, coordinator, connections, passport)
+    taskOpen
+      ? createTaskWorkspace(
+          tasks,
+          passport?.snapshot.passport.connections ?? [],
+          passport?.snapshot.passport.localPassport
+        )
+      : peerPanelOpen
+        ? createConnectionIsland(config, connections, passport, tasks)
+        : createIsland(viewModel, config, coordinator, connections, passport, tasks)
   );
 }
 
@@ -206,14 +255,15 @@ function createIsland(
   config: ProvisioningModeConfig,
   coordinator?: FirstLaunchCoordinator,
   connections?: PeerConnectionController,
-  passport?: PassportController
+  passport?: PassportController,
+  tasks?: TaskController
 ): HTMLElement {
   const island = document.createElement("section");
   island.className = `teti-island teti-island--${viewModel.panel} teti-island--${viewModel.character}`;
   island.setAttribute("aria-label", viewModel.title);
 
   if (viewModel.panel === "expanded") {
-    island.append(createIslandHeader(config, passport));
+    island.append(createIslandHeader(config, passport, tasks, connections));
   }
 
   const face = document.createElement(viewModel.panel === "collapsed" && connections ? "button" : "div");
@@ -224,10 +274,15 @@ function createIsland(
     const pendingCount = connections?.snapshot.connections.filter(
       (connection) => connection.connectionState === "PendingApproval"
     ).length ?? 0;
-    const openLabel = pendingCount > 0 ? `打开 Teti 建联，${pendingCount} 个请求待确认` : "打开 Teti 建联";
+    const pendingTaskCount = tasks?.snapshot.summary.pendingIncomingCount ?? 0;
+    const openLabel = pendingTaskCount > 0
+      ? `打开 Teti 任务，${pendingTaskCount} 个任务待确认`
+      : pendingCount > 0
+        ? `打开 Teti 建联，${pendingCount} 个请求待确认`
+        : "打开 Teti";
     face.setAttribute("aria-label", openLabel);
     face.setAttribute("title", openLabel);
-    if (pendingCount > 0) {
+    if (pendingCount > 0 || pendingTaskCount > 0) {
       face.classList.add("teti-face--attention");
       const indicator = document.createElement("span");
       indicator.className = "teti-pending-indicator";
@@ -236,7 +291,8 @@ function createIsland(
     }
     face.addEventListener("click", () => {
       passport?.closePanel();
-      connections?.open();
+      if (pendingTaskCount > 0) tasks?.openInbox();
+      else connections?.open();
     });
   } else {
     face.setAttribute("aria-hidden", "true");
@@ -278,7 +334,7 @@ function createIsland(
     input.addEventListener("keydown", (event) => {
       if (event.key === "Enter" && coordinator && !viewModel.input?.disabled) {
         event.preventDefault();
-        void submitAndRender(coordinator, island.ownerDocument.getElementById("app"), config, connections, passport);
+        void submitAndRender(coordinator, island.ownerDocument.getElementById("app"), config, connections, passport, tasks);
       }
     });
     content.append(input);
@@ -329,7 +385,8 @@ function createIsland(
           config,
           coordinator,
           connections,
-          passport
+          passport,
+          tasks
         );
         return;
       }
@@ -342,7 +399,8 @@ function createIsland(
           config,
           coordinator,
           connections,
-          passport
+          passport,
+          tasks
         );
         return;
       }
@@ -353,7 +411,8 @@ function createIsland(
           island.ownerDocument.getElementById("app"),
           config,
           connections,
-          passport
+          passport,
+          tasks
         );
         return;
       }
@@ -363,7 +422,8 @@ function createIsland(
         island.ownerDocument.getElementById("app"),
         config,
         connections,
-        passport
+        passport,
+        tasks
       );
     });
     content.append(button);
@@ -376,14 +436,15 @@ function createIsland(
 function createConnectionIsland(
   config: ProvisioningModeConfig,
   controller: PeerConnectionController,
-  passport?: PassportController
+  passport?: PassportController,
+  tasks?: TaskController
 ): HTMLElement {
   const snapshot = controller.snapshot;
   const passportViewModel = toPassportViewModel(passport?.snapshot ?? defaultPassportSnapshot());
   const island = document.createElement("section");
   island.className = "teti-island teti-island--expanded teti-island--connections";
   island.setAttribute("aria-label", "连接其他 Teti");
-  island.append(createConnectionHeader(config, passport));
+  island.append(createConnectionHeader(config, passport, tasks, controller));
 
   const panelState = snapshot.connectPanel.state;
   const face = document.createElement("button");
@@ -649,9 +710,11 @@ function createConnectionRow(
 
 function createConnectionHeader(
   config: ProvisioningModeConfig,
-  passport?: PassportController
+  passport?: PassportController,
+  tasks?: TaskController,
+  connections?: PeerConnectionController
 ): HTMLElement {
-  return createIslandHeader(config, passport);
+  return createIslandHeader(config, passport, tasks, connections);
 }
 
 function iconButton(
@@ -678,7 +741,12 @@ function updateNameCounter(input: HTMLInputElement, meta: HTMLElement, maxCharac
   meta.textContent = `${countUnicodeCharacters(input.value)} / ${maxCharacters}`;
 }
 
-function createIslandHeader(_config: ProvisioningModeConfig, passport?: PassportController): HTMLElement {
+function createIslandHeader(
+  _config: ProvisioningModeConfig,
+  passport?: PassportController,
+  tasks?: TaskController,
+  connections?: PeerConnectionController
+): HTMLElement {
   const header = document.createElement("header");
   header.className = "teti-header";
 
@@ -709,7 +777,18 @@ function createIslandHeader(_config: ProvisioningModeConfig, passport?: Passport
     passport ? () => passport.togglePanel("sharing") : undefined
   );
   sharingButton.classList.toggle("is-sharing-enabled", viewModel.settings.enabled);
-  controls.append(statusButton, sharingButton, statusPanel, sharingPanel);
+  const taskButton = iconButton(ClipboardList, "协作任务", () => {
+    connections?.close("switch-to-task");
+    passport?.closePanel(false);
+    tasks?.openInbox();
+  });
+  taskButton.classList.add("teti-task-header-button");
+  const pendingTasks = tasks?.snapshot.summary.pendingIncomingCount ?? 0;
+  if (pendingTasks > 0) {
+    taskButton.classList.add("has-task-badge");
+    taskButton.dataset.count = String(Math.min(pendingTasks, 9));
+  }
+  controls.append(statusButton, taskButton, sharingButton, statusPanel, sharingPanel);
 
   header.append(brand, controls);
   return header;
@@ -761,7 +840,9 @@ function createToolbarAssetIcon(source: string, kind: "ai-tools" | "settings"): 
 function defaultPassportSnapshot(): PassportControllerSnapshot {
   return {
     passport: emptyPassportSnapshot(),
+    agentManagement: emptyAgentManagementSnapshot(),
     sharingBusy: false,
+    agentBusy: false,
     openPanel: null
   };
 }
@@ -807,11 +888,12 @@ async function submitAndRender(
   root: HTMLElement | null,
   config: ProvisioningModeConfig,
   connections?: PeerConnectionController,
-  passport?: PassportController
+  passport?: PassportController,
+  tasks?: TaskController
 ): Promise<void> {
   const pending = coordinator.submitName();
   if (root) {
-    renderSnapshot(root, coordinator.snapshot, config, coordinator, connections, passport);
+    renderSnapshot(root, coordinator.snapshot, config, coordinator, connections, passport, tasks);
   }
 
   await pending;
@@ -820,7 +902,7 @@ async function submitAndRender(
     await passport.refreshNow();
   }
   if (root) {
-    renderSnapshot(root, coordinator.snapshot, config, coordinator, connections, passport);
+    renderSnapshot(root, coordinator.snapshot, config, coordinator, connections, passport, tasks);
   }
 }
 
@@ -829,16 +911,17 @@ async function retryDiscoveryAndRender(
   root: HTMLElement | null,
   config: ProvisioningModeConfig,
   connections?: PeerConnectionController,
-  passport?: PassportController
+  passport?: PassportController,
+  tasks?: TaskController
 ): Promise<void> {
   const pending = coordinator.retryDiscoveryRegistration();
   if (root) {
-    renderSnapshot(root, coordinator.snapshot, config, coordinator, connections, passport);
+    renderSnapshot(root, coordinator.snapshot, config, coordinator, connections, passport, tasks);
   }
 
   await pending;
   if (root) {
-    renderSnapshot(root, coordinator.snapshot, config, coordinator, connections, passport);
+    renderSnapshot(root, coordinator.snapshot, config, coordinator, connections, passport, tasks);
   }
 }
 

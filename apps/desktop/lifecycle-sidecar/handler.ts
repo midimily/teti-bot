@@ -28,8 +28,15 @@ import {
 } from "./connections.ts";
 import type { RuntimePassportSnapshot } from "../../../core/passport/snapshot.ts";
 import type { PassportSharingPolicy } from "../../../core/passport/types.ts";
+import type { AgentManagementSnapshot } from "../../../core/observation/management.ts";
 import { validatePolicy } from "./runtime/passport/sharing.ts";
 import { writeRuntimeDiagnostic } from "./diagnostics.ts";
+import {
+  DEFAULT_TASK_REQUEST_TTL_MS,
+  type SendCollaborationTaskInput
+} from "../../../core/task/transport.ts";
+import { MAX_TASK_INPUT_TEXT_BYTES, MAX_TASK_REQUEST_TTL_MS } from "../../../core/task/types.ts";
+import { validateTaskImagePart } from "../../../core/task/validation.ts";
 
 export interface LifecycleSidecarDependencies {
   loadTetiAccount(): Promise<TetiAccount | null>;
@@ -40,6 +47,9 @@ export interface LifecycleSidecarDependencies {
   getPeerConnectionService(): Promise<PeerConnectionService>;
   getPassportSnapshot?(): Promise<RuntimePassportSnapshot>;
   setPassportSharing?(policy: PassportSharingPolicy): Promise<RuntimePassportSnapshot>;
+  getAgentManagementSnapshot?(): Promise<AgentManagementSnapshot>;
+  rescanAgents?(): Promise<AgentManagementSnapshot>;
+  setAgentPathOverride?(agentId: string, path: string | null): Promise<AgentManagementSnapshot>;
 }
 
 export const defaultLifecycleSidecarDependencies: LifecycleSidecarDependencies = {
@@ -150,6 +160,68 @@ async function dispatchLifecycleRequest(
     case "connection.reject":
       return (await dependencies.getPeerConnectionService()).reject(validateRequestId(request.params?.requestId));
 
+    case "task.send": {
+      const service = await dependencies.getPeerConnectionService();
+      if (!service.sendTask) throw new Error("Task transport is unavailable.");
+      return service.sendTask(validateTaskSendInput(request.params));
+    }
+
+    case "task.list": {
+      const service = await dependencies.getPeerConnectionService();
+      if (!service.listTasks) throw new Error("Task transport is unavailable.");
+      const snapshot = await service.listTasks();
+      const limit = validateTaskListLimit(request.params?.limit);
+      return { ...snapshot, records: snapshot.records.slice(0, limit) };
+    }
+
+    case "task.summary": {
+      const service = await dependencies.getPeerConnectionService();
+      if (!service.listTaskSummaries) throw new Error("Task summary service is unavailable.");
+      return service.listTaskSummaries();
+    }
+
+    case "task.get": {
+      const service = await dependencies.getPeerConnectionService();
+      if (!service.getTask) throw new Error("Task detail service is unavailable.");
+      return service.getTask(validateTaskId(request.params?.taskId));
+    }
+
+    case "task.attachment.stage": {
+      const service = await dependencies.getPeerConnectionService();
+      if (!service.stageTaskImage) throw new Error("Task image staging is unavailable.");
+      return service.stageTaskImage(validateAbsoluteTaskImagePath(request.params?.path));
+    }
+
+    case "task.attachment.resolve": {
+      const service = await dependencies.getPeerConnectionService();
+      if (!service.resolveTaskImage) throw new Error("Task image resolution is unavailable.");
+      return {
+        attachmentId: validateTaskId(request.params?.attachmentId),
+        path: await service.resolveTaskImage(
+          validateTaskId(request.params?.taskId),
+          validateTaskId(request.params?.attachmentId)
+        )
+      };
+    }
+
+    case "task.approve": {
+      const service = await dependencies.getPeerConnectionService();
+      if (!service.approveTask) throw new Error("Task approval is unavailable.");
+      return service.approveTask(validateTaskId(request.params?.taskId));
+    }
+
+    case "task.reject": {
+      const service = await dependencies.getPeerConnectionService();
+      if (!service.rejectTask) throw new Error("Task rejection is unavailable.");
+      return service.rejectTask(validateTaskId(request.params?.taskId));
+    }
+
+    case "task.cancel": {
+      const service = await dependencies.getPeerConnectionService();
+      if (!service.cancelTask) throw new Error("Task cancellation is unavailable.");
+      return service.cancelTask(validateTaskId(request.params?.taskId));
+    }
+
     case "passport.get":
       if (!dependencies.getPassportSnapshot) throw new Error("Runtime Passport service is unavailable.");
       return await dependencies.getPassportSnapshot();
@@ -157,6 +229,21 @@ async function dispatchLifecycleRequest(
     case "passport.sharing.set":
       if (!dependencies.setPassportSharing) throw new Error("Runtime Passport service is unavailable.");
       return await dependencies.setPassportSharing(validatePolicy(request.params?.policy));
+
+    case "agent.observation.get":
+      if (!dependencies.getAgentManagementSnapshot) throw new Error("Agent management is unavailable.");
+      return await dependencies.getAgentManagementSnapshot();
+
+    case "agent.observation.scan":
+      if (!dependencies.rescanAgents) throw new Error("Agent management is unavailable.");
+      return await dependencies.rescanAgents();
+
+    case "agent.observation.override.set":
+      if (!dependencies.setAgentPathOverride) throw new Error("Agent management is unavailable.");
+      return await dependencies.setAgentPathOverride(
+        validateAgentId(request.params?.agentId),
+        validateAgentPathOverride(request.params?.path)
+      );
   }
 }
 
@@ -244,6 +331,93 @@ function validateRequestId(value: unknown): string {
   return value.trim();
 }
 
+function validateTaskSendInput(value: unknown): SendCollaborationTaskInput {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("Task parameters are required.");
+  }
+  const params = value as Record<string, unknown>;
+  const allowed = ["connectionRequestId", "taskId", "offerId", "capabilityId", "text", "attachments", "ttlMs"];
+  if (Object.keys(params).some((key) => !allowed.includes(key))) {
+    throw new Error("Task parameters contain an unsupported field.");
+  }
+  const connectionRequestId = validateRequestId(params.connectionRequestId);
+  if (params.taskId !== undefined
+    && (typeof params.taskId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(params.taskId))) {
+    throw new Error("Task ID is invalid.");
+  }
+  if (params.offerId !== undefined
+    && (typeof params.offerId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(params.offerId))) {
+    throw new Error("Task offer ID is invalid.");
+  }
+  if (typeof params.capabilityId !== "string"
+    || params.capabilityId.length > 128
+    || !/^[a-z0-9]+(?:[._-][a-z0-9]+)*$/.test(params.capabilityId)) {
+    throw new Error("Task Capability ID is invalid.");
+  }
+  if (typeof params.text !== "string" || !params.text.trim()
+    || Buffer.byteLength(params.text, "utf8") > MAX_TASK_INPUT_TEXT_BYTES) {
+    throw new Error("Task text is invalid or too large.");
+  }
+  const ttlMs = params.ttlMs ?? DEFAULT_TASK_REQUEST_TTL_MS;
+  if (!Number.isSafeInteger(ttlMs) || Number(ttlMs) <= 0 || Number(ttlMs) > MAX_TASK_REQUEST_TTL_MS) {
+    throw new Error("Task TTL is invalid.");
+  }
+  const attachments = params.attachments ?? [];
+  if (!Array.isArray(attachments) || attachments.length > 4) {
+    throw new Error("Task attachments are invalid.");
+  }
+  for (const attachment of attachments) validateTaskImagePart(attachment);
+  return {
+    connectionRequestId,
+    capabilityId: params.capabilityId,
+    text: params.text,
+    attachments: structuredClone(attachments),
+    ttlMs: Number(ttlMs),
+    ...(params.taskId === undefined ? {} : { taskId: params.taskId }),
+    ...(params.offerId === undefined ? {} : { offerId: params.offerId })
+  };
+}
+
+function validateTaskId(value: unknown): string {
+  if (typeof value !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value)) {
+    throw new Error("Task ID is invalid.");
+  }
+  return value;
+}
+
+function validateAbsoluteTaskImagePath(value: unknown): string {
+  if (typeof value !== "string"
+    || !value.startsWith("/")
+    || value.includes("\0")
+    || value.length > 4_096) {
+    throw new Error("Task image path is invalid.");
+  }
+  return value;
+}
+
+function validateTaskListLimit(value: unknown): number {
+  if (value === undefined) return 1;
+  if (value !== 1) {
+    throw new Error("Task list limit must be 1.");
+  }
+  return 1;
+}
+
+function validateAgentId(value: unknown): string {
+  if (typeof value !== "string" || !/^[a-z0-9]+(?:[._-][a-z0-9]+)*$/.test(value) || value.length > 64) {
+    throw new Error("A valid built-in Agent ID is required.");
+  }
+  return value;
+}
+
+function validateAgentPathOverride(value: unknown): string | null {
+  if (value === null) return null;
+  if (typeof value !== "string" || value.length > 1_024) {
+    throw new Error("A valid local Agent path is required.");
+  }
+  return value;
+}
+
 function statusToDto(status: TetiStatus, account: TetiAccount | null): LifecycleStatusResult {
   const result: LifecycleStatusResult = {
     exists: status.exists,
@@ -300,11 +474,24 @@ function fallbackCodeForMethod(method: LifecycleRequest["method"]) {
     case "connection.accept":
     case "connection.reject":
       return "CONNECTION_REQUEST_FAILED";
+    case "task.send":
+    case "task.list":
+    case "task.summary":
+    case "task.get":
+    case "task.attachment.stage":
+    case "task.attachment.resolve":
+    case "task.approve":
+    case "task.reject":
+    case "task.cancel":
+      return "TASK_TRANSPORT_FAILED";
     case "account.load":
     case "account.status":
       return "ACCOUNT_LOAD_FAILED";
     case "passport.get":
     case "passport.sharing.set":
+    case "agent.observation.get":
+    case "agent.observation.scan":
+    case "agent.observation.override.set":
       return "INTERNAL_ERROR";
     default:
       return "INTERNAL_ERROR";
