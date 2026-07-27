@@ -28,11 +28,16 @@ test("an empty qualified set produces no Agent or inferred capability", () => {
 
 test("multiple qualified Adapters for one Agent become one public Agent", () => {
   const second = callable("codex", "codex.secondary");
-  second.capabilityIds = ["writing"];
+  second.capabilityIds = ["image-editing"];
+  second.inputModes = ["text", "image"];
+  second.outputModes = ["text", "image"];
   second.readyAt = "2026-07-26T00:01:00.000Z";
   const projection = projectCallablePassport([callable("codex", "codex.local"), second]);
   assert.equal(projection.agents.length, 1);
-  assert.deepEqual(projection.agents[0]?.capabilityIds, ["code-analysis", "writing"]);
+  assert.deepEqual(projection.agents[0]?.capabilityIds, ["code-analysis", "image-editing"]);
+  assert.deepEqual(projection.agents[0]?.inputModes, ["text", "image"]);
+  assert.deepEqual(projection.agents[0]?.outputModes, ["text", "image"]);
+  assert.equal(projection.capabilities.find((capability) => capability.id === "image-editing")?.category, "image");
   assert.equal(projection.agents[0]?.observedAt, "2026-07-26T00:01:00.000Z");
 });
 

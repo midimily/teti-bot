@@ -1,6 +1,7 @@
 import {
   TETI_CALLABLE_TASK_SCHEMA_VERSION,
   type CallableAdapterSafeErrorCode,
+  type CallableAdapterTaskArtifact,
   type CallableAdapterTaskRequest,
   type CallableAdapterTaskSnapshot,
   type CallableAdapterTaskState
@@ -56,7 +57,7 @@ export class CallableTaskStateMachine {
     return this.snapshot;
   }
 
-  complete(text: string): CallableAdapterTaskSnapshot {
+  complete(artifact: string | CallableAdapterTaskArtifact): CallableAdapterTaskSnapshot {
     this.requireState("working");
     const timestamp = this.timestamp();
     this.value = {
@@ -64,7 +65,7 @@ export class CallableTaskStateMachine {
       state: "completed",
       updatedAt: timestamp,
       completedAt: timestamp,
-      artifact: { kind: "text", text }
+      artifact: typeof artifact === "string" ? { kind: "text", text: artifact } : structuredClone(artifact)
     };
     return this.snapshot;
   }

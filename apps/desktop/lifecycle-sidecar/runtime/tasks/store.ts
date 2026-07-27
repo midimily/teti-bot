@@ -114,6 +114,7 @@ function validateRecord(value: unknown): asserts value is CollaborationTaskTrans
     "envelopeMessageId",
     "chatmailMessageId",
     "sentAttachmentIds",
+    "sentArtifactAttachmentIds",
     "request",
     "state",
     "approval",
@@ -127,6 +128,7 @@ function validateRecord(value: unknown): asserts value is CollaborationTaskTrans
     "cancelPending",
     "cancelSentAt",
     "artifactPending",
+    "artifactAttachmentsReady",
     "attachmentsReady",
     "artifacts",
     "safeErrorCode"
@@ -135,7 +137,7 @@ function validateRecord(value: unknown): asserts value is CollaborationTaskTrans
     throw new Error("Teti Task transport record direction is invalid.");
   }
   if (!isCanonicalTetiPublicId(value.peerTetiId)
-    || (value.protocolVersion !== 1 && value.protocolVersion !== 2)) {
+    || (value.protocolVersion !== 1 && value.protocolVersion !== 2 && value.protocolVersion !== 3)) {
     throw new Error("Teti Task transport record peer is invalid.");
   }
   if (value.envelopeMessageId !== undefined
@@ -172,6 +174,11 @@ function validateRecord(value: unknown): asserts value is CollaborationTaskTrans
       || value.sentAttachmentIds.some((item) => typeof item !== "string"))) {
     throw new Error("Teti Task sent attachment state is invalid.");
   }
+  if (value.sentArtifactAttachmentIds !== undefined
+    && (!Array.isArray(value.sentArtifactAttachmentIds)
+      || value.sentArtifactAttachmentIds.some((item) => typeof item !== "string"))) {
+    throw new Error("Teti Task sent Artifact attachment state is invalid.");
+  }
   if (value.statusRevision !== undefined
     && (!Number.isSafeInteger(value.statusRevision) || Number(value.statusRevision) < 0)) {
     throw new Error("Teti Task status revision is invalid.");
@@ -185,6 +192,9 @@ function validateRecord(value: unknown): asserts value is CollaborationTaskTrans
   }
   if (value.artifactPending !== undefined && typeof value.artifactPending !== "boolean") {
     throw new Error("Teti Task Artifact outbox state is invalid.");
+  }
+  if (value.artifactAttachmentsReady !== undefined && typeof value.artifactAttachmentsReady !== "boolean") {
+    throw new Error("Teti Task Artifact attachment readiness is invalid.");
   }
   if (value.attachmentsReady !== undefined && typeof value.attachmentsReady !== "boolean") {
     throw new Error("Teti Task attachment readiness is invalid.");

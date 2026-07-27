@@ -46,6 +46,20 @@ switch (mode) {
     break;
   }
 
+  case "image": {
+    const path = join(process.cwd(), "output.png");
+    await writeFile(path, Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M/wHwAF/gL+pkJZ5QAAAABJRU5ErkJggg==",
+      "base64"
+    ));
+    process.stdout.write(JSON.stringify({
+      schemaVersion: 1,
+      text: "fake:image-complete",
+      images: [{ path }]
+    }));
+    break;
+  }
+
   default:
     process.stderr.write("unknown fake mode\n");
     process.exitCode = 9;

@@ -102,6 +102,10 @@ export class RealChatmailAdapter implements ChatmailAdapter {
     return this.rpc.receiveMessages(input);
   }
 
+  async acknowledgeReceivedMessage(accountId: number, messageId: number): Promise<void> {
+    await this.rpc.markMessageSeen?.(accountId, messageId);
+  }
+
   async downloadMessageAttachment(
     accountId: number,
     messageId: number
@@ -109,8 +113,25 @@ export class RealChatmailAdapter implements ChatmailAdapter {
     if (!this.rpc.downloadFullMessage || !this.rpc.getReceivedMessage) {
       throw new Error("Chatmail attachment download is unavailable.");
     }
-    await this.rpc.downloadFullMessage(accountId, messageId);
-    return this.rpc.getReceivedMessage(accountId, messageId);
+    let downloadError: unknown;
+    try {
+      // DeltaChat schedules the full download and returns before the file is
+      // available. Callers must treat the refreshed InProgress state as a
+      // durable wait condition, not as a completed download.
+      await this.rpc.downloadFullMessage(accountId, messageId);
+    } catch (error) {
+      // MsgsChanged may race the poll that observed Available. Re-read before
+      // deciding whether a repeated/in-flight request is actually an error.
+      downloadError = error;
+    }
+    const refreshed = await this.rpc.getReceivedMessage(accountId, messageId);
+    if (downloadError
+      && !refreshed.filePath
+      && refreshed.downloadState !== "InProgress"
+      && refreshed.downloadState !== "Done") {
+      throw downloadError;
+    }
+    return refreshed;
   }
 
   async deleteAccount(input: DeleteChatmailAccountInput): Promise<void> {

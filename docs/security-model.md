@@ -30,6 +30,13 @@ workspace, path, credential, model or tool. A Chatmail receipt never grants
 execution. Only a receiver-side allow-once action creates a short-lived local
 grant.
 
+Beta 0.1.14 treats generated images as untrusted files until they pass the same
+PNG/JPEG, size, dimensions and SHA-256 checks as Task inputs. Adapter output
+paths must resolve inside the isolated task workspace, then the image is copied
+to the private Artifact store before that workspace is deleted. An
+`image-editing` execution that produces no verified image fails closed and
+cannot publish a text-only success.
+
 ## Authentication Recovery
 
 Teti does not transport or persist Agent credentials. If an Adapter detects an

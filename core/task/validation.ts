@@ -45,7 +45,9 @@ export function validateCollaborationTaskRequest(
     "createdAt",
     "expiresAt"
   ], "Task request");
-  if (request.schemaVersion !== 1 && request.schemaVersion !== TETI_COLLABORATION_TASK_SCHEMA_VERSION) {
+  if (request.schemaVersion !== 1
+    && request.schemaVersion !== 2
+    && request.schemaVersion !== TETI_COLLABORATION_TASK_SCHEMA_VERSION) {
     throw new TaskContractError("Unsupported Task request schema version.");
   }
   safeId(request.taskId, "taskId");

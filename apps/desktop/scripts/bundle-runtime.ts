@@ -7,6 +7,7 @@ const desktopRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repoRoot = resolve(desktopRoot, "..", "..");
 const resourcesRoot = join(desktopRoot, "src-tauri", "resources");
 const sidecarOutput = join(resourcesRoot, "lifecycle-sidecar", "main.mjs");
+const codexImageRunnerOutput = join(resourcesRoot, "lifecycle-sidecar", "codex-image-runner.mjs");
 const runtimeRoot = join(resourcesRoot, "runtime");
 const rpcSource = join(
   repoRoot,
@@ -30,6 +31,23 @@ await mkdir(runtimeRoot, { recursive: true });
 await build({
   entryPoints: [join(desktopRoot, "lifecycle-sidecar", "main.ts")],
   outfile: sidecarOutput,
+  bundle: true,
+  platform: "node",
+  format: "esm",
+  target: "node22",
+  sourcemap: false,
+  logLevel: "warning"
+});
+
+await build({
+  entryPoints: [join(
+    desktopRoot,
+    "lifecycle-sidecar",
+    "runtime",
+    "callable",
+    "codex-image-runner.ts"
+  )],
+  outfile: codexImageRunnerOutput,
   bundle: true,
   platform: "node",
   format: "esm",

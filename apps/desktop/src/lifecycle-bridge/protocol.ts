@@ -159,6 +159,10 @@ export interface PeerConnectionDto {
   confirmedAt?: string;
   lastHeartbeatSentAt?: string;
   lastHeartbeatReceivedAt?: string;
+  remoteProtocolCapabilities?: {
+    passportSchemaVersions: number[];
+    observedAt: string;
+  };
   remoteAiStatus?: RemoteAiStatusSnapshot;
 }
 

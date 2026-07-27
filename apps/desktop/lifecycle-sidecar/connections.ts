@@ -25,7 +25,10 @@ import {
 import { parseApplicationEnvelope } from "../../../core/protocol/envelope.ts";
 import type { TetiPresencePayload } from "../../../core/protocol/types.ts";
 import type { TetiApplicationEnvelope } from "../../../core/protocol/types.ts";
-import type { CollaborationTaskRequest } from "../../../core/task/types.ts";
+import {
+  MAX_TASK_IMAGE_BYTES,
+  type CollaborationTaskRequest
+} from "../../../core/task/types.ts";
 import {
   TETI_SUPPORTED_TASK_PROTOCOL_VERSIONS,
   type CollaborationTaskTransportRecord,
@@ -41,12 +44,13 @@ import {
 import type {
   AiStatusSyncPayload,
   CallablePassportAiStatusSyncPayload,
-  LegacyAiStatusSyncPayload,
-  PassportAiStatusSyncPayload,
   AiToolStatusSnapshot,
   RemoteAiStatusSnapshot
 } from "../../../core/ai-status/types.ts";
-import { selectAiStatusSchemasForPeer } from "../../../core/ai-status/negotiation.ts";
+import {
+  selectAiStatusSchemaForPeer,
+  TETI_SUPPORTED_PASSPORT_SCHEMA_VERSIONS
+} from "../../../core/ai-status/negotiation.ts";
 import type { CallableAgent } from "../../../core/callability/types.ts";
 import { projectCallablePassport } from "../../../core/passport/callable-projection.ts";
 import type { PassportSharingPolicy } from "../../../core/passport/types.ts";
@@ -74,6 +78,11 @@ import {
   MemoryPassportSharingStore,
   type PassportSharingStore
 } from "./runtime/passport/sharing.ts";
+import {
+  FilePeerProtocolCapabilityStore,
+  MemoryPeerProtocolCapabilityStore,
+  type PeerProtocolCapabilityStore
+} from "./runtime/passport/peer-capabilities.ts";
 import { getDefaultCodexUsageService } from "./codex-usage/runtime.ts";
 import { createShareableCodexStatus } from "../src/codex-usage/presentation.ts";
 import {
@@ -81,7 +90,7 @@ import {
   MemoryTaskTransportStore,
   type TaskTransportStore
 } from "./runtime/tasks/store.ts";
-import { TaskTransportRuntime } from "./runtime/tasks/service.ts";
+import { TaskTransportRuntime, TaskTransportRuntimeError } from "./runtime/tasks/service.ts";
 import type { TaskExecutionBridge } from "./runtime/tasks/service.ts";
 import {
   FileTaskAttachmentStore,
@@ -91,6 +100,7 @@ import {
 const HEARTBEAT_INTERVAL_MS = 5_000;
 const AI_STATUS_SYNC_INTERVAL_MS = 10 * 60 * 1_000;
 const AI_STATUS_TTL_MS = 30 * 60 * 1_000;
+const TETI_TASK_ATTACHMENT_FILENAME_PATTERN = /^(?:teti-task-)?[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}\.(?:png|jpe?g)$/i;
 
 export interface PeerConnectionService {
   resolve(query: string): Promise<PublicTetiIdentity>;
@@ -122,6 +132,7 @@ interface PeerConnectionRuntimeOptions {
   passportSharing?: PassportSharingStore;
   getLocalAiTools?: () => AiToolStatusSnapshot[];
   getLocalCallableAgents?: () => CallableAgent[];
+  peerProtocolCapabilities?: PeerProtocolCapabilityStore;
   taskTransportStore?: TaskTransportStore;
   taskIdFactory?: () => string;
   taskAttachmentStore?: FileTaskAttachmentStore;
@@ -142,11 +153,13 @@ export class PeerConnectionRuntime implements PeerConnectionService {
   private readonly passportSharing: PassportSharingStore;
   private readonly getLocalAiTools: () => AiToolStatusSnapshot[];
   private readonly getLocalCallableAgents: () => CallableAgent[];
+  private readonly peerProtocolCapabilities: PeerProtocolCapabilityStore;
   private readonly heartbeatSent = new Map<string, string>();
   private readonly heartbeatReceived = new Map<string, string>();
   private readonly aiStatusSent = new Map<string, { at: string; signature: string }>();
   private readonly remoteAiStatus = new Map<string, RemoteAiStatusSnapshot>();
   private readonly identityCache = new Map<string, TetiIdentity>();
+  private readonly messageProcessingFailures = new Map<number, number>();
   private ready = false;
   private queue: Promise<void> = Promise.resolve();
   private settingsQueue: Promise<void> = Promise.resolve();
@@ -163,6 +176,8 @@ export class PeerConnectionRuntime implements PeerConnectionService {
     this.passportSharing = options.passportSharing ?? new MemoryPassportSharingStore();
     this.getLocalAiTools = options.getLocalAiTools ?? (() => []);
     this.getLocalCallableAgents = options.getLocalCallableAgents ?? (() => []);
+    this.peerProtocolCapabilities = options.peerProtocolCapabilities
+      ?? new MemoryPeerProtocolCapabilityStore();
     this.messagingAdapter = new ChatmailConnectionMessagingAdapter(this.chatmailAdapter);
     this.connectionManager = new TetiConnectionManager({
       accountStorage: this.accountStorage,
@@ -238,22 +253,59 @@ export class PeerConnectionRuntime implements PeerConnectionService {
         limit: 100,
         backlogFirst: true
       });
+      const confirmedPeerAddresses = new Set(
+        (await this.connectionStorage.loadAll())
+          .filter((connection) => connection.state === TetiConnectionState.Confirmed)
+          .map((connection) => connection.remoteAddress.toLowerCase())
+      );
       let receivedCount = 0;
 
-      for (const message of messages) {
+      for (const receivedMessage of messages) {
+        let message = receivedMessage;
+        let processed = false;
         try {
-          if (!message.text) continue;
-          if (await this.processConnectionMessage(message.text, message.receivedAt, message.fromAddress)) {
+          message = await this.preparePartialTaskAttachment(
+            account.chatmailAccountId,
+            message,
+            confirmedPeerAddresses
+          );
+          if (!message.text) {
+            processed = true;
+          } else if (await this.processConnectionMessage(message.text, message.receivedAt, message.fromAddress)) {
             receivedCount += 1;
+            processed = true;
+          } else if (await this.processApplicationMessage(message)) {
+            receivedCount += 1;
+            processed = true;
+          } else {
+            processed = true;
+          }
+        } catch (error) {
+          if (isPendingTaskMessageError(error)) {
+            // Waiting for a Task dependency or an asynchronous DeltaChat
+            // attachment download is not a processing failure. Keep the
+            // message fresh until it can be persisted or its envelope expires.
+            this.messageProcessingFailures.delete(message.messageId);
             continue;
           }
-
-          if (await this.processApplicationMessage(message)) {
-            receivedCount += 1;
+          const failures = (this.messageProcessingFailures.get(message.messageId) ?? 0) + 1;
+          this.messageProcessingFailures.set(message.messageId, failures);
+          // A dependent Task envelope is deliberately left fresh until the
+          // corresponding immutable Task record arrives. Other malformed or
+          // persistently failing messages are isolated after bounded retries.
+          processed = failures >= 5;
+        }
+        if (processed) {
+          try {
+            await this.chatmailAdapter.acknowledgeReceivedMessage?.(
+              account.chatmailAccountId,
+              message.messageId
+            );
+            this.messageProcessingFailures.delete(message.messageId);
+          } catch {
+            // DeltaChat keeps the message fresh; idempotent protocol handlers
+            // make it safe to retry if acknowledgement itself fails.
           }
-        } catch {
-          // A malformed, corrupt, or unauthorized message is isolated from the
-          // rest of the offline queue. No remote payload may stop Runtime poll.
         }
       }
 
@@ -262,6 +314,39 @@ export class PeerConnectionRuntime implements PeerConnectionService {
       const aiStatusCount = await this.sendDueAiStatus();
       return this.snapshot(receivedCount, heartbeatCount, undefined, aiStatusCount);
     });
+  }
+
+  private async preparePartialTaskAttachment(
+    accountId: number,
+    message: ChatmailReceivedMessage,
+    confirmedPeerAddresses: ReadonlySet<string>
+  ): Promise<ChatmailReceivedMessage> {
+    if (message.filePath || !isPartialAttachmentState(message.downloadState)) {
+      return message;
+    }
+    if (!isCandidateTaskAttachment(message, confirmedPeerAddresses)) {
+      return message;
+    }
+    if (message.downloadState === "InProgress") {
+      throw new TaskTransportRuntimeError(
+        "TASK_ATTACHMENT_PENDING",
+        "Task attachment download is still pending."
+      );
+    }
+    if (!this.chatmailAdapter.downloadMessageAttachment) {
+      throw new Error("Chatmail attachment download is unavailable.");
+    }
+    const refreshed = await this.chatmailAdapter.downloadMessageAttachment(
+      accountId,
+      message.messageId
+    );
+    if (!refreshed.filePath) {
+      throw new TaskTransportRuntimeError(
+        "TASK_ATTACHMENT_PENDING",
+        "Task attachment download is still pending."
+      );
+    }
+    return refreshed;
   }
 
   accept(requestId: string): Promise<PeerConnectionResult> {
@@ -442,6 +527,14 @@ export class PeerConnectionRuntime implements PeerConnectionService {
           payload.timestamp || envelope.createdAt
         );
       }
+      if (payload.passportSchemaVersions) {
+        const changed = await this.peerProtocolCapabilities.observe({
+          tetiId: connection.remoteTetiId,
+          passportSchemaVersions: payload.passportSchemaVersions,
+          observedAt: payload.timestamp || envelope.createdAt
+        });
+        if (changed) this.aiStatusSent.delete(connection.requestId);
+      }
       return true;
     }
 
@@ -480,9 +573,10 @@ export class PeerConnectionRuntime implements PeerConnectionService {
     }
 
     if (envelope.type === "teti.task.attachment") {
+      const typedEnvelope = envelope as TetiApplicationEnvelope<TetiTaskAttachmentPayload>;
       let attachmentMessage = message;
       if (!attachmentMessage.filePath
-        && (attachmentMessage.downloadState === "Available" || attachmentMessage.downloadState === "InProgress")) {
+        && (attachmentMessage.downloadState === "Available" || attachmentMessage.downloadState === "Failure")) {
         const account = await this.requireAccount();
         if (!this.chatmailAdapter.downloadMessageAttachment) {
           throw new Error("Chatmail attachment download is unavailable.");
@@ -493,10 +587,22 @@ export class PeerConnectionRuntime implements PeerConnectionService {
         );
       }
       if (!attachmentMessage.filePath) {
+        if (Date.parse(typedEnvelope.payload.expiresAt) <= this.now().getTime()) {
+          return true;
+        }
+        if (attachmentMessage.downloadState === "Available"
+          || attachmentMessage.downloadState === "Failure"
+          || attachmentMessage.downloadState === "InProgress"
+          || attachmentMessage.downloadState === "Done") {
+          throw new TaskTransportRuntimeError(
+            "TASK_ATTACHMENT_PENDING",
+            "Task attachment download is still pending."
+          );
+        }
         throw new Error("Chatmail Task attachment has no local file.");
       }
       await this.taskTransport.receiveAttachment({
-        envelope: envelope as TetiApplicationEnvelope<TetiTaskAttachmentPayload>,
+        envelope: typedEnvelope,
         connection,
         filePath: attachmentMessage.filePath,
         receivedAt
@@ -552,7 +658,8 @@ export class PeerConnectionRuntime implements PeerConnectionService {
       await this.applicationManager.sendPresence(connection.requestId, {
         status: "alpha-heartbeat",
         timestamp,
-        taskProtocolVersions: [...TETI_SUPPORTED_TASK_PROTOCOL_VERSIONS]
+        taskProtocolVersions: [...TETI_SUPPORTED_TASK_PROTOCOL_VERSIONS],
+        passportSchemaVersions: [...TETI_SUPPORTED_PASSPORT_SCHEMA_VERSIONS]
       });
       this.heartbeatSent.set(connection.requestId, timestamp);
       sent += 1;
@@ -588,10 +695,18 @@ export class PeerConnectionRuntime implements PeerConnectionService {
           binding.agentIds.every((agentId) => agents.some((agent) => agent.id === agentId))
         )
       : [];
-    const signature = JSON.stringify({ sharing, tools, agents, capabilities, bindings });
+    const snapshotSignature = JSON.stringify({ sharing, tools, agents, capabilities, bindings });
     let sent = 0;
     for (const connection of await this.connectionStorage.loadAll()) {
       if (connection.state !== TetiConnectionState.Confirmed) continue;
+      const peerCapability = await this.peerProtocolCapabilities
+        .get(connection.remoteTetiId)
+        .catch(() => undefined);
+      const schemaVersion = selectAiStatusSchemaForPeer(
+        peerCapability?.passportSchemaVersions
+      );
+      if (!schemaVersion) continue;
+      const signature = JSON.stringify({ schemaVersion, snapshot: snapshotSignature });
       const previous = this.aiStatusSent.get(connection.requestId);
       if (!force
         && previous
@@ -599,47 +714,21 @@ export class PeerConnectionRuntime implements PeerConnectionService {
         && now.getTime() - Date.parse(previous.at) < AI_STATUS_SYNC_INTERVAL_MS) {
         continue;
       }
-      const legacyPayload: LegacyAiStatusSyncPayload = {
-        schemaVersion: 1,
+      const callablePassportPayload: CallablePassportAiStatusSyncPayload = {
+        schemaVersion,
         sharing,
         generatedAt: now.toISOString(),
         expiresAt: new Date(now.getTime() + AI_STATUS_TTL_MS).toISOString(),
-        tools: structuredClone(tools)
-      };
-      const passportPayload: PassportAiStatusSyncPayload = {
-        schemaVersion: 2,
-        sharing,
-        generatedAt: legacyPayload.generatedAt,
-        expiresAt: legacyPayload.expiresAt,
-        tools: structuredClone(tools),
-        // Schema 2 described coarse installation/runtime observation. Callable
-        // Passport never downgrades qualified Agents into that older meaning.
-        agents: []
-      };
-      const callablePassportPayload: CallablePassportAiStatusSyncPayload = {
-        schemaVersion: 3,
-        sharing,
-        generatedAt: legacyPayload.generatedAt,
-        expiresAt: legacyPayload.expiresAt,
         tools: structuredClone(tools),
         agents: structuredClone(agents),
         capabilities: structuredClone(capabilities),
         bindings: structuredClone(bindings)
       };
       try {
-        const payloads: Record<number, AiStatusSyncPayload> = {
-          1: legacyPayload,
-          2: passportPayload,
-          3: callablePassportPayload
-        };
-        for (const schemaVersion of selectAiStatusSchemasForPeer(
-          this.remoteAiStatus.get(connection.requestId)
-        )) {
-          await this.applicationManager.sendAiStatusSync(
-            connection.requestId,
-            payloads[schemaVersion]!
-          );
-        }
+        await this.applicationManager.sendAiStatusSync(
+          connection.requestId,
+          callablePassportPayload
+        );
         this.aiStatusSent.set(connection.requestId, {
           at: callablePassportPayload.generatedAt,
           signature
@@ -679,6 +768,9 @@ export class PeerConnectionRuntime implements PeerConnectionService {
         this.identityCache.set(identity.id, identity);
       }
     }
+    const protocolCapability = await this.peerProtocolCapabilities
+      .get(connection.remoteTetiId)
+      .catch(() => undefined);
     return {
       requestId: connection.requestId,
       state: connection.state,
@@ -691,6 +783,12 @@ export class PeerConnectionRuntime implements PeerConnectionService {
       confirmedAt: connection.confirmedAt,
       lastHeartbeatSentAt: this.heartbeatSent.get(connection.requestId),
       lastHeartbeatReceivedAt: this.heartbeatReceived.get(connection.requestId),
+      remoteProtocolCapabilities: protocolCapability
+        ? {
+            passportSchemaVersions: structuredClone(protocolCapability.passportSchemaVersions),
+            observedAt: protocolCapability.observedAt
+          }
+        : undefined,
       remoteAiStatus: this.remoteAiStatus.has(connection.requestId)
         ? structuredClone(this.remoteAiStatus.get(connection.requestId))
         : undefined
@@ -737,6 +835,7 @@ let defaultPassportSharingStorePromise: Promise<FilePassportSharingStore> | unde
 export interface DefaultPeerConnectionServiceOptions {
   getLocalCallableAgents?: () => CallableAgent[];
   taskExecutor?: TaskExecutionBridge;
+  taskAttachmentStore?: FileTaskAttachmentStore;
 }
 
 export function getDefaultPeerConnectionService(
@@ -784,7 +883,11 @@ async function createDefaultPeerConnectionService(
     getLocalAiTools: () => [createShareableCodexStatus(getDefaultCodexUsageService().getCurrentState())],
     getLocalCallableAgents: options.getLocalCallableAgents,
     taskTransportStore: new FileTaskTransportStore(join(profile.root, "tasks.json")),
-    taskAttachmentStore: new FileTaskAttachmentStore(join(profile.root, "task-attachments")),
+    peerProtocolCapabilities: new FilePeerProtocolCapabilityStore(
+      join(profile.root, "peer-protocol-capabilities.json")
+    ),
+    taskAttachmentStore: options.taskAttachmentStore
+      ?? new FileTaskAttachmentStore(join(profile.root, "task-attachments")),
     taskExecutor: options.taskExecutor
   });
 }
@@ -839,9 +942,13 @@ function shouldReplaceRemoteAiStatus(
   existing: RemoteAiStatusSnapshot,
   incoming: AiStatusSyncPayload
 ): boolean {
-  const timestampDifference = Date.parse(incoming.generatedAt) - Date.parse(existing.generatedAt);
-  if (timestampDifference !== 0) return timestampDifference > 0;
-  return incoming.schemaVersion >= existing.schemaVersion;
+  // A compatibility payload is never evidence that the Peer lost support for
+  // a richer Passport. Keep the highest successfully validated schema and use
+  // generatedAt only to order snapshots within that schema.
+  if (incoming.schemaVersion !== existing.schemaVersion) {
+    return incoming.schemaVersion > existing.schemaVersion;
+  }
+  return Date.parse(incoming.generatedAt) >= Date.parse(existing.generatedAt);
 }
 
 function isSameIdentity(
@@ -851,6 +958,40 @@ function isSameIdentity(
   rightAddress: string
 ): boolean {
   return leftId === rightId || leftAddress.toLowerCase() === rightAddress.toLowerCase();
+}
+
+function isPendingTaskMessageError(error: unknown): error is TaskTransportRuntimeError {
+  return error instanceof TaskTransportRuntimeError
+    && (error.code === "TASK_DEPENDENCY_PENDING" || error.code === "TASK_ATTACHMENT_PENDING");
+}
+
+function isPartialAttachmentState(
+  state: ChatmailReceivedMessage["downloadState"]
+): state is "Available" | "Failure" | "InProgress" {
+  return state === "Available" || state === "Failure" || state === "InProgress";
+}
+
+function isCandidateTaskAttachment(
+  message: ChatmailReceivedMessage,
+  confirmedPeerAddresses: ReadonlySet<string>
+): boolean {
+  if (!message.fromAddress
+    || !confirmedPeerAddresses.has(message.fromAddress.toLowerCase())) {
+    return false;
+  }
+  if (message.fileBytes !== undefined
+    && (!Number.isSafeInteger(message.fileBytes)
+      || message.fileBytes <= 0
+      || message.fileBytes > MAX_TASK_IMAGE_BYTES)) {
+    return false;
+  }
+  if (message.fileName !== undefined) {
+    return TETI_TASK_ATTACHMENT_FILENAME_PATTERN.test(message.fileName);
+  }
+  // DeltaChat can know the MIME type before the original filename becomes
+  // available. At least one bounded Teti image signal is required before an
+  // opaque, not-yet-decrypted caption is downloaded.
+  return message.fileMime === "image/png" || message.fileMime === "image/jpeg";
 }
 
 function comparePeerConnections(left: PeerConnectionDto, right: PeerConnectionDto): number {

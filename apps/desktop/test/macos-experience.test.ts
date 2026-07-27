@@ -19,6 +19,7 @@ test("macOS bundle metadata uses the Teti product identity", () => {
       targets: string[];
       category: string;
       icon: string[];
+      resources: Record<string, string>;
       macOS: { minimumSystemVersion: string };
     };
   }>(tauriConfigPath);
@@ -29,6 +30,10 @@ test("macOS bundle metadata uses the Teti product identity", () => {
   assert.equal(config.bundle.active, true);
   assert.deepEqual(config.bundle.targets, ["app", "dmg"]);
   assert.equal(config.bundle.category, "Productivity");
+  assert.equal(
+    config.bundle.resources["resources/lifecycle-sidecar/codex-image-runner.mjs"],
+    "lifecycle-sidecar/codex-image-runner.mjs"
+  );
   assert.deepEqual(config.app.windows, []);
 });
 

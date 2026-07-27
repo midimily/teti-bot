@@ -25,6 +25,11 @@ const CAPABILITY_CATALOG: Readonly<Record<string, {
     name: "Code analysis",
     category: "coding",
     description: "Analyze code through a locally qualified AI Agent."
+  },
+  "image-editing": {
+    name: "Image editing",
+    category: "image",
+    description: "Edit or generate images through a locally qualified AI Agent and return an image Artifact."
   }
 });
 

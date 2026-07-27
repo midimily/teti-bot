@@ -1,28 +1,31 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { selectAiStatusSchemasForPeer } from "./negotiation.ts";
-import type { RemoteAiStatusSnapshot } from "./types.ts";
+import {
+  selectAiStatusSchemaForPeer,
+  TETI_SUPPORTED_PASSPORT_SCHEMA_VERSIONS,
+  validatePassportSchemaVersions
+} from "./negotiation.ts";
 
-test("unknown peers receive one compatibility payload and one current payload", () => {
-  assert.deepEqual(selectAiStatusSchemasForPeer(undefined), [1, 3]);
+test("the current Passport capability advertises only schema 3", () => {
+  assert.deepEqual(TETI_SUPPORTED_PASSPORT_SCHEMA_VERSIONS, [3]);
 });
 
-test("known peers receive exactly their best observed schema", () => {
-  assert.deepEqual(selectAiStatusSchemasForPeer(remote(1)), [1]);
-  assert.deepEqual(selectAiStatusSchemasForPeer(remote(2)), [2]);
-  assert.deepEqual(selectAiStatusSchemasForPeer(remote(3)), [3]);
+test("unknown and compatible peers select one current Passport schema", () => {
+  assert.equal(selectAiStatusSchemaForPeer(undefined), 3);
+  assert.equal(selectAiStatusSchemaForPeer([1, 3]), 3);
+  assert.equal(selectAiStatusSchemaForPeer([3, 4]), 3);
 });
 
-function remote(schemaVersion: 1 | 2 | 3): RemoteAiStatusSnapshot {
-  const base = {
-    schemaVersion,
-    sharing: "disabled" as const,
-    generatedAt: "2026-07-26T00:00:00.000Z",
-    expiresAt: "2026-07-26T00:30:00.000Z",
-    receivedAt: "2026-07-26T00:00:01.000Z",
-    tools: []
-  };
-  if (schemaVersion === 1) return base;
-  if (schemaVersion === 2) return { ...base, schemaVersion, agents: [] };
-  return { ...base, schemaVersion, agents: [], capabilities: [], bindings: [] };
-}
+test("an explicitly incompatible peer is not sent a speculative downgrade", () => {
+  assert.equal(selectAiStatusSchemaForPeer([1, 2]), null);
+  assert.equal(selectAiStatusSchemaForPeer([4]), null);
+});
+
+test("Passport capability lists are bounded, unique protocol versions", () => {
+  assert.doesNotThrow(() => validatePassportSchemaVersions([3]));
+  assert.doesNotThrow(() => validatePassportSchemaVersions([3, 4]));
+  assert.throws(() => validatePassportSchemaVersions([]));
+  assert.throws(() => validatePassportSchemaVersions([3, 3]));
+  assert.throws(() => validatePassportSchemaVersions([0]));
+  assert.throws(() => validatePassportSchemaVersions([256]));
+});

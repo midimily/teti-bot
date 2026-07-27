@@ -100,6 +100,32 @@ test("application protocol rejects a non-canonical fromTetiId", () => {
   );
 });
 
+test("Presence accepts explicit Passport capability and rejects malformed version lists", () => {
+  assert.doesNotThrow(() => validateApplicationEnvelope({
+    version: 1,
+    type: "teti.presence",
+    messageId: "passport-capability",
+    fromTetiId: "teti_remote001",
+    createdAt: fixedNow,
+    payload: {
+      status: "online",
+      timestamp: fixedNow,
+      taskProtocolVersions: [1, 2],
+      passportSchemaVersions: [3]
+    }
+  }));
+  for (const passportSchemaVersions of [[], [3, 3], [0], [256]]) {
+    assert.throws(() => validateApplicationEnvelope({
+      version: 1,
+      type: "teti.presence",
+      messageId: "bad-passport-capability",
+      fromTetiId: "teti_remote001",
+      createdAt: fixedNow,
+      payload: { status: "online", timestamp: fixedNow, passportSchemaVersions }
+    }), /Passport schema versions/);
+  }
+});
+
 test("application protocol rejects oversized raw JSON and envelope extension fields", () => {
   const oversized = JSON.stringify({
     version: 1,

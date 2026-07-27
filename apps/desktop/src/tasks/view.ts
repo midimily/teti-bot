@@ -1,6 +1,6 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { ArrowLeft, ImagePlus, Plus, X, createElement } from "lucide";
-import { taskInputImages, taskInputText } from "../../../../core/task/types.ts";
+import { taskArtifactImages, taskInputImages, taskInputText } from "../../../../core/task/types.ts";
 import type { PassportConnectionSnapshot } from "../../../../core/passport/snapshot.ts";
 import type {
   CallablePassportAgent,
@@ -18,14 +18,17 @@ export function createTaskWorkspace(
   const island = document.createElement("section");
   island.className = "teti-island teti-island--expanded teti-task-workspace";
   island.setAttribute("aria-label", "Teti 协作任务");
+  if (snapshot.screen === "compose") {
+    island.dataset.taskComposeKey = taskComposeRenderKey(snapshot);
+  }
   island.append(createTaskHeader(controller, snapshot));
   const body = document.createElement("main");
   body.className = "teti-task-body";
   if (snapshot.screen === "compose") body.append(createComposer(controller, snapshot, connections));
   else if (snapshot.screen === "detail" && snapshot.selectedTask) {
-    body.append(createTaskDetail(controller, snapshot, localPassport));
+    body.append(createTaskDetail(controller, snapshot, connections, localPassport));
   }
-  else body.append(createInbox(controller, snapshot));
+  else body.append(createInbox(controller, snapshot, connections));
   island.append(body);
   return island;
 }
@@ -49,7 +52,11 @@ function createTaskHeader(controller: TaskController, snapshot: TaskControllerSn
   return header;
 }
 
-function createInbox(controller: TaskController, snapshot: TaskControllerSnapshot): HTMLElement {
+function createInbox(
+  controller: TaskController,
+  snapshot: TaskControllerSnapshot,
+  connections: readonly PassportConnectionSnapshot[]
+): HTMLElement {
   const content = document.createElement("div");
   content.className = "teti-task-scroll teti-task-inbox";
   if (snapshot.summary.tasks.length === 0) {
@@ -77,7 +84,12 @@ function createInbox(controller: TaskController, snapshot: TaskControllerSnapsho
     const copy = document.createElement("span");
     copy.className = "teti-task-row-copy";
     const peer = document.createElement("strong");
-    peer.textContent = `${task.direction === "incoming" ? "来自" : "发送给"} ${shortTetiId(task.peerTetiId)}`;
+    peer.textContent = taskPeerHeading(
+      task.direction,
+      task.peerTetiId,
+      task.createdAt,
+      connections
+    );
     const preview = document.createElement("small");
     preview.textContent = task.textPreview;
     copy.append(peer, preview);
@@ -149,6 +161,8 @@ function createComposer(
 
   const supportsImages = Boolean(selectedPeer && selectedCapability
     && capabilityAcceptsImages(selectedPeer, selectedCapability.id));
+  const returnsImages = Boolean(selectedPeer && selectedCapability
+    && capabilityReturnsImages(selectedPeer, selectedCapability.id));
   const attachments = document.createElement("div");
   attachments.className = "teti-task-attachments";
   for (const image of snapshot.draft.images) {
@@ -169,7 +183,9 @@ function createComposer(
   const footer = document.createElement("div");
   footer.className = "teti-task-actionbar";
   const hint = document.createElement("small");
-  hint.textContent = supportsImages ? "文字必填 · PNG/JPEG · 最多 4 张" : "该能力当前仅接受文字";
+  hint.textContent = returnsImages
+    ? `${supportsImages ? "PNG/JPEG · 最多 4 张 · " : ""}结果必须返回图片`
+    : supportsImages ? "文字必填 · PNG/JPEG · 最多 4 张" : "该能力当前仅接受文字";
   const send = document.createElement("button");
   send.type = "submit";
   send.className = "teti-task-primary";
@@ -193,6 +209,7 @@ function createComposer(
 function createTaskDetail(
   controller: TaskController,
   snapshot: TaskControllerSnapshot,
+  connections: readonly PassportConnectionSnapshot[],
   localPassport?: TetiCapabilityPassport
 ): HTMLElement {
   const record = snapshot.selectedTask!;
@@ -202,7 +219,12 @@ function createTaskDetail(
   identity.className = "teti-task-detail-head";
   const peer = document.createElement("div");
   const peerTitle = document.createElement("strong");
-  peerTitle.textContent = `${record.direction === "incoming" ? "来自" : "发送给"} ${shortTetiId(record.peerTetiId)}`;
+  peerTitle.textContent = taskPeerHeading(
+    record.direction,
+    record.peerTetiId,
+    record.createdAt,
+    connections
+  );
   const capability = document.createElement("small");
   capability.textContent = `Capability · ${record.request.capabilityId}`;
   peer.append(peerTitle, capability);
@@ -262,6 +284,22 @@ function createTaskDetail(
       ? artifact.text
       : artifact.parts.filter((part) => part.kind === "text").map((part) => part.text).join("\n");
     card.append(title, result);
+    const artifactImages = taskArtifactImages(artifact);
+    if (artifactImages.length > 0) {
+      const gallery = document.createElement("div");
+      gallery.className = "teti-task-detail-images is-artifact";
+      for (const image of artifactImages) {
+        const path = snapshot.selectedImagePaths[image.attachmentId];
+        if (path) gallery.append(imagePreview(path, image.attachmentId));
+        else {
+          const pending = document.createElement("span");
+          pending.className = "teti-task-image-pending";
+          pending.textContent = "结果图片接收中…";
+          gallery.append(pending);
+        }
+      }
+      card.append(gallery);
+    }
     content.append(card);
   }
   if (record.safeErrorCode) {
@@ -313,6 +351,18 @@ function capabilityAcceptsImages(connection: PassportConnectionSnapshot, capabil
     && agentIds.has(agent.id)
     && agent.capabilityIds.includes(capabilityId)
     && agent.inputModes.includes("image")
+  );
+}
+
+function capabilityReturnsImages(connection: PassportConnectionSnapshot, capabilityId: string): boolean {
+  const agentIds = new Set(connection.passport.bindings
+    .filter((binding) => binding.capabilityId === capabilityId)
+    .flatMap((binding) => binding.agentIds));
+  return connection.passport.agents.some((agent) =>
+    isCallableAgent(agent)
+    && agentIds.has(agent.id)
+    && agent.capabilityIds.includes(capabilityId)
+    && agent.outputModes.includes("image")
   );
 }
 
@@ -431,6 +481,9 @@ function taskStatusLabel(task: TaskControllerSnapshot["summary"]["tasks"][number
     return task.attachmentsReady ? "等待你确认" : "正在接收图片";
   }
   if (task.direction === "outgoing" && task.state === "submitted") return "等待对方确认";
+  if (task.direction === "outgoing" && task.state === "completed" && task.artifactCount === 0) {
+    return "任务已完成 · 结果接收中";
+  }
   return stateLabel(task.state);
 }
 
@@ -441,6 +494,10 @@ function detailStatusLabel(record: NonNullable<TaskControllerSnapshot["selectedT
     return record.attachmentsReady === false ? "正在接收图片" : "等待你确认";
   }
   if (record.direction === "outgoing" && record.state === "submitted") return "等待对方确认";
+  if (record.direction === "outgoing" && record.state === "completed"
+    && (!(record.artifacts?.length) || record.artifactAttachmentsReady === false)) {
+    return "任务已完成 · 结果接收中";
+  }
   return stateLabel(record.state);
 }
 
@@ -459,4 +516,32 @@ function stateLabel(state: string): string {
 
 function shortTetiId(tetiId: string): string {
   return tetiId.replace(/^teti_/, "");
+}
+
+export function taskPeerHeading(
+  direction: "incoming" | "outgoing",
+  peerTetiId: string,
+  createdAt: string,
+  connections: readonly PassportConnectionSnapshot[]
+): string {
+  const connection = connections.find((candidate) => candidate.identity.tetiId === peerTetiId);
+  const name = connection?.identity.displayName?.trim() || shortTetiId(peerTetiId);
+  return `${direction === "incoming" ? "来自" : "发送给"} ${name} 的协作请求【${formatTaskTimestamp(createdAt)}】`;
+}
+
+export function formatTaskTimestamp(value: string): string {
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return "时间未知";
+  const pad = (number: number) => String(number).padStart(2, "0");
+  return `${date.getFullYear()}年${pad(date.getMonth() + 1)}月${pad(date.getDate())}日 ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+export function taskComposeRenderKey(snapshot: TaskControllerSnapshot): string {
+  return JSON.stringify({
+    connectionRequestId: snapshot.draft.connectionRequestId,
+    capabilityId: snapshot.draft.capabilityId,
+    imageIds: snapshot.draft.images.map((image) => image.part.attachmentId),
+    busy: snapshot.busy,
+    error: snapshot.error ?? ""
+  });
 }

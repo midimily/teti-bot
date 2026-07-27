@@ -3,7 +3,7 @@ import type {
   CollaborationTaskTransportRecord,
   SendCollaborationTaskInput
 } from "../../../../core/task/transport.ts";
-import { taskInputImages, type TaskImagePart } from "../../../../core/task/types.ts";
+import { taskArtifactImages, taskInputImages, type TaskImagePart } from "../../../../core/task/types.ts";
 import type { LifecycleBridgeClient } from "../provisioning/bridge-lifecycle.ts";
 import type { TauriInvoker } from "../platform/tauri-api.ts";
 import type { TauriNotchWindowController } from "../platform/tauri-notch-window.ts";
@@ -256,8 +256,11 @@ export class TaskController {
         this.snapshotValue.selectedTask = await this.client.get(taskId);
         await this.loadSelectedImages(this.snapshotValue.selectedTask);
       }
-      delete this.snapshotValue.error;
-      this.onChange();
+      // The composer owns a live textarea. Re-rendering it on every Runtime
+      // poll destroys the focused DOM node and makes normal typing impossible.
+      if (!(this.snapshotValue.open && this.snapshotValue.screen === "compose")) {
+        this.onChange();
+      }
     } catch {
       // Chatmail polling and Task persistence remain Runtime-owned; UI retries.
     } finally {
@@ -277,7 +280,11 @@ export class TaskController {
 
   private async loadSelectedImages(record: CollaborationTaskTransportRecord): Promise<void> {
     const paths: Record<string, string> = {};
-    for (const image of taskInputImages(record.request.input)) {
+    const images = [
+      ...taskInputImages(record.request.input),
+      ...(record.artifacts ?? []).flatMap(taskArtifactImages)
+    ];
+    for (const image of images) {
       try {
         paths[image.attachmentId] = await this.client.resolveImage(
           record.request.taskId,

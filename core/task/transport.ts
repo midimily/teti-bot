@@ -7,13 +7,13 @@ import type {
 } from "./types.ts";
 
 export const TETI_TASK_TRANSPORT_SCHEMA_VERSION = 1;
-export const TETI_SUPPORTED_TASK_PROTOCOL_VERSIONS = [1, 2] as const;
+export const TETI_SUPPORTED_TASK_PROTOCOL_VERSIONS = [1, 2, 3] as const;
 export const DEFAULT_TASK_REQUEST_TTL_MS = 60 * 60 * 1_000;
 export const MAX_TASK_CLOCK_SKEW_MS = 5 * 60 * 1_000;
 export const MAX_TASK_PROTOCOL_VERSIONS = 8;
 export const MAX_TASK_TRANSPORT_RECORDS = 512;
 
-export type TetiTaskProtocolVersion = 1 | 2;
+export type TetiTaskProtocolVersion = 1 | 2 | 3;
 
 export type TetiTaskReceiptStatus =
   | "received"
@@ -116,6 +116,7 @@ export interface CollaborationTaskTransportRecord {
   envelopeMessageId?: string;
   chatmailMessageId?: number;
   sentAttachmentIds?: string[];
+  sentArtifactAttachmentIds?: string[];
   request: CollaborationTaskRequest;
   state: CollaborationTaskState;
   approval: TaskApprovalState;
@@ -129,6 +130,7 @@ export interface CollaborationTaskTransportRecord {
   cancelPending?: boolean;
   cancelSentAt?: string;
   artifactPending?: boolean;
+  artifactAttachmentsReady?: boolean;
   attachmentsReady?: boolean;
   artifacts?: CollaborationTaskArtifact[];
   safeErrorCode?: string;
@@ -142,6 +144,7 @@ export interface CollaborationTaskSummary {
   capabilityId: string;
   textPreview: string;
   imageCount: number;
+  artifactCount: number;
   state: CollaborationTaskState;
   approval: TaskApprovalState;
   delivery: TaskDeliveryState;

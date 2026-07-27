@@ -121,6 +121,13 @@ class ClosableRuntimeChatmailRpcClient implements RuntimeChatmailRpcClient {
     return this.client.receiveMessages(input);
   }
 
+  markMessageSeen(
+    accountId: Parameters<NonNullable<ChatmailRpcClient["markMessageSeen"]>>[0],
+    messageId: Parameters<NonNullable<ChatmailRpcClient["markMessageSeen"]>>[1]
+  ): Promise<void> {
+    return this.client.markMessageSeen(accountId, messageId);
+  }
+
   getNextMessageIds(
     accountId: Parameters<ChatmailRpcClient["getNextMessageIds"]>[0]
   ): ReturnType<ChatmailRpcClient["getNextMessageIds"]> {

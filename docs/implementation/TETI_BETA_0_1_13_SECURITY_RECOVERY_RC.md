@@ -47,12 +47,32 @@ single-use local grant. It is unavailable after the Task expires.
 
 - Application Envelope stays at version 1.
 - Task versions stay `[1, 2]`; no speculative protocol version is advertised.
-- Passport schema 1/2 receive compatibility and schema 3 callable projection
-  remain unchanged.
+- Passport schema 1/2 are receive-only compatibility; outgoing Passport uses
+  schema 3 exclusively. Presence advertises `passportSchemaVersions: [3]`, and
+  the Peer capability is persisted independently from the latest snapshot.
 - Unknown old applications may safely ignore unsupported Task message types.
 - Known v1 Task peers use text only; no image descriptor or image byte is sent.
 - Strict top-level Envelope validation applies to version 1. A future envelope
   extension therefore requires an explicit version review, not silent fields.
+
+## Post-RC P0 reliability corrections (version remains 0.1.13)
+
+The first physical task test exposed delivery and UI defects that were fixed on
+the same 0.1.13 reliability line before image-result support was versioned:
+
+- the composer DOM is no longer rebuilt by the two-second Runtime refresh, so
+  the instruction field keeps focus and selection;
+- Chatmail messages are marked seen only after their validated payload is
+  durably stored; transient failures remain retryable with a bounded poison
+  message limit;
+- Artifacts arriving before a local Task record are deferred instead of
+  discarded, and delayed Artifacts can be applied after a completed status;
+- the requester distinguishes `completed` from `result receiving` while an
+  Artifact is still in transit;
+- Task headings use the confirmed Peer nickname and exact local timestamp.
+
+These corrections do not change Task protocol 1/2 or add image output. Reliable
+image output is the separately versioned 0.1.14 Task-v3 feature.
 
 ## Physical two-Mac RC checklist
 

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { readFile, stat } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
@@ -12,6 +13,8 @@ import {
   CallableAdapterKernel,
   CallableAdapterKernelError
 } from "../lifecycle-sidecar/runtime/callable/kernel.ts";
+import { FileTaskAttachmentStore } from "../lifecycle-sidecar/runtime/tasks/attachments.ts";
+import { parseRunnerManifest } from "../../../integrations/agents/codex/image-adapter.ts";
 
 const fixturePath = join(
   dirname(fileURLToPath(import.meta.url)),
@@ -44,6 +47,54 @@ test("Adapter launch context never receives task text", async () => {
   ]);
   assert.equal("input" in (adapter.lastContext as unknown as Record<string, unknown>), false);
   await kernel.shutdown();
+});
+
+test("Kernel persists a real image file before deleting the Adapter workspace", async () => {
+  const root = await mkdtemp(join(tmpdir(), "teti-callable-image-"));
+  try {
+    const adapter: CallableAdapter = {
+      descriptor: {
+        contractVersion: 2,
+        adapterId: "test.image-agent",
+        adapterRevision: 1,
+        agentId: "fake-image",
+        capabilityIds: ["image-editing"],
+        inputModes: ["text", "image"],
+        outputModes: ["text", "image"],
+        timeoutMs: 2_000,
+        cancelGraceMs: 20,
+        maxOutputBytes: 64 * 1024
+      },
+      entrypoint: process.execPath,
+      createLaunchSpec() {
+        return { executable: process.execPath, args: [fixturePath, "image"] };
+      },
+      decodeArtifact(stdout) {
+        const manifest = parseRunnerManifest(stdout);
+        return { kind: "parts", text: manifest.text, images: manifest.images };
+      }
+    };
+    const store = new FileTaskAttachmentStore(join(root, "artifacts"));
+    const kernel = new CallableAdapterKernel({ adapters: [adapter], artifactImageStore: store });
+    const result = await kernel.execute({
+      schemaVersion: 2,
+      taskId: "image-output-task",
+      adapterId: "test.image-agent",
+      agentId: "fake-image",
+      capabilityId: "image-editing",
+      input: { kind: "parts", text: "edit this image", images: [] },
+      createdAt: new Date().toISOString()
+    });
+
+    assert.equal(result.state, "completed");
+    assert.equal(result.artifact?.kind, "parts");
+    const image = result.artifact?.kind === "parts" ? result.artifact.images[0] : undefined;
+    assert.ok(image);
+    assert.ok(await store.resolveImage({ taskId: result.taskId, purpose: "artifact", part: image }));
+    await kernel.shutdown();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("timeout escalates process termination and returns only a safe error", async () => {

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -11,7 +11,10 @@ import {
   type TetiConnectionStorage
 } from "../../../core/connection/storage.ts";
 import type { TetiConnectionRecord, TetiConnectionState } from "../../../core/connection/types.ts";
-import type { AiToolStatusSnapshot } from "../../../core/ai-status/types.ts";
+import type {
+  AiStatusSyncPayload,
+  AiToolStatusSnapshot
+} from "../../../core/ai-status/types.ts";
 import type { CallableAgent } from "../../../core/callability/types.ts";
 import {
   createApplicationEnvelope,
@@ -37,6 +40,10 @@ import {
   MemoryPassportSharingStore,
   resourceSharingPolicy
 } from "../lifecycle-sidecar/runtime/passport/sharing.ts";
+import {
+  MemoryPeerProtocolCapabilityStore,
+  type PeerProtocolCapabilityStore
+} from "../lifecycle-sidecar/runtime/passport/peer-capabilities.ts";
 import { MemoryTaskTransportStore } from "../lifecycle-sidecar/runtime/tasks/store.ts";
 import { FileTaskAttachmentStore } from "../lifecycle-sidecar/runtime/tasks/attachments.ts";
 import type { TaskExecutionBridge } from "../lifecycle-sidecar/runtime/tasks/service.ts";
@@ -44,6 +51,8 @@ import type {
   CallableAdapterTaskRequest,
   CallableAdapterTaskSnapshot
 } from "../../../core/callability/adapter.ts";
+import type { TetiTaskTransportStoreState } from "../../../core/task/transport.ts";
+import type { TaskImagePart } from "../../../core/task/types.ts";
 
 test("two Teti runtimes confirm a Chatmail handshake and exchange alpha heartbeats", async () => {
   const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
@@ -198,6 +207,10 @@ test("AI status is opt-in, sent only to confirmed peers, and revoked independent
   const confirmed = await runtimeA.poll();
   await runtimeB.poll();
   assert.equal(confirmed.connections[0]?.remoteAiStatus, undefined);
+  assert.deepEqual(
+    confirmed.connections[0]?.remoteProtocolCapabilities?.passportSchemaVersions,
+    [3]
+  );
   assert.deepEqual(await runtimeA.getPassportSharing(), resourceSharingPolicy(false));
 
   await runtimeA.setPassportSharing(resourceSharingPolicy(true));
@@ -206,7 +219,7 @@ test("AI status is opt-in, sent only to confirmed peers, and revoked independent
     .map((message) => message.text ? parseApplicationEnvelope(message.text) : null)
     .filter((envelope) => envelope?.type === "teti.ai.status.sync")
     .map((envelope) => (envelope!.payload as { schemaVersion: number }).schemaVersion);
-  assert.deepEqual(schemas, [1, 3], "unknown peers receive minimum legacy plus current schemas");
+  assert.deepEqual(schemas, [3], "current peers receive one Callable Passport payload");
   const shared = await runtimeB.poll();
   assert.equal(shared.connections[0]?.remoteAiStatus?.sharing, "enabled");
   assert.equal(shared.connections[0]?.remoteAiStatus?.schemaVersion, 3);
@@ -236,15 +249,15 @@ test("AI status is opt-in, sent only to confirmed peers, and revoked independent
     /"(?:token|accountId|raw|displayName|version|runtimeStatus|processCount|command|path|entrypoint|adapterId)"/i
   );
 
-  // B has now observed A's schema 3. Its first enabled sync therefore sends
-  // only schema 3, and teaches A that B is also current.
+  // Explicit Presence capability exchange keeps the response on one current
+  // schema without inferring protocol support from Passport content.
   await runtimeB.setPassportSharing(resourceSharingPolicy(true));
   await flushBackgroundWork();
   const responseSchemas = relay.peek(accountA.address)
     .map((message) => message.text ? parseApplicationEnvelope(message.text) : null)
     .filter((envelope) => envelope?.type === "teti.ai.status.sync")
     .map((envelope) => (envelope!.payload as { schemaVersion: number }).schemaVersion);
-  assert.deepEqual(responseSchemas, [3], "known current peers do not receive redundant legacy payloads");
+  assert.deepEqual(responseSchemas, [3], "known current peers receive one negotiated payload");
   await runtimeA.poll();
 
   await runtimeA.setPassportSharing(resourceSharingPolicy(false));
@@ -263,6 +276,126 @@ test("AI status is opt-in, sent only to confirmed peers, and revoked independent
       : undefined,
     []
   );
+});
+
+test("a delayed legacy Passport cannot downgrade an established schema 3 snapshot", async () => {
+  const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
+  const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
+  const registry = new StaticRegistry([toIdentity(accountA), toIdentity(accountB)]);
+  const relay = new MemoryChatmailRelay();
+  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), registry, undefined, {
+    passportSharing: new MemoryPassportSharingStore(resourceSharingPolicy(true)),
+    getLocalAiTools: () => [localCodexStatus()],
+    getLocalCallableAgents: () => [localCodexAgent()]
+  });
+  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), registry);
+  await confirmPeers(runtimeA, runtimeB, "beta00002");
+  assert.equal((await runtimeB.list()).connections[0]?.remoteAiStatus?.schemaVersion, 3);
+
+  const delayedLegacy = createApplicationEnvelope({
+    type: "teti.ai.status.sync",
+    messageId: "delayed-legacy-passport",
+    fromTetiId: accountA.id,
+    createdAt: "2099-01-01T00:00:00.000Z",
+    payload: {
+      schemaVersion: 1,
+      sharing: "disabled",
+      generatedAt: "2099-01-01T00:00:00.000Z",
+      expiresAt: "2099-01-01T00:30:00.000Z",
+      tools: []
+    } satisfies AiStatusSyncPayload
+  });
+  relay.pushRaw(accountB.address, accountA.address, serializeApplicationEnvelope(delayedLegacy));
+
+  const afterLegacy = await runtimeB.poll();
+  assert.equal(afterLegacy.connections[0]?.remoteAiStatus?.schemaVersion, 3);
+  assert.equal(afterLegacy.connections[0]?.remoteAiStatus?.sharing, "enabled");
+});
+
+test("out-of-order schema 3 Passport snapshots keep the newest generation", async () => {
+  const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
+  const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
+  const registry = new StaticRegistry([toIdentity(accountA), toIdentity(accountB)]);
+  const relay = new MemoryChatmailRelay();
+  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), registry);
+  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), registry);
+  await confirmPeers(runtimeA, runtimeB, "beta00002");
+
+  for (const generatedAt of ["2026-07-27T04:00:00.000Z", "2026-07-27T03:00:00.000Z"]) {
+    const envelope = createApplicationEnvelope({
+      type: "teti.ai.status.sync",
+      messageId: `passport-${generatedAt}`,
+      fromTetiId: accountA.id,
+      createdAt: generatedAt,
+      payload: emptyCallablePassport(generatedAt)
+    });
+    relay.pushRaw(accountB.address, accountA.address, serializeApplicationEnvelope(envelope));
+  }
+
+  const result = await runtimeB.poll();
+  assert.equal(result.connections[0]?.remoteAiStatus?.schemaVersion, 3);
+  assert.equal(result.connections[0]?.remoteAiStatus?.generatedAt, "2026-07-27T04:00:00.000Z");
+});
+
+test("a dropped schema 3 Passport is retried without legacy fallback", async () => {
+  let nowMs = Date.parse("2026-07-27T05:00:00.000Z");
+  const now = () => new Date(nowMs);
+  const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
+  const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
+  const registry = new StaticRegistry([toIdentity(accountA), toIdentity(accountB)]);
+  const relay = new MemoryChatmailRelay();
+  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), registry, undefined, {
+    now,
+    passportSharing: new MemoryPassportSharingStore(resourceSharingPolicy(true)),
+    getLocalCallableAgents: () => [localCodexAgent()]
+  });
+  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), registry, undefined, { now });
+
+  await runtimeA.request("beta00002");
+  const incoming = await runtimeB.poll();
+  await runtimeB.accept(incoming.connections[0]!.requestId);
+  await runtimeA.poll();
+  assert.equal(relay.dropFirstApplicationMessage(accountB.address, "teti.ai.status.sync"), true);
+  assert.equal((await runtimeB.poll()).connections[0]?.remoteAiStatus, undefined);
+
+  nowMs += 10 * 60 * 1_000 + 1;
+  await runtimeA.poll();
+  const retrySchemas = relay.peek(accountB.address)
+    .map((message) => message.text ? parseApplicationEnvelope(message.text) : null)
+    .filter((envelope) => envelope?.type === "teti.ai.status.sync")
+    .map((envelope) => (envelope!.payload as { schemaVersion: number }).schemaVersion);
+  assert.deepEqual(retrySchemas, [3]);
+  assert.equal((await runtimeB.poll()).connections[0]?.remoteAiStatus?.schemaVersion, 3);
+});
+
+test("Runtime restart retains explicit Peer capability and immediately resends schema 3", async () => {
+  const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
+  const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
+  const registry = new StaticRegistry([toIdentity(accountA), toIdentity(accountB)]);
+  const relay = new MemoryChatmailRelay();
+  const connectionsA = new MemoryTetiConnectionStorage();
+  const sharingA = new MemoryPassportSharingStore(resourceSharingPolicy(true));
+  const protocolsA = new MemoryPeerProtocolCapabilityStore();
+  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), registry, connectionsA, {
+    passportSharing: sharingA,
+    peerProtocolCapabilities: protocolsA,
+    getLocalCallableAgents: () => [localCodexAgent()]
+  });
+  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), registry);
+  await confirmPeers(runtimeA, runtimeB, "beta00002");
+  assert.deepEqual((await protocolsA.get(accountB.id))?.passportSchemaVersions, [3]);
+
+  const restarted = await makeRuntime(accountA, relay.adapter(accountA.address), registry, connectionsA, {
+    passportSharing: sharingA,
+    peerProtocolCapabilities: protocolsA,
+    getLocalCallableAgents: () => [localCodexAgent()]
+  });
+  await restarted.poll();
+  const schemas = relay.peek(accountB.address)
+    .map((message) => message.text ? parseApplicationEnvelope(message.text) : null)
+    .filter((envelope) => envelope?.type === "teti.ai.status.sync")
+    .map((envelope) => (envelope!.payload as { schemaVersion: number }).schemaVersion);
+  assert.deepEqual(schemas, [3]);
 });
 
 test("sharing consent persistence does not wait for a blocked peer network queue", async () => {
@@ -332,7 +465,7 @@ test("Chatmail keeps a Task offline, receiver stores it once, and returns a rece
   const acknowledged = await runtimeA.listTasks();
   assert.equal(acknowledged.records.length, 1);
   assert.equal(acknowledged.records[0]?.delivery, "acknowledged");
-  assert.deepEqual(acknowledged.peers[0]?.supportedVersions, [1, 2]);
+  assert.deepEqual(acknowledged.peers[0]?.supportedVersions, [1, 2, 3]);
 });
 
 test("Task ID retry is idempotent and conflicting immutable content is rejected", async () => {
@@ -397,7 +530,7 @@ test("known incompatible Task protocol prevents speculative transport", async ()
     records: [],
     peers: [{
       tetiId: accountB.id,
-      supportedVersions: [3],
+      supportedVersions: [4],
       observedAt: "2026-07-26T00:00:00.000Z"
     }]
   });
@@ -411,7 +544,7 @@ test("known incompatible Task protocol prevents speculative transport", async ()
     records: [],
     peers: [{
       tetiId: accountB.id,
-      supportedVersions: [3],
+      supportedVersions: [4],
       observedAt: "2026-07-26T03:00:00.000Z"
     }]
   });
@@ -453,7 +586,7 @@ test("two peers deliver a verified image Task, approve once, execute, and return
       text: "Read the attached pixel.",
       attachments: [staged.part]
     });
-    assert.equal(sent.protocolVersion, 2);
+    assert.equal(sent.protocolVersion, 3);
 
     await runtimeB.poll();
     const inbox = await runtimeB.listTasks();
@@ -471,8 +604,301 @@ test("two peers deliver a verified image Task, approve once, execute, and return
     assert.match(JSON.stringify(completed.records[0]?.artifacts), /safe:image-result/);
     assert.equal(executor.requests[0]?.input.images?.length, 1);
   } finally {
-    await rm(root, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 10 });
   }
+});
+
+test("two-image editing returns a verified image Artifact after completed status arrives first", async () => {
+  const root = await mkdtemp(join(tmpdir(), "teti-image-artifact-e2e-"));
+  try {
+    const source = join(root, "source.png");
+    const sourceBytes = Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M/wHwAF/gL+pkJZ5QAAAABJRU5ErkJggg==",
+      "base64"
+    );
+    await writeFile(source, sourceBytes);
+    const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
+    const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
+    const registry = new StaticRegistry([toIdentity(accountA), toIdentity(accountB)]);
+    const relay = new MemoryChatmailRelay();
+    const storeA = new FileTaskAttachmentStore(join(root, "a"));
+    const storeB = new FileTaskAttachmentStore(join(root, "b"));
+    const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), registry, undefined, {
+      taskAttachmentStore: storeA
+    });
+    const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), registry, undefined, {
+      taskAttachmentStore: storeB,
+      taskExecutor: new FakeImageTaskExecutor(storeB, source)
+    });
+    const connection = await confirmPeers(runtimeA, runtimeB, "beta00002");
+    const first = await runtimeA.stageTaskImage(source);
+    const second = await runtimeA.stageTaskImage(source);
+    const sent = await runtimeA.sendTask({
+      connectionRequestId: connection.requestId,
+      taskId: "task-two-image-result-001",
+      capabilityId: "image-editing",
+      text: "Merge these two reference images and return the edited image.",
+      attachments: [first.part, second.part]
+    });
+    assert.equal(sent.protocolVersion, 3);
+
+    await runtimeB.poll();
+    await runtimeB.approveTask(sent.request.taskId);
+    await waitUntil(() => relay.peek(accountA.address).some((message) => {
+      if (applicationType(message) !== "teti.task.status" || !message.text) return false;
+      const envelope = parseApplicationEnvelope(message.text);
+      return (envelope.payload as { state?: string }).state === "completed";
+    }));
+    const held = relay.takeApplicationMessages(accountA.address, [
+      "teti.task.attachment",
+      "teti.task.artifact"
+    ]);
+    assert.equal(held.length, 2);
+
+    await runtimeA.poll();
+    const waiting = await runtimeA.getTask(sent.request.taskId);
+    assert.equal(waiting.state, "completed");
+    assert.equal(waiting.artifacts?.length ?? 0, 0);
+
+    relay.restore(accountA.address, held);
+    await runtimeA.poll();
+    const completed = await runtimeA.getTask(sent.request.taskId);
+    assert.equal(completed.artifactAttachmentsReady, true);
+    const artifact = completed.artifacts?.[0];
+    assert.equal(artifact?.schemaVersion, 2);
+    const image = artifact && artifact.schemaVersion === 2
+      ? artifact.parts.find((part) => part.kind === "image")
+      : undefined;
+    assert.ok(image && image.kind === "image");
+    const resultPath = await runtimeA.resolveTaskImage(sent.request.taskId, image.attachmentId);
+    assert.deepEqual(await readFile(resultPath), sourceBytes);
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 10 });
+  }
+});
+
+for (const imageCount of [1, 2, 4] as const) {
+  test(`${imageCount} deferred Task image attachment${imageCount === 1 ? "" : "s"} stay fresh until persisted`, async () => {
+    const root = await mkdtemp(join(tmpdir(), `teti-deferred-${imageCount}-image-`));
+    try {
+      const source = join(root, "source.png");
+      const sourceBytes = onePixelPng();
+      await writeFile(source, sourceBytes);
+      const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
+      const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
+      const registry = new StaticRegistry([toIdentity(accountA), toIdentity(accountB)]);
+      const relay = new MemoryChatmailRelay({
+        deferredAttachments: true,
+        hideAttachmentTextUntilDone: true,
+        initialAttachmentDownloadState: imageCount === 2 ? "Failure" : "Available"
+      });
+      const storeA = new FileTaskAttachmentStore(join(root, "a"));
+      const storeB = new FileTaskAttachmentStore(join(root, "b"));
+      const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), registry, undefined, {
+        taskAttachmentStore: storeA
+      });
+      const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), registry, undefined, {
+        taskAttachmentStore: storeB
+      });
+      const connection = await confirmPeers(runtimeA, runtimeB, "beta00002");
+      const attachments: TaskImagePart[] = [];
+      for (let index = 0; index < imageCount; index += 1) {
+        attachments.push((await runtimeA.stageTaskImage(source)).part);
+      }
+      const sent = await runtimeA.sendTask({
+        connectionRequestId: connection.requestId,
+        taskId: `task-deferred-${imageCount}-images`,
+        capabilityId: "image-editing",
+        text: "Use every supplied reference image.",
+        attachments
+      });
+
+      await runtimeB.poll();
+      assert.equal((await runtimeB.getTask(sent.request.taskId)).attachmentsReady, false);
+      assert.equal(relay.attachmentDownloadRequestCount(accountB.address), imageCount);
+
+      // More than the old five-attempt isolation threshold must neither
+      // request the download again nor acknowledge/drop the attachment.
+      for (let attempt = 0; attempt < 6; attempt += 1) await runtimeB.poll();
+      assert.equal(relay.attachmentDownloadRequestCount(accountB.address), imageCount);
+      assert.equal((await runtimeB.getTask(sent.request.taskId)).attachmentsReady, false);
+      assert.equal(relay.pendingAttachmentCount(accountB.address), imageCount);
+
+      relay.completeAttachmentDownloads(accountB.address);
+      await runtimeB.poll();
+      const received = await runtimeB.getTask(sent.request.taskId);
+      assert.equal(received.attachmentsReady, true);
+      for (const part of attachments) {
+        const storedPath = await runtimeB.resolveTaskImage(sent.request.taskId, part.attachmentId);
+        assert.deepEqual(await readFile(storedPath), sourceBytes);
+      }
+      assert.equal(
+        relay.peek(accountB.address).some((message) =>
+          applicationType(message) === "teti.task.attachment"
+        ),
+        false
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 10 });
+    }
+  });
+}
+
+test("a deferred generated image Artifact reaches the requester after slow download", async () => {
+  const root = await mkdtemp(join(tmpdir(), "teti-deferred-image-artifact-"));
+  try {
+    const source = join(root, "result.png");
+    const sourceBytes = onePixelPng();
+    await writeFile(source, sourceBytes);
+    const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
+    const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
+    const registry = new StaticRegistry([toIdentity(accountA), toIdentity(accountB)]);
+    const relay = new MemoryChatmailRelay({
+      deferredAttachments: true,
+      hideAttachmentTextUntilDone: true
+    });
+    const storeA = new FileTaskAttachmentStore(join(root, "a"));
+    const storeB = new FileTaskAttachmentStore(join(root, "b"));
+    const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), registry, undefined, {
+      taskAttachmentStore: storeA
+    });
+    const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), registry, undefined, {
+      taskAttachmentStore: storeB,
+      taskExecutor: new FakeImageTaskExecutor(storeB, source)
+    });
+    const connection = await confirmPeers(runtimeA, runtimeB, "beta00002");
+    const sent = await runtimeA.sendTask({
+      connectionRequestId: connection.requestId,
+      taskId: "task-deferred-generated-image",
+      capabilityId: "image-editing",
+      text: "Generate and return an image."
+    });
+
+    await runtimeB.poll();
+    await runtimeB.approveTask(sent.request.taskId);
+    await waitUntil(() => relay.pendingAttachmentCount(accountA.address) > 0);
+    await runtimeA.poll();
+    const waiting = await runtimeA.getTask(sent.request.taskId);
+    assert.equal(waiting.state, "completed");
+    assert.equal(waiting.artifactAttachmentsReady, false);
+    assert.equal(relay.attachmentDownloadRequestCount(accountA.address), 1);
+
+    for (let attempt = 0; attempt < 6; attempt += 1) await runtimeA.poll();
+    assert.equal(relay.attachmentDownloadRequestCount(accountA.address), 1);
+    relay.completeAttachmentDownloads(accountA.address);
+    await runtimeA.poll();
+
+    const completed = await runtimeA.getTask(sent.request.taskId);
+    assert.equal(completed.artifactAttachmentsReady, true);
+    const artifact = completed.artifacts?.[0];
+    const image = artifact?.schemaVersion === 2
+      ? artifact.parts.find((part) => part.kind === "image")
+      : undefined;
+    assert.ok(image && image.kind === "image");
+    const resultPath = await runtimeA.resolveTaskImage(sent.request.taskId, image.attachmentId);
+    assert.deepEqual(await readFile(resultPath), sourceBytes);
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 10 });
+  }
+});
+
+test("an in-progress Task attachment survives a Runtime restart", async () => {
+  const root = await mkdtemp(join(tmpdir(), "teti-attachment-restart-"));
+  try {
+    const source = join(root, "source.png");
+    const sourceBytes = onePixelPng();
+    await writeFile(source, sourceBytes);
+    const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
+    const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
+    const registry = new StaticRegistry([toIdentity(accountA), toIdentity(accountB)]);
+    const relay = new MemoryChatmailRelay({
+      deferredAttachments: true,
+      hideAttachmentTextUntilDone: true
+    });
+    const connectionStoreA = new MemoryTetiConnectionStorage();
+    const connectionStoreB = new MemoryTetiConnectionStorage();
+    const taskStoreB = new MemoryTaskTransportStore();
+    const attachmentStoreA = new FileTaskAttachmentStore(join(root, "a"));
+    const attachmentStoreB = new FileTaskAttachmentStore(join(root, "b"));
+    const runtimeA = await makeRuntime(
+      accountA,
+      relay.adapter(accountA.address),
+      registry,
+      connectionStoreA,
+      { taskAttachmentStore: attachmentStoreA }
+    );
+    const runtimeB = await makeRuntime(
+      accountB,
+      relay.adapter(accountB.address),
+      registry,
+      connectionStoreB,
+      { taskTransportStore: taskStoreB, taskAttachmentStore: attachmentStoreB }
+    );
+    const connection = await confirmPeers(runtimeA, runtimeB, "beta00002");
+    const staged = await runtimeA.stageTaskImage(source);
+    const sent = await runtimeA.sendTask({
+      connectionRequestId: connection.requestId,
+      taskId: "task-attachment-runtime-restart",
+      capabilityId: "image-editing",
+      text: "Keep this image pending across restart.",
+      attachments: [staged.part]
+    });
+    await runtimeB.poll();
+    assert.equal(relay.attachmentDownloadRequestCount(accountB.address), 1);
+
+    const restartedRuntimeB = await makeRuntime(
+      accountB,
+      relay.adapter(accountB.address),
+      registry,
+      connectionStoreB,
+      { taskTransportStore: taskStoreB, taskAttachmentStore: attachmentStoreB }
+    );
+    await restartedRuntimeB.poll();
+    assert.equal(relay.attachmentDownloadRequestCount(accountB.address), 1);
+    relay.completeAttachmentDownloads(accountB.address);
+    await restartedRuntimeB.poll();
+
+    const recovered = await restartedRuntimeB.getTask(sent.request.taskId);
+    assert.equal(recovered.attachmentsReady, true);
+    const storedPath = await restartedRuntimeB.resolveTaskImage(
+      sent.request.taskId,
+      staged.part.attachmentId
+    );
+    assert.deepEqual(await readFile(storedPath), sourceBytes);
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 10 });
+  }
+});
+
+test("image editing fails closed when an Adapter returns text without an image", async () => {
+  const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
+  const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
+  const registry = new StaticRegistry([toIdentity(accountA), toIdentity(accountB)]);
+  const relay = new MemoryChatmailRelay();
+  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), registry);
+  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), registry, undefined, {
+    taskExecutor: new MissingImageTaskExecutor()
+  });
+  const connection = await confirmPeers(runtimeA, runtimeB, "beta00002");
+  const sent = await runtimeA.sendTask({
+    connectionRequestId: connection.requestId,
+    capabilityId: "image-editing",
+    text: "Return an actual image."
+  });
+
+  await runtimeB.poll();
+  await runtimeB.approveTask(sent.request.taskId);
+  await waitUntil(() => relay.peek(accountA.address).some((message) => {
+    if (applicationType(message) !== "teti.task.status" || !message.text) return false;
+    const envelope = parseApplicationEnvelope(message.text);
+    return (envelope.payload as { state?: string }).state === "failed";
+  }));
+  await runtimeA.poll();
+
+  const failed = await runtimeA.getTask(sent.request.taskId);
+  assert.equal(failed.state, "failed");
+  assert.equal(failed.safeErrorCode, "TASK_IMAGE_RESULT_MISSING");
+  assert.equal(failed.artifacts?.length ?? 0, 0);
 });
 
 test("rejection and requester cancellation converge on both peers without execution", async () => {
@@ -542,6 +968,93 @@ test("a completed status may safely skip a missing working update", async () => 
   assert.equal(completed.state, "completed");
   assert.equal(completed.approval, "approved_once");
   assert.equal(completed.artifacts?.length, 1);
+});
+
+test("Artifact persistence failure leaves Chatmail fresh and succeeds on the next poll", async () => {
+  const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
+  const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
+  const registry = new StaticRegistry([toIdentity(accountA), toIdentity(accountB)]);
+  const relay = new MemoryChatmailRelay();
+  const storeA = new FailOnceArtifactStore();
+  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), registry, undefined, {
+    taskTransportStore: storeA
+  });
+  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), registry, undefined, {
+    taskExecutor: new FakeTaskExecutor()
+  });
+  const connection = await confirmPeers(runtimeA, runtimeB, "beta00002");
+  const sent = await runtimeA.sendTask({
+    connectionRequestId: connection.requestId,
+    taskId: "task-artifact-retry-001",
+    capabilityId: "code-analysis",
+    text: "Retry the Artifact after a local persistence failure."
+  });
+  await runtimeB.poll();
+  await runtimeB.approveTask(sent.request.taskId);
+  await flushBackgroundWork();
+  await flushBackgroundWork();
+
+  await runtimeA.poll();
+  assert.equal((await runtimeA.getTask(sent.request.taskId)).artifacts?.length ?? 0, 0);
+  assert.equal(relay.peek(accountA.address).some((message) =>
+    applicationType(message) === "teti.task.artifact"
+  ), true);
+
+  await runtimeA.poll();
+  const retried = await runtimeA.getTask(sent.request.taskId);
+  assert.equal(retried.state, "completed");
+  assert.equal(retried.artifacts?.length, 1);
+  assert.equal(relay.peek(accountA.address).some((message) =>
+    applicationType(message) === "teti.task.artifact"
+  ), false);
+});
+
+test("Artifact arriving before its Task record stays pending and is applied later", async () => {
+  const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
+  const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
+  const registry = new StaticRegistry([toIdentity(accountA), toIdentity(accountB)]);
+  const relay = new MemoryChatmailRelay();
+  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), registry);
+  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), registry);
+  const connection = await confirmPeers(runtimeA, runtimeB, "beta00002");
+  const createdAt = new Date().toISOString();
+  const artifactEnvelope = createApplicationEnvelope({
+    type: "teti.task.artifact",
+    messageId: "artifact-before-task-record",
+    fromTetiId: accountB.id,
+    createdAt,
+    payload: {
+      schemaVersion: 1,
+      taskId: "task-artifact-before-record-001",
+      requesterTetiId: accountA.id,
+      targetTetiId: accountB.id,
+      artifact: {
+        schemaVersion: 2,
+        taskId: "task-artifact-before-record-001",
+        artifactId: "artifact-early-001",
+        parts: [{ kind: "text", text: "early but valid" }],
+        createdAt
+      },
+      createdAt
+    }
+  });
+  relay.pushRaw(accountA.address, accountB.address, serializeApplicationEnvelope(artifactEnvelope));
+
+  await runtimeA.poll();
+  assert.equal(relay.peek(accountA.address).some((message) =>
+    applicationType(message) === "teti.task.artifact"
+  ), true);
+
+  await runtimeA.sendTask({
+    connectionRequestId: connection.requestId,
+    taskId: "task-artifact-before-record-001",
+    capabilityId: "code-analysis",
+    text: "The record now exists."
+  });
+  await runtimeA.poll();
+  const record = await runtimeA.getTask("task-artifact-before-record-001");
+  assert.equal(record.artifacts?.length, 1);
+  assert.match(JSON.stringify(record.artifacts), /early but valid/);
 });
 
 test("out-of-order Task status and receipt messages cannot roll back newer state", async () => {
@@ -809,6 +1322,7 @@ async function makeRuntime(
     passportSharing?: MemoryPassportSharingStore;
     getLocalAiTools?: () => AiToolStatusSnapshot[];
     getLocalCallableAgents?: () => CallableAgent[];
+    peerProtocolCapabilities?: PeerProtocolCapabilityStore;
     taskTransportStore?: MemoryTaskTransportStore;
     taskAttachmentStore?: FileTaskAttachmentStore;
     taskExecutor?: TaskExecutionBridge;
@@ -879,8 +1393,37 @@ function localCodexAgent(): CallableAgent {
   };
 }
 
+function emptyCallablePassport(generatedAt: string): AiStatusSyncPayload {
+  return {
+    schemaVersion: 3,
+    sharing: "enabled",
+    generatedAt,
+    expiresAt: new Date(Date.parse(generatedAt) + 30 * 60 * 1_000).toISOString(),
+    tools: [],
+    agents: [],
+    capabilities: [],
+    bindings: []
+  };
+}
+
+function onePixelPng(): Buffer {
+  return Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M/wHwAF/gL+pkJZ5QAAAABJRU5ErkJggg==",
+    "base64"
+  );
+}
+
 async function flushBackgroundWork(): Promise<void> {
   await new Promise<void>((resolve) => setImmediate(resolve));
+}
+
+async function waitUntil(read: () => boolean, timeoutMs = 1_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (read()) return;
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error("Timed out waiting for relayed Task state.");
 }
 
 function makeConnectionRecord(
@@ -942,10 +1485,38 @@ class StaticRegistry implements TetiRegistryReader {
   }
 }
 
+class FailOnceArtifactStore extends MemoryTaskTransportStore {
+  private shouldFail = true;
+
+  override async save(state: TetiTaskTransportStoreState): Promise<void> {
+    if (this.shouldFail && state.records.some((record) => (record.artifacts?.length ?? 0) > 0)) {
+      this.shouldFail = false;
+      throw new Error("simulated artifact persistence failure");
+    }
+    await super.save(state);
+  }
+}
+
 class MemoryChatmailRelay {
   private readonly queues = new Map<string, ChatmailReceivedMessage[]>();
+  private readonly attachmentSources = new Map<number, string>();
+  private readonly attachmentCaptions = new Map<number, string>();
+  private readonly attachmentDownloadRequests = new Map<number, number>();
   private nextMessageId = 1;
   private lastReceivedAtMs = Date.now();
+  private readonly deferredAttachments: boolean;
+  private readonly hideAttachmentTextUntilDone: boolean;
+  private readonly initialAttachmentDownloadState: "Available" | "Failure";
+
+  constructor(options: {
+    deferredAttachments?: boolean;
+    hideAttachmentTextUntilDone?: boolean;
+    initialAttachmentDownloadState?: "Available" | "Failure";
+  } = {}) {
+    this.deferredAttachments = options.deferredAttachments ?? false;
+    this.hideAttachmentTextUntilDone = options.hideAttachmentTextUntilDone ?? false;
+    this.initialAttachmentDownloadState = options.initialAttachmentDownloadState ?? "Available";
+  }
 
   adapter(fromAddress: string): ChatmailAdapter {
     return new RelayAdapter(this, fromAddress);
@@ -954,15 +1525,21 @@ class MemoryChatmailRelay {
   send(fromAddress: string, input: SendChatmailMessageInput): ChatmailSentMessage {
     const messageId = this.nextMessageId++;
     const queue = this.queues.get(input.peerAddress) ?? [];
+    if (input.attachment) {
+      this.attachmentSources.set(messageId, input.attachment.path);
+      this.attachmentCaptions.set(messageId, input.text);
+    }
     queue.push({
       messageId,
       chatId: messageId,
       fromAddress,
-      text: input.text,
+      text: input.attachment && this.deferredAttachments && this.hideAttachmentTextUntilDone
+        ? undefined
+        : input.text,
       ...(input.attachment ? {
-        filePath: input.attachment.path,
+        ...(this.deferredAttachments ? {} : { filePath: input.attachment.path }),
         fileName: input.attachment.filename,
-        downloadState: "Done" as const,
+        downloadState: this.deferredAttachments ? this.initialAttachmentDownloadState : "Done" as const,
         viewType: "Image"
       } : {}),
       receivedAt: this.nextReceivedAt()
@@ -974,7 +1551,58 @@ class MemoryChatmailRelay {
   receive(address: string, limit?: number): ChatmailReceivedMessage[] {
     const queue = this.queues.get(address) ?? [];
     const count = limit ?? queue.length;
-    return queue.splice(0, count);
+    return queue.slice(0, count);
+  }
+
+  acknowledge(address: string, messageId: number): void {
+    const queue = this.queues.get(address) ?? [];
+    const index = queue.findIndex((message) => message.messageId === messageId);
+    if (index >= 0) queue.splice(index, 1);
+  }
+
+  requestAttachmentDownload(address: string, messageId: number): ChatmailReceivedMessage {
+    const message = (this.queues.get(address) ?? []).find((candidate) =>
+      candidate.messageId === messageId
+    );
+    if (!message) throw new Error("Relayed attachment message was not found.");
+    if (message.filePath) return structuredClone(message);
+    if (!this.attachmentSources.has(messageId)) throw new Error("Relayed attachment source was not found.");
+    if (message.downloadState === "InProgress") {
+      throw new Error("Download already in progress.");
+    }
+    if (message.downloadState !== "Available" && message.downloadState !== "Failure") {
+      throw new Error(`Attachment cannot be downloaded from ${message.downloadState ?? "unknown"}.`);
+    }
+    this.attachmentDownloadRequests.set(
+      messageId,
+      (this.attachmentDownloadRequests.get(messageId) ?? 0) + 1
+    );
+    message.downloadState = "InProgress";
+    return structuredClone(message);
+  }
+
+  completeAttachmentDownloads(address: string): void {
+    for (const message of this.queues.get(address) ?? []) {
+      if (message.downloadState !== "InProgress") continue;
+      const sourcePath = this.attachmentSources.get(message.messageId);
+      if (!sourcePath) throw new Error("Relayed attachment source was not found.");
+      message.filePath = sourcePath;
+      message.downloadState = "Done";
+      message.text = this.attachmentCaptions.get(message.messageId) ?? message.text;
+    }
+  }
+
+  attachmentDownloadRequestCount(address: string): number {
+    return (this.queues.get(address) ?? []).reduce(
+      (total, message) => total + (this.attachmentDownloadRequests.get(message.messageId) ?? 0),
+      0
+    );
+  }
+
+  pendingAttachmentCount(address: string): number {
+    return (this.queues.get(address) ?? []).filter((message) =>
+      this.attachmentSources.has(message.messageId)
+    ).length;
   }
 
   peek(address: string): ChatmailReceivedMessage[] {
@@ -1033,6 +1661,17 @@ class MemoryChatmailRelay {
     ));
   }
 
+  takeApplicationMessages(address: string, types: readonly string[]): ChatmailReceivedMessage[] {
+    const queue = this.queues.get(address) ?? [];
+    const taken = queue.filter((message) => types.includes(applicationType(message) ?? ""));
+    this.queues.set(address, queue.filter((message) => !taken.includes(message)));
+    return taken;
+  }
+
+  restore(address: string, messages: readonly ChatmailReceivedMessage[]): void {
+    this.queues.set(address, [...messages, ...(this.queues.get(address) ?? [])]);
+  }
+
   private nextReceivedAt(): string {
     this.lastReceivedAtMs = Math.max(Date.now(), this.lastReceivedAtMs + 1);
     return new Date(this.lastReceivedAtMs).toISOString();
@@ -1081,6 +1720,61 @@ class FakeTaskExecutor implements TaskExecutionBridge {
   cancel(taskId: string): boolean {
     return this.tasks.delete(taskId);
   }
+}
+
+class FakeImageTaskExecutor implements TaskExecutionBridge {
+  private readonly store: FileTaskAttachmentStore;
+  private readonly resultSource: string;
+
+  constructor(store: FileTaskAttachmentStore, resultSource: string) {
+    this.store = store;
+    this.resultSource = resultSource;
+  }
+
+  resolveTarget(capabilityId: string) {
+    return capabilityId === "image-editing"
+      ? { adapterId: "fake.image", agentId: "fake-image", capabilityId }
+      : null;
+  }
+
+  async execute(request: CallableAdapterTaskRequest): Promise<CallableAdapterTaskSnapshot> {
+    const generated = await this.store.ingestGeneratedImage(request.taskId, this.resultSource);
+    return {
+      ...workingSnapshot(request),
+      state: "completed",
+      updatedAt: new Date().toISOString(),
+      completedAt: new Date().toISOString(),
+      artifact: {
+        kind: "parts",
+        text: "safe:image-generated",
+        images: [generated.part]
+      }
+    };
+  }
+
+  getTask(): CallableAdapterTaskSnapshot | null { return null; }
+  cancel(): boolean { return false; }
+}
+
+class MissingImageTaskExecutor implements TaskExecutionBridge {
+  resolveTarget(capabilityId: string) {
+    return capabilityId === "image-editing"
+      ? { adapterId: "fake.missing-image", agentId: "fake-image", capabilityId }
+      : null;
+  }
+
+  async execute(request: CallableAdapterTaskRequest): Promise<CallableAdapterTaskSnapshot> {
+    return {
+      ...workingSnapshot(request),
+      state: "completed",
+      updatedAt: new Date().toISOString(),
+      completedAt: new Date().toISOString(),
+      artifact: { kind: "text", text: "I edited it." }
+    };
+  }
+
+  getTask(): CallableAdapterTaskSnapshot | null { return null; }
+  cancel(): boolean { return false; }
 }
 
 class HangingTaskExecutor implements TaskExecutionBridge {
@@ -1179,6 +1873,15 @@ class RelayAdapter implements ChatmailAdapter {
   }
   async receiveMessages(input: ReceiveChatmailMessagesInput): Promise<ChatmailReceivedMessage[]> {
     return this.relay.receive(this.address, input.limit);
+  }
+  async acknowledgeReceivedMessage(_accountId: number, messageId: number): Promise<void> {
+    this.relay.acknowledge(this.address, messageId);
+  }
+  async downloadMessageAttachment(
+    _accountId: number,
+    messageId: number
+  ): Promise<ChatmailReceivedMessage> {
+    return this.relay.requestAttachmentDownload(this.address, messageId);
   }
   async createAccount(_input: CreateChatmailAccountInput): Promise<ChatmailIdentity> { throw new Error("unused"); }
   async loadAccount(_input: LoadChatmailAccountInput): Promise<ChatmailIdentity> { throw new Error("unused"); }

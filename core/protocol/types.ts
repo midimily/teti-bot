@@ -49,6 +49,8 @@ export interface TetiPresencePayload {
   timestamp: string;
   /** Optional for compatibility with pre-0.1.11 peers. */
   taskProtocolVersions?: number[];
+  /** Explicit Passport capability; independent from the latest shared snapshot. */
+  passportSchemaVersions?: number[];
 }
 
 export type TetiKnownApplicationEnvelope =

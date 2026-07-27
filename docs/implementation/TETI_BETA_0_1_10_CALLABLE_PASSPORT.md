@@ -4,6 +4,12 @@ Status: Implemented
 
 Application version: 0.1.10
 
+> Historical implementation record. The current protocol cutover supersedes
+> the passive compatibility table below: outgoing Passport sync now sends only
+> schema 3, Presence explicitly advertises `passportSchemaVersions: [3]`, and
+> Peer protocol capability is persisted independently from Passport content.
+> Schema 1/2 remain receive-only for queued historical messages.
+
 ## Outcome
 
 Beta 0.1.10 makes the AI Passport truthfully represent callability. The broad

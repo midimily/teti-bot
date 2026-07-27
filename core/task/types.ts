@@ -1,4 +1,4 @@
-export const TETI_COLLABORATION_TASK_SCHEMA_VERSION = 2;
+export const TETI_COLLABORATION_TASK_SCHEMA_VERSION = 3;
 export const TETI_TASK_ARTIFACT_SCHEMA_VERSION = 2;
 export const TETI_EXECUTION_GRANT_SCHEMA_VERSION = 1;
 
@@ -70,7 +70,7 @@ export type CollaborationTaskInput = TaskTextPart | TaskMultipartInput;
  * Capability, never a local executable, Adapter, path, command, or workspace.
  */
 export interface CollaborationTaskRequest {
-  schemaVersion: 1 | 2;
+  schemaVersion: 1 | 2 | 3;
   taskId: string;
   requesterTetiId: string;
   targetTetiId: string;
@@ -142,4 +142,10 @@ export function taskInputImages(input: CollaborationTaskInput): TaskImagePart[] 
   return input.kind === "text"
     ? []
     : input.parts.filter((part): part is TaskImagePart => part.kind === "image");
+}
+
+export function taskArtifactImages(artifact: CollaborationTaskArtifact): TaskImagePart[] {
+  return artifact.schemaVersion === 1
+    ? []
+    : artifact.parts.filter((part): part is TaskImagePart => part.kind === "image");
 }

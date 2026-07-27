@@ -12,6 +12,11 @@ import {
   qualifyCodexCallableAdapter,
   resolveCodexEntrypoint
 } from "../../../integrations/agents/codex/adapter.ts";
+import {
+  CodexImageCallableAdapter,
+  parseRunnerFailureCode,
+  parseRunnerManifest
+} from "../../../integrations/agents/codex/image-adapter.ts";
 import { CallableAdapterKernel } from "../lifecycle-sidecar/runtime/callable/kernel.ts";
 
 const sourceFixture = join(
@@ -63,6 +68,80 @@ test("Codex Adapter uses a fixed non-interactive, ephemeral, read-only JSONL ent
     "--",
     "-"
   ]);
+});
+
+test("Codex image Adapter fixes the app-server runner and accepts only image manifests", () => {
+  const adapter = new CodexImageCallableAdapter({
+    nodeEntrypoint: "/Teti.app/Contents/Resources/runtime/node",
+    runnerPath: "/Teti.app/Contents/Resources/lifecycle-sidecar/codex-image-runner.mjs",
+    codexEntrypoint: "/Applications/ChatGPT.app/Contents/Resources/codex",
+    codexHome: "/safe/local/codex-home"
+  });
+  const launch = adapter.createLaunchSpec({
+    taskId: "task-image",
+    capabilityId: "image-editing",
+    workspacePath: "/private/tmp/teti-image-task",
+    images: [{
+      attachmentId: "image-1",
+      mimeType: "image/png",
+      path: "/private/tmp/teti-image-task/input-image-1.png"
+    }]
+  });
+
+  assert.deepEqual(launch.args, [
+    "/Teti.app/Contents/Resources/lifecycle-sidecar/codex-image-runner.mjs",
+    "--codex",
+    "/Applications/ChatGPT.app/Contents/Resources/codex",
+    "--workspace",
+    "/private/tmp/teti-image-task",
+    "--image",
+    "/private/tmp/teti-image-task/input-image-1.png"
+  ]);
+  assert.deepEqual(launch.environment, {
+    NO_COLOR: "1",
+    TERM: "dumb",
+    CODEX_HOME: "/safe/local/codex-home"
+  });
+  assert.deepEqual(parseRunnerManifest(JSON.stringify({
+    schemaVersion: 1,
+    text: "图片编辑已完成。",
+    images: [{ path: "/private/tmp/teti-image-task/output-image-1.img" }]
+  })), {
+    schemaVersion: 1,
+    text: "图片编辑已完成。",
+    images: [{ path: "/private/tmp/teti-image-task/output-image-1.img" }]
+  });
+  assert.throws(() => parseRunnerManifest(JSON.stringify({
+    schemaVersion: 1,
+    text: "只有文字，不应算图片结果。",
+    images: []
+  })), /CODEX_IMAGE_OUTPUT_INVALID/);
+  assert.throws(() => parseRunnerManifest(JSON.stringify({
+    schemaVersion: 1,
+    text: "路径越界。",
+    images: [{ path: "relative-output.png" }]
+  })), /CODEX_IMAGE_OUTPUT_INVALID/);
+  assert.equal(adapter.classifyFailure(JSON.stringify({
+    schemaVersion: 1,
+    error: { code: "CODEX_IMAGE_RESULT_NOT_READY" }
+  })), "ADAPTER_IMAGE_RESULT_NOT_READY");
+  assert.equal(adapter.classifyFailure(JSON.stringify({
+    schemaVersion: 1,
+    error: { code: "CODEX_IMAGE_RESULT_INVALID" }
+  })), "ADAPTER_IMAGE_RESULT_INVALID");
+  assert.equal(adapter.classifyFailure(JSON.stringify({
+    schemaVersion: 1,
+    error: { code: "CODEX_IMAGE_SERVER_EXITED" }
+  })), "ADAPTER_IMAGE_SERVER_EXITED");
+  assert.equal(adapter.classifyFailure(JSON.stringify({
+    schemaVersion: 1,
+    error: { code: "CODEX_IMAGE_PROTOCOL_LIMIT" }
+  })), "ADAPTER_IMAGE_PROTOCOL_LIMIT");
+  assert.equal(adapter.classifyFailure("not-json"), "ADAPTER_EXIT_NONZERO");
+  assert.equal(parseRunnerFailureCode(JSON.stringify({
+    schemaVersion: 1,
+    error: { code: "CODEX_IMAGE_RESULT_INVALID", detail: "must-not-cross-boundary" }
+  })), null);
 });
 
 test("Codex qualification fails closed for missing executable or login", async () => {

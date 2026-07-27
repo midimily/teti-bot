@@ -145,6 +145,7 @@ export interface ChatmailAdapter {
   sendMessage(input: SendChatmailMessageInput): Promise<ChatmailSentMessage>;
   waitForDelivery?(input: WaitForChatmailDeliveryInput): Promise<ChatmailMessageStatus>;
   receiveMessages(input: ReceiveChatmailMessagesInput): Promise<ChatmailReceivedMessage[]>;
+  acknowledgeReceivedMessage?(accountId: number, messageId: number): Promise<void>;
   downloadMessageAttachment?(accountId: number, messageId: number): Promise<ChatmailReceivedMessage>;
   deleteAccount(input: DeleteChatmailAccountInput): Promise<void>;
 }
@@ -164,6 +165,7 @@ export interface ChatmailRpcClient {
   sendTextMessage(input: SendChatmailMessageInput): Promise<ChatmailSentMessage>;
   sendFileMessage?(input: SendChatmailMessageInput & { attachment: ChatmailFileAttachment }): Promise<ChatmailSentMessage>;
   receiveMessages(input: ReceiveChatmailMessagesInput): Promise<ChatmailReceivedMessage[]>;
+  markMessageSeen?(accountId: number, messageId: number): Promise<void>;
   getNextMessageIds(accountId: number): Promise<number[]>;
   getMessageStatus(accountId: number, messageId: number): Promise<ChatmailMessageStatus>;
   downloadFullMessage?(accountId: number, messageId: number): Promise<void>;

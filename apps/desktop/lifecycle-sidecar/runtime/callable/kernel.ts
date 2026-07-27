@@ -1,5 +1,6 @@
-import { chmod, copyFile, mkdtemp, rm } from "node:fs/promises";
+import { chmod, copyFile, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { isAbsolute, relative, resolve } from "node:path";
 import { join } from "node:path";
 import {
   CallableAdapterContractError,
@@ -11,6 +12,7 @@ import {
   validateCallableAdapterLaunchSpec,
   validateCallableAdapterTaskRequest,
   type CallableAdapter,
+  type CallableAdapterDecodedArtifact,
   type CallableAdapterDescriptor,
   type CallableAdapterImageInput,
   type CallableAdapterSafeErrorCode,
@@ -27,6 +29,7 @@ import {
   type AdapterProcessSpawner,
   type ManagedAdapterProcess
 } from "./process-runner.ts";
+import type { TaskAttachmentStore } from "../tasks/attachments.ts";
 
 export const CALLABLE_ADAPTER_KERNEL_DEFAULTS = {
   maxConcurrentTasks: 4,
@@ -54,6 +57,7 @@ export interface CallableAdapterKernelOptions {
   maxConcurrentTasks?: number;
   maxRetainedTasks?: number;
   now?: () => Date;
+  artifactImageStore?: Pick<TaskAttachmentStore, "ingestGeneratedImage">;
 }
 
 export class CallableAdapterKernelError extends Error {
@@ -91,6 +95,7 @@ export class CallableAdapterKernel {
   private readonly maxConcurrentTasks: number;
   private readonly maxRetainedTasks: number;
   private readonly now: () => Date;
+  private readonly artifactImageStore?: Pick<TaskAttachmentStore, "ingestGeneratedImage">;
   private acceptingTasks = true;
   private shutdownPromise: Promise<void> | null = null;
 
@@ -106,6 +111,7 @@ export class CallableAdapterKernel {
       "maxRetainedTasks"
     );
     this.now = options.now ?? (() => new Date());
+    this.artifactImageStore = options.artifactImageStore;
 
     for (const adapter of options.adapters ?? []) this.registerAdapter(adapter);
   }
@@ -344,9 +350,22 @@ export class CallableAdapterKernel {
         }
       }
       try {
-        const artifact = adapter.decodeArtifact?.(stdout) ?? stdout;
-        validateCallableAdapterArtifactText(artifact);
-        return control.machine.complete(artifact);
+        const artifact = adapter.decodeArtifact?.(stdout, {
+          taskId: request.taskId,
+          capabilityId: request.capabilityId,
+          workspacePath,
+          images
+        }) ?? stdout;
+        if (typeof artifact === "string") {
+          validateCallableAdapterArtifactText(artifact);
+          return control.machine.complete(artifact);
+        }
+        return control.machine.complete(await this.persistImageArtifact(
+          request.taskId,
+          workspacePath,
+          adapter,
+          artifact
+        ));
       } catch (error) {
         return control.machine.fail(
           error instanceof CallableAdapterOutputError
@@ -377,6 +396,29 @@ export class CallableAdapterKernel {
       this.active.delete(request.taskId);
       this.pruneHistory();
     }
+  }
+
+  private async persistImageArtifact(
+    taskId: string,
+    workspacePath: string,
+    adapter: CallableAdapter,
+    artifact: CallableAdapterDecodedArtifact
+  ) {
+    validateCallableAdapterArtifactText(artifact.text);
+    if (!callableAdapterOutputModes(adapter.descriptor).includes("image")
+      || artifact.images.length === 0
+      || artifact.images.length > 4
+      || !this.artifactImageStore) {
+      throw new CallableAdapterOutputError("ADAPTER_OUTPUT_INVALID", "Image Artifact output is unavailable.");
+    }
+    const images = [];
+    for (const output of artifact.images) {
+      if (!await isWorkspaceOutputPath(workspacePath, output.path)) {
+        throw new CallableAdapterOutputError("ADAPTER_OUTPUT_INVALID", "Image Artifact path is outside the task workspace.");
+      }
+      images.push((await this.artifactImageStore.ingestGeneratedImage(taskId, output.path)).part);
+    }
+    return { kind: "parts" as const, text: artifact.text, images };
   }
 
   private requestTermination(
@@ -413,6 +455,14 @@ export class CallableAdapterKernel {
       if (machine.isTerminal && !this.active.has(taskId)) this.tasks.delete(taskId);
     }
   }
+}
+
+async function isWorkspaceOutputPath(workspacePath: string, outputPath: string): Promise<boolean> {
+  if (typeof outputPath !== "string" || !isAbsolute(outputPath) || outputPath.includes("\0")) return false;
+  const path = resolve(await realpath(outputPath));
+  const workspace = resolve(await realpath(workspacePath));
+  const child = relative(workspace, path);
+  return child !== "" && !child.startsWith("..") && !isAbsolute(child);
 }
 
 async function stageTaskImages(

@@ -251,6 +251,13 @@ async function runRuntimeSmoke(path: string): Promise<Record<string, unknown>> {
   const node = join(path, "Contents", "Resources", "runtime", "node");
   const rpc = join(path, "Contents", "Resources", "runtime", "deltachat-rpc-server");
   const sidecar = join(path, "Contents", "Resources", "lifecycle-sidecar", "main.mjs");
+  const codexImageRunner = join(
+    path,
+    "Contents",
+    "Resources",
+    "lifecycle-sidecar",
+    "codex-image-runner.mjs"
+  );
   const smokeRoot = await mkdtemp(join(tmpdir(), "teti-adhoc-runtime-smoke-"));
   try {
     const nodeVersion = (await capture(node, ["--version"], { cwd: smokeRoot })).stdout.trim();
@@ -264,6 +271,12 @@ async function runRuntimeSmoke(path: string): Promise<Record<string, unknown>> {
 
     const sidecarSource = await readFile(sidecar, "utf8");
     assert(!sidecarSource.includes(repoRoot), "Bundled lifecycle sidecar contains a repository absolute path dependency.");
+    const codexImageRunnerSource = await readFile(codexImageRunner, "utf8");
+    assert(
+      !codexImageRunnerSource.includes(repoRoot),
+      "Bundled Codex image runner contains a repository absolute path dependency."
+    );
+    await capture(node, ["--check", codexImageRunner], { cwd: smokeRoot });
     const lifecycle = await runLifecycleHealth(node, sidecar, rpc, smokeRoot);
     assert(lifecycle, "Bundled lifecycle sidecar health check failed.");
     assert(!(await pathExists(join(smokeRoot, "account", "account.json"))), "Runtime smoke unexpectedly created a Teti account.");
@@ -276,6 +289,8 @@ async function runRuntimeSmoke(path: string): Promise<Record<string, unknown>> {
       deltaChatRpcJsonRpcHealth: diagnostics.jsonRpcHealth,
       deltaChatRpcCleanShutdown: diagnostics.cleanShutdown,
       lifecycleSidecarHealth: lifecycle,
+      codexImageRunnerBundled: true,
+      codexImageRunnerSyntaxValid: true,
       usedBundledNode: true,
       usedBundledRpc: true,
       repositoryPathIndependent: true,

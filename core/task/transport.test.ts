@@ -36,8 +36,9 @@ test("Task negotiation keeps v1 for unknown peers and selects the highest known 
   assert.equal(selectTaskProtocolVersion(), 1);
   assert.equal(selectTaskProtocolVersion([2, 1]), 2);
   assert.equal(selectTaskProtocolVersion([2]), 2);
-  assert.equal(selectTaskProtocolVersion([3]), null);
-  assert.doesNotThrow(() => validateTaskProtocolVersions([1, 2]));
+  assert.equal(selectTaskProtocolVersion([3]), 3);
+  assert.equal(selectTaskProtocolVersion([4]), null);
+  assert.doesNotThrow(() => validateTaskProtocolVersions([1, 2, 3]));
 });
 
 test("canonical Task comparison ignores JSON property insertion order", () => {

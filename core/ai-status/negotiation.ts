@@ -1,28 +1,42 @@
-import {
-  TETI_AI_STATUS_AGENT_SCHEMA_VERSION,
-  TETI_AI_STATUS_LEGACY_SCHEMA_VERSION,
-  TETI_AI_STATUS_SCHEMA_VERSION,
-  type RemoteAiStatusSnapshot
-} from "./types.ts";
+import { TETI_AI_STATUS_SCHEMA_VERSION } from "./types.ts";
 
-export type AiStatusSchemaVersion = 1 | 2 | 3;
+export const TETI_SUPPORTED_PASSPORT_SCHEMA_VERSIONS = [
+  TETI_AI_STATUS_SCHEMA_VERSION
+] as const;
+export const MAX_PASSPORT_SCHEMA_VERSIONS = 8;
+
+export type AiStatusSchemaVersion = typeof TETI_SUPPORTED_PASSPORT_SCHEMA_VERSIONS[number];
 
 /**
- * Unknown peers receive one oldest-compatible Resource payload and one current
- * Callable Passport payload. A received payload is passive capability
- * negotiation: known peers receive exactly one best schema thereafter.
+ * Passport support is negotiated from an explicit Peer capability, never from
+ * the last received Passport snapshot. Unknown peers receive the current
+ * schema so a newly confirmed, offline-first Peer can receive its first
+ * Callable Passport before its Presence arrives.
  */
-export function selectAiStatusSchemasForPeer(
-  remote: RemoteAiStatusSnapshot | undefined
-): AiStatusSchemaVersion[] {
-  if (remote?.schemaVersion === TETI_AI_STATUS_SCHEMA_VERSION) {
-    return [TETI_AI_STATUS_SCHEMA_VERSION];
+export function selectAiStatusSchemaForPeer(
+  remoteVersions?: readonly number[]
+): AiStatusSchemaVersion | null {
+  if (!remoteVersions) return TETI_AI_STATUS_SCHEMA_VERSION;
+  const selected = [...TETI_SUPPORTED_PASSPORT_SCHEMA_VERSIONS]
+    .sort((left, right) => right - left)
+    .find((version) => remoteVersions.includes(version));
+  return selected ?? null;
+}
+
+export function validatePassportSchemaVersions(
+  value: unknown
+): asserts value is number[] {
+  if (!Array.isArray(value)
+    || value.length === 0
+    || value.length > MAX_PASSPORT_SCHEMA_VERSIONS) {
+    throw new Error("Passport schema versions are invalid.");
   }
-  if (remote?.schemaVersion === TETI_AI_STATUS_AGENT_SCHEMA_VERSION) {
-    return [TETI_AI_STATUS_AGENT_SCHEMA_VERSION];
+
+  const seen = new Set<number>();
+  for (const version of value) {
+    if (!Number.isSafeInteger(version) || version < 1 || version > 255 || seen.has(version)) {
+      throw new Error("Passport schema versions are invalid.");
+    }
+    seen.add(version);
   }
-  if (remote?.schemaVersion === TETI_AI_STATUS_LEGACY_SCHEMA_VERSION) {
-    return [TETI_AI_STATUS_LEGACY_SCHEMA_VERSION];
-  }
-  return [TETI_AI_STATUS_LEGACY_SCHEMA_VERSION, TETI_AI_STATUS_SCHEMA_VERSION];
 }

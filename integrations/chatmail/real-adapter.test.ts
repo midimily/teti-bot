@@ -587,6 +587,22 @@ test("JSON-RPC client projects received image metadata and private blob path", a
   }]);
 });
 
+test("JSON-RPC client acknowledges a processed message only through markseen_msgs", async () => {
+  const connection = new RoutingJsonRpcConnection({
+    markseen_msgs: { jsonrpc: "2.0", id: 1, result: null }
+  });
+  const client = new JsonRpcChatmailClient(new JsonRpcClientTransport(connection));
+
+  await client.markMessageSeen(3, 71);
+
+  assert.deepEqual(connection.requests, [{
+    jsonrpc: "2.0",
+    id: 1,
+    method: "markseen_msgs",
+    params: [3, [71]]
+  }]);
+});
+
 test("JSON-RPC client receives IncomingMsg events and loads messages", async () => {
   const connection = new RoutingJsonRpcConnection({
     get_next_event_batch: {
@@ -720,6 +736,66 @@ test("JSON-RPC client receives MsgsChanged events like Delta Chat Desktop fallba
       fromAddress: "peer@mail.seep.im",
       hasText: true
     }
+  ]);
+});
+
+test("an unacknowledged attachment is refreshed from Available through MsgsChanged to Done", async () => {
+  const message = {
+    id: 71,
+    chatId: 9,
+    text: "attachment descriptor",
+    fileName: "teti-task-image.png",
+    fileMime: "image/png",
+    fileBytes: 1024,
+    viewType: "Image",
+    state: 10,
+    sender: { address: "peer@mail.seep.im" }
+  };
+  const connection = new SequencedRoutingJsonRpcConnection({
+    get_next_msgs: [{ jsonrpc: "2.0", id: 1, result: [71] }],
+    get_message: [
+      { jsonrpc: "2.0", id: 2, result: { ...message, downloadState: "Available" } },
+      { jsonrpc: "2.0", id: 4, result: { ...message, downloadState: "InProgress" } },
+      {
+        jsonrpc: "2.0",
+        id: 6,
+        result: {
+          ...message,
+          file: "/private/chatmail/blobs/hash.png",
+          downloadState: "Done"
+        }
+      }
+    ],
+    download_full_message: [{ jsonrpc: "2.0", id: 3, result: null }],
+    get_next_event_batch: [{
+      jsonrpc: "2.0",
+      id: 5,
+      result: [{
+        contextId: 3,
+        event: { kind: "MsgsChanged", chatId: 9, msgId: 71 }
+      }]
+    }]
+  });
+  const client = new JsonRpcChatmailClient(new JsonRpcClientTransport(connection));
+  const adapter = new RealChatmailAdapter(client);
+
+  const available = await client.receiveMessages({ accountId: 3, backlogFirst: true });
+  assert.equal(available[0]?.downloadState, "Available");
+  const scheduled = await adapter.downloadMessageAttachment(3, 71);
+  assert.equal(scheduled.downloadState, "InProgress");
+  assert.equal(scheduled.filePath, undefined);
+
+  const completed = await client.receiveMessages({ accountId: 3 });
+  assert.equal(completed[0]?.messageId, 71);
+  assert.equal(completed[0]?.downloadState, "Done");
+  assert.equal(completed[0]?.filePath, "/private/chatmail/blobs/hash.png");
+  assert.deepEqual(connection.requests.map((request) => request.method), [
+    "get_next_msgs",
+    "get_message",
+    "download_full_message",
+    "get_message",
+    "get_next_event_batch",
+    "get_message"
   ]);
 });
 
@@ -1146,6 +1222,28 @@ class RoutingJsonRpcConnection implements JsonRpcConnection {
       ...response,
       id: payload.id
     };
+  }
+}
+
+class SequencedRoutingJsonRpcConnection implements JsonRpcConnection {
+  readonly requests: JsonRpcRequest[] = [];
+  private readonly responses: Record<string, JsonRpcResponse[]>;
+
+  constructor(responses: Record<string, JsonRpcResponse[]>) {
+    this.responses = responses;
+  }
+
+  async send(payload: JsonRpcRequest): Promise<JsonRpcResponse> {
+    this.requests.push(payload);
+    const response = this.responses[payload.method]?.shift();
+    if (!response) {
+      return {
+        jsonrpc: "2.0",
+        id: payload.id,
+        error: { code: -32601, message: "Method not found" }
+      };
+    }
+    return { ...response, id: payload.id };
   }
 }
 

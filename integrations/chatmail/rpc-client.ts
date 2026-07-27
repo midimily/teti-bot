@@ -455,6 +455,11 @@ export class JsonRpcChatmailClient implements ChatmailRpcClient {
     }
   }
 
+  async markMessageSeen(accountId: number, messageId: number): Promise<void> {
+    await this.transport.request<void>("markseen_msgs", [accountId, [messageId]]);
+    this.observedMessageIds.add(`${accountId}:${messageId}`);
+  }
+
   private async fetchReceivedMessage(
     input: ReceiveChatmailMessagesInput,
     messageId: number,
@@ -476,9 +481,6 @@ export class JsonRpcChatmailClient implements ChatmailRpcClient {
     }
 
     const received = toChatmailReceivedMessage(messageId, eventBody, message);
-    if (received.downloadState !== "Available" && received.downloadState !== "InProgress") {
-      this.observedMessageIds.add(key);
-    }
     input.onDiagnostic?.({
       type: "messageFetched",
       accountId,

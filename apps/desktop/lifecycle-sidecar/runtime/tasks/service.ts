@@ -29,6 +29,7 @@ import {
 import {
   MAX_TASK_INPUT_TEXT_BYTES,
   MAX_TASK_REQUEST_TTL_MS,
+  taskArtifactImages,
   taskInputText,
   taskInputImages,
   type CollaborationTaskArtifact,
@@ -154,6 +155,7 @@ export class TaskTransportRuntime {
           capabilityId: record.request.capabilityId,
           textPreview: taskInputText(record.request.input).slice(0, 240),
           imageCount: taskInputImages(record.request.input).length,
+          artifactCount: record.artifactAttachmentsReady === false ? 0 : record.artifacts?.length ?? 0,
           state: record.state,
           approval: record.approval,
           delivery: record.delivery,
@@ -185,14 +187,22 @@ export class TaskTransportRuntime {
 
   async resolveTaskImage(taskId: string, attachmentId: string): Promise<string> {
     const record = await this.get(taskId);
-    const part = taskInputImages(record.request.input).find((image) => image.attachmentId === attachmentId);
+    const inputPart = taskInputImages(record.request.input).find((image) => image.attachmentId === attachmentId);
+    const artifactPart = (record.artifacts ?? [])
+      .flatMap(taskArtifactImages)
+      .find((image) => image.attachmentId === attachmentId);
+    const part = inputPart ?? artifactPart;
     if (!part || !this.attachmentStore) {
       throw new TaskTransportRuntimeError("TASK_ATTACHMENT_NOT_FOUND", "Task image was not found.");
     }
-    if (record.direction === "outgoing") {
+    if (inputPart && record.direction === "outgoing") {
       return (await this.attachmentStore.getStagedImage(part)).path;
     }
-    const path = await this.attachmentStore.resolveImage({ taskId, purpose: "input", part });
+    const path = await this.attachmentStore.resolveImage({
+      taskId,
+      purpose: inputPart ? "input" : "artifact",
+      part
+    });
     if (!path) throw new TaskTransportRuntimeError("TASK_ATTACHMENT_NOT_FOUND", "Task image is unavailable.");
     return path;
   }
@@ -243,6 +253,12 @@ export class TaskTransportRuntime {
       throw new TaskTransportRuntimeError(
         "TASK_PEER_IMAGE_UNSUPPORTED",
         "The confirmed Teti has not advertised image Task support yet."
+      );
+    }
+    if (normalized.capabilityId === "image-editing" && protocolVersion < 3) {
+      throw new TaskTransportRuntimeError(
+        "TASK_PEER_IMAGE_RESULT_UNSUPPORTED",
+        "The confirmed Teti has not advertised image result support yet."
       );
     }
     if (!ensureCapacity(state, this.now())) {
@@ -383,12 +399,42 @@ export class TaskTransportRuntime {
     const account = await this.accountStorage.load();
     if (!account) throw new TaskTransportRuntimeError("TASK_ACCOUNT_REQUIRED", "A local Teti account is required.");
     const payload = input.envelope.payload;
-    requireInboundTaskIdentity(input.envelope, input.connection, account.id, payload);
-    if (payload.purpose !== "input") {
-      throw new TaskTransportRuntimeError("TASK_ATTACHMENT_UNSUPPORTED", "Image result attachments are not enabled yet.");
-    }
     if (Date.parse(payload.expiresAt) <= this.now().getTime()) return;
     const state = await this.store.load();
+    if (payload.purpose === "artifact") {
+      requireOutboundTaskIdentity(input.envelope, input.connection, account.id, payload);
+      const record = findTaskRecord(state, "outgoing", account.id, payload.taskId);
+      if (!record) {
+        throw new TaskTransportRuntimeError(
+          "TASK_DEPENDENCY_PENDING",
+          "Task Artifact attachment is waiting for its local Task record."
+        );
+      }
+      if (record.protocolVersion < 3 || ["failed", "canceled", "rejected"].includes(record.state)) return;
+      const artifact = record.artifacts?.find((candidate) => candidate.artifactId === payload.artifactId);
+      if (artifact) {
+        const declared = taskArtifactImages(artifact).find(
+          (part) => part.attachmentId === payload.part.attachmentId
+        );
+        if (!declared || !sameImagePart(declared, payload.part)) {
+          throw new TaskTransportRuntimeError(
+            "TASK_ATTACHMENT_CONFLICT",
+            "Task Artifact attachment does not match its immutable manifest."
+          );
+        }
+      }
+      await this.attachmentStore.ingestImage({
+        taskId: payload.taskId,
+        purpose: "artifact",
+        part: payload.part,
+        sourcePath: input.filePath
+      });
+      if (artifact) record.artifactAttachmentsReady = await this.areArtifactAttachmentsReady(record);
+      record.updatedAt = validTimestampOrNow(input.receivedAt, this.now()).toISOString();
+      await this.store.save(state);
+      return;
+    }
+    requireInboundTaskIdentity(input.envelope, input.connection, account.id, payload);
     const record = findTaskRecord(state, "incoming", payload.requesterTetiId, payload.taskId);
     if (record) {
       if (isTerminalTaskState(record.state)) return;
@@ -456,13 +502,26 @@ export class TaskTransportRuntime {
     validateTaskArtifact(payload.artifact);
     const state = await this.store.load();
     const record = findTaskRecord(state, "outgoing", account.id, payload.taskId);
-    if (!record || ["failed", "canceled", "rejected"].includes(record.state)) return;
-    const artifacts = record.artifacts ?? [];
-    if (artifacts.length === 0) {
-      record.artifacts = [...artifacts, structuredClone(payload.artifact)];
-      record.updatedAt = validTimestampOrNow(input.receivedAt, this.now()).toISOString();
-      await this.store.save(state);
+    if (!record) {
+      if (this.now().getTime() - Date.parse(payload.createdAt) > DEFAULT_TASK_REQUEST_TTL_MS) return;
+      throw new TaskTransportRuntimeError(
+        "TASK_DEPENDENCY_PENDING",
+        "Task Artifact is waiting for its local Task record."
+      );
     }
+    if (["failed", "canceled", "rejected"].includes(record.state)) return;
+    const imageParts = taskArtifactImages(payload.artifact);
+    if (imageParts.length > 0 && record.protocolVersion < 3) {
+      throw new TaskTransportRuntimeError("TASK_ARTIFACT_UNSUPPORTED", "Peer sent image output without Task v3.");
+    }
+    const existing = record.artifacts?.[0];
+    if (existing && JSON.stringify(existing) !== JSON.stringify(payload.artifact)) {
+      throw new TaskTransportRuntimeError("TASK_ARTIFACT_CONFLICT", "Task Artifact conflicts with the stored result.");
+    }
+    if (!existing) record.artifacts = [structuredClone(payload.artifact)];
+    record.artifactAttachmentsReady = await this.areArtifactAttachmentsReady(record);
+    record.updatedAt = validTimestampOrNow(input.receivedAt, this.now()).toISOString();
+    await this.store.save(state);
   }
 
   async receiveCancel(input: {
@@ -661,6 +720,20 @@ export class TaskTransportRuntime {
     return true;
   }
 
+  private async areArtifactAttachmentsReady(record: CollaborationTaskTransportRecord): Promise<boolean> {
+    const images = (record.artifacts ?? []).flatMap(taskArtifactImages);
+    if (images.length === 0) return true;
+    if (!this.attachmentStore) return false;
+    for (const part of images) {
+      if (!await this.attachmentStore.resolveImage({
+        taskId: record.request.taskId,
+        purpose: "artifact",
+        part
+      })) return false;
+    }
+    return true;
+  }
+
   private async trySendPendingForRecord(
     state: TetiTaskTransportStoreState,
     record: CollaborationTaskTransportRecord
@@ -669,6 +742,41 @@ export class TaskTransportRuntime {
     if (!connection) return;
     if (record.direction === "incoming" && record.artifactPending && record.artifacts?.length) {
       const artifact = record.artifacts.at(-1)!;
+      for (const part of taskArtifactImages(artifact)) {
+        if (record.sentArtifactAttachmentIds?.includes(part.attachmentId)) continue;
+        if (!this.attachmentStore || record.protocolVersion < 3) return;
+        const path = await this.attachmentStore.resolveImage({
+          taskId: record.request.taskId,
+          purpose: "artifact",
+          part
+        });
+        if (!path) return;
+        const createdAt = artifact.createdAt;
+        const attachmentPayload: TetiTaskAttachmentPayload = {
+          schemaVersion: 1,
+          taskId: record.request.taskId,
+          requesterTetiId: record.request.requesterTetiId,
+          targetTetiId: record.request.targetTetiId,
+          purpose: "artifact",
+          artifactId: artifact.artifactId,
+          part: structuredClone(part),
+          createdAt,
+          expiresAt: new Date(Date.parse(createdAt) + DEFAULT_TASK_REQUEST_TTL_MS).toISOString()
+        };
+        try {
+          await this.applicationManager.sendTaskAttachment(connection.requestId, attachmentPayload, {
+            path,
+            filename: taskImageFileName(part)
+          });
+          record.sentArtifactAttachmentIds = [
+            ...(record.sentArtifactAttachmentIds ?? []),
+            part.attachmentId
+          ];
+          await this.store.save(state);
+        } catch {
+          return;
+        }
+      }
       const payload: TetiTaskArtifactPayload = {
         schemaVersion: 1,
         taskId: record.request.taskId,
@@ -734,6 +842,27 @@ export class TaskTransportRuntime {
     if (!record || record.state === "canceled") return;
     const completedAt = this.now().toISOString();
     if (result?.state === "completed" && result.artifact) {
+      const resultImages = result.artifact.kind === "parts" ? result.artifact.images : [];
+      if (record.request.capabilityId === "image-editing" && resultImages.length === 0) {
+        record.state = "failed";
+        record.safeErrorCode = "TASK_IMAGE_RESULT_MISSING";
+        record.statusRevision = (record.statusRevision ?? 0) + 1;
+        record.statusPending = true;
+        record.updatedAt = completedAt;
+        await this.store.save(state);
+        await this.trySendPendingForRecord(state, record);
+        return;
+      }
+      if (resultImages.length > 0 && record.protocolVersion < 3) {
+        record.state = "failed";
+        record.safeErrorCode = "TASK_IMAGE_RESULT_UNSUPPORTED";
+        record.statusRevision = (record.statusRevision ?? 0) + 1;
+        record.statusPending = true;
+        record.updatedAt = completedAt;
+        await this.store.save(state);
+        await this.trySendPendingForRecord(state, record);
+        return;
+      }
       const artifact: CollaborationTaskArtifact = record.protocolVersion === 1
         ? {
             schemaVersion: 1,
@@ -747,12 +876,16 @@ export class TaskTransportRuntime {
             schemaVersion: 2,
             taskId,
             artifactId: randomUUID(),
-            parts: [{ kind: "text", text: result.artifact.text }],
+            parts: [
+              { kind: "text", text: result.artifact.text },
+              ...structuredClone(resultImages)
+            ],
             createdAt: completedAt
           };
       validateTaskArtifact(artifact);
       record.artifacts = [...(record.artifacts ?? []), artifact];
       record.artifactPending = true;
+      record.artifactAttachmentsReady = true;
       record.state = "completed";
       delete record.safeErrorCode;
     } else if (result?.safeErrorCode === "ADAPTER_AUTH_REQUIRED") {
@@ -926,7 +1059,7 @@ function requireMatchingRetry(
 }
 
 function taskInputForVersion(
-  version: 1 | 2,
+  version: 1 | 2 | 3,
   text: string,
   attachments: readonly TaskImagePart[]
 ): CollaborationTaskInput {
@@ -945,6 +1078,10 @@ function sameImagePart(left: TaskImagePart, right: TaskImagePart): boolean {
     && left.width === right.width
     && left.height === right.height
     && left.sha256 === right.sha256;
+}
+
+function taskImageFileName(part: TaskImagePart): string {
+  return `${part.attachmentId}${part.mimeType === "image/png" ? ".png" : ".jpg"}`;
 }
 
 function incomingRecord(

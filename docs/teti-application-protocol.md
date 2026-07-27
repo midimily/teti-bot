@@ -84,24 +84,28 @@ isolated and cannot block later valid messages in the same poll batch.
   "payload": {
     "status": "online",
     "timestamp": "2026-07-11T00:00:00.000Z",
-    "taskProtocolVersions": [1, 2]
+    "taskProtocolVersions": [1, 2, 3],
+    "passportSchemaVersions": [3]
   }
 }
 ```
 
-`taskProtocolVersions` is optional. Beta 0.1.12 advertises versions 1 and 2 for
-passive Task version negotiation; older peers safely ignore it.
+`taskProtocolVersions` is optional. Beta 0.1.14 advertises versions 1, 2 and 3
+for Task version negotiation. `passportSchemaVersions` independently advertises
+the AI Passport payload schemas the Peer can consume. Protocol capabilities
+are stored separately from the latest Passport snapshot; receiving a payload
+never silently changes the advertised capability.
 
 ### AI Passport Sync
 
 `teti.ai.status.sync` keeps one application message type and evolves its
 strictly validated payload schema:
 
-| Payload schema | Meaning | Beta 0.1.10 behavior |
+| Payload schema | Meaning | Current behavior |
 | --- | --- | --- |
-| 1 | AI Resource (`tools`) | Accepted; sent alone to a known schema-1 peer |
-| 2 | AI Resource plus coarse observed Agent | Accepted; sent with an empty Agent list to a known schema-2 peer |
-| 3 | AI Resource plus Callable Agent, Capability, and Binding | Current schema |
+| 1 | AI Resource (`tools`) | Receive-only historical compatibility |
+| 2 | AI Resource plus coarse observed Agent | Receive-only historical compatibility |
+| 3 | AI Resource plus Callable Agent, Capability, and Binding | Only outgoing schema |
 
 Schema 3 does not carry installation state, executable or profile paths,
 version strings, process state, command/arguments, Adapter identity, login
@@ -109,11 +113,14 @@ state, credentials, prompt, task input, or result content. Its Agent list is
 derived only from Adapters that passed local qualification and were registered
 in Runtime.
 
-Compatibility negotiation is passive and introduces no new handshake message.
-An unknown confirmed peer receives schema 1 and schema 3 once. After Teti
-receives a valid AI Passport payload from that peer, subsequent syncs use only
-the peer's best known schema. A known schema-3 peer therefore never receives a
-redundant legacy payload.
+Every current Presence explicitly advertises `passportSchemaVersions: [3]`.
+The sender selects the highest common version and sends exactly one payload.
+Because the current local supported set contains only schema 3, an unknown Peer
+receives schema 3 and an explicitly incompatible Peer receives no speculative
+downgrade. Schema 1 and 2 remain strictly validated on receive for queued
+historical messages, but they never influence outgoing negotiation. Once a
+valid schema-3 snapshot is established, a delayed lower-schema message cannot
+replace it.
 
 ### Chatmail Task Request
 
@@ -139,10 +146,12 @@ Task TTL is 24 hours.
 ### Chatmail Task Attachment
 
 `teti.task.attachment` binds one Chatmail file to a Task image descriptor. The
-payload contains the Task identities, purpose, bounded metadata, SHA-256 digest
-and expiry. The receiver MIME-sniffs and hashes private staged bytes before the
-request can be approved. Paths, EXIF/GPS and source filenames are not protocol
-fields.
+payload contains the Task identities, purpose (`input` or `artifact`), bounded
+metadata, SHA-256 digest and expiry. Artifact attachments also bind the
+immutable `artifactId`. The receiver MIME-sniffs, dimension-checks and hashes
+private staged bytes. Input images must verify before approval; result images
+must verify before the result is shown as ready. Paths, EXIF/GPS and source
+filenames are not protocol fields.
 
 ### Chatmail Task Status and Cancel
 
@@ -154,9 +163,17 @@ idempotent cancellation request. The requester UI continues to show
 ### Chatmail Task Artifact
 
 `teti.task.artifact` returns a strictly validated bounded Artifact after local
-execution. The qualified 0.1.12 Adapters emit text only. The v2 schema reserves
-ordered image descriptors for a later separately tested image-result transport;
-0.1.12 does not claim image Artifact delivery.
+execution. Task protocol v1 returns the historical text Artifact. Protocol v2
+supports multipart input and bounded text output. Protocol v3 additionally
+supports a schema-v2 Artifact containing ordered text and verified PNG/JPEG
+descriptors. Result image bytes travel in `teti.task.attachment` messages with
+`purpose: "artifact"`; the Artifact JSON never contains local paths or bytes.
+
+For `image-editing`, a text-only Adapter response is not a successful result.
+The receiver emits `failed` with `TASK_IMAGE_RESULT_MISSING`, sends no Artifact,
+and the requester never sees a false completed state. The sender persists every
+generated image outside the transient Adapter workspace before marking local
+execution complete.
 
 Transport receipt, local approval, execution status and Artifact are separate
 semantic events. Only the receiver's explicit `allow once` action creates a
@@ -212,3 +229,18 @@ retries with a new envelope or Chatmail message ID remain idempotent.
 
 These rules do not broaden permission scope, transmit credentials, or introduce
 a public A2A endpoint.
+
+## Beta 0.1.14 Image Artifact Rules
+
+- Task protocol v3 is selected only after Presence or a receipt explicitly
+  advertises it; image-editing is not sent to a lower-version Peer.
+- Result image attachments are durably queued and sent before their immutable
+  Artifact manifest. Completed status may still arrive first through Chatmail,
+  so the requester shows `任务已完成 · 结果接收中` until verification finishes.
+- An attachment or Artifact that arrives before its dependent local record is
+  left unacknowledged for bounded retry instead of being silently discarded.
+- A Chatmail message is marked seen only after validation and durable business
+  processing succeeds. Transient persistence failures are retried.
+- PNG/JPEG format, byte size, dimensions and SHA-256 must match the descriptor;
+  local paths, credentials, prompt transcripts and source filenames remain
+  outside the Application Envelope.

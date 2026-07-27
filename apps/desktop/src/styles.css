@@ -393,10 +393,9 @@ input {
 }
 
 .teti-task-row-copy strong {
-  overflow: hidden;
   font-size: 12px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
 }
 
 .teti-task-row-copy small {
@@ -596,6 +595,8 @@ input {
 
 .teti-task-detail-head strong {
   font-size: 13px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
 }
 
 .teti-task-detail-head small {

@@ -48,7 +48,7 @@ import {
   MockTaskClient,
   TaskController
 } from "./tasks/controller.ts";
-import { createTaskWorkspace } from "./tasks/view.ts";
+import { createTaskWorkspace, taskComposeRenderKey } from "./tasks/view.ts";
 import "./styles.css";
 
 const aiToolsButtonIconUrl = new URL("../assets/ai-tools-btn.png", import.meta.url).href;
@@ -242,13 +242,23 @@ export function renderSnapshot(
   tasks?: TaskController
 ): void {
   const viewModel = toFirstLaunchViewModel(snapshot);
-  const taskOpen = viewModel.panel === "collapsed" && tasks?.snapshot.open;
+  const taskSnapshot = tasks?.snapshot;
+  const taskOpen = viewModel.panel === "collapsed" && taskSnapshot?.open;
   const peerPanelOpen = viewModel.panel === "collapsed" && connections?.snapshot.open;
   root.className = `teti-shell teti-shell--${taskOpen || peerPanelOpen ? "expanded" : viewModel.panel}`;
+  if (taskOpen && taskSnapshot?.screen === "compose") {
+    const active = document.activeElement;
+    const existing = root.querySelector<HTMLElement>(".teti-task-workspace[data-task-compose-key]");
+    if (active instanceof HTMLTextAreaElement
+      && active.classList.contains("teti-task-prompt")
+      && existing?.dataset.taskComposeKey === taskComposeRenderKey(taskSnapshot)) {
+      return;
+    }
+  }
   root.replaceChildren(
     taskOpen
       ? createTaskWorkspace(
-          tasks,
+          tasks!,
           passport?.snapshot.passport.connections ?? [],
           passport?.snapshot.passport.localPassport
         )

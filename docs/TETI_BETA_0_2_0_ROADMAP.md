@@ -2,7 +2,7 @@
 
 Status: Accepted plan
 Previous product baseline: Beta 0.1.1
-Current implemented milestone: Beta 0.1.13
+Current implemented milestone: Beta 0.1.14
 Next planned release: Beta 0.2.0
 
 Product sequencing decision: 0.1.6, 0.1.7, and 0.1.8 are deferred and were not
@@ -46,6 +46,7 @@ exists.
 | 0.1.11 | A2A-aligned Task objects over Chatmail — implemented | Versioning, identity, TTL, idempotency, replay, durable outbox, and offline receipt pass; no execution |
 | 0.1.12 | Two-Mac request, allow-once, execution, status, and Artifact UI — implemented | Text plus bounded image input; explicit approval; isolated Adapter execution; bounded text Artifact |
 | 0.1.13 | Security hardening and release candidate — implemented | Restart, duplicate, reordering, crash, timeout, expiry, malicious-envelope isolation, and old-peer tests pass |
+| 0.1.14 | Reliable image-editing result — implemented | Codex produces a real image; Task v3 transfers verified image Artifacts; text-only “success” fails closed |
 | 0.2.0 | Beta collaboration release | Complete two-Mac demo and compatibility matrix pass |
 
 Every completed milestone increments the application patch version. A
@@ -87,7 +88,7 @@ Included:
 - per-task allow-once or reject;
 - submitted, working, input-required, auth-required, completed, failed,
   canceled, and rejected states;
-- bounded text Artifacts;
+- bounded text Artifacts and verified PNG/JPEG Artifacts for `image-editing`;
 - Chatmail offline delivery within Task TTL;
 - local idempotency and replay protection.
 
@@ -96,7 +97,7 @@ Deferred:
 - automatic file or repository access;
 - user workspace mutation;
 - remote command, cwd, environment, URL, model, or tool selection;
-- binary or file-reference Artifacts;
+- arbitrary binary/file Artifacts other than the bounded Task image path;
 - reusable or unattended execution grants;
 - launchd availability after Teti Desktop exits;
 - public A2A HTTP/gRPC/JSON-RPC endpoints and Agent Cards;
@@ -111,10 +112,11 @@ Deferred:
 - Resource Adapter qualification may proceed independently, but only official,
   stable, privacy-safe entitlement fields enter Passport.
 - Schema-v1 Resource and schema-v2 observed-Agent payloads remain accepted.
-  Beta 0.1.10 sends an unknown peer one schema-v1 compatibility payload plus
-  one schema-v3 Callable Passport. Receipt of schema 1, 2, or 3 passively
-  records the peer's best known capability; later syncs send exactly that one
-  schema. Coarse observation is never projected into a new outgoing Passport.
+  Current Beta sends only one schema-v3 Callable Passport. Presence explicitly
+  advertises `passportSchemaVersions: [3]`; the independently persisted Peer
+  capability, rather than the last received Passport payload, is the future
+  negotiation input. Coarse observation is never projected into a new outgoing
+  Passport, and delayed schema 1/2 messages cannot downgrade schema 3.
 - Beta 0.1.11 reuses Application Envelope v1 for strict `teti.task.request` and
   `teti.task.receipt` objects. Task version support is advertised passively by
   presence and receipt. Unknown peers receive compatibility-floor v1 so an
@@ -124,5 +126,8 @@ Deferred:
   input plus typed attachment, status, cancel and Artifact objects. Image bytes
   use the official Chatmail file field and are verified before approval. The
   receiver must issue one local single-use Execution Grant; receipt alone never
-  starts an Agent. Current Codex and CodeBuddy Adapters return bounded text
-  Artifacts. Image result Artifacts remain deferred.
+  starts an Agent.
+- Beta 0.1.14 adds Task protocol v3 for reliable image results. Codex image
+  editing uses the official local app-server image-generation item, persists
+  the generated file before workspace cleanup, sends verified image bytes
+  before the Artifact manifest, and fails closed if no image was produced.

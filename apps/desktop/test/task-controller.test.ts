@@ -10,6 +10,7 @@ import {
   TaskController,
   type TaskClient
 } from "../src/tasks/controller.ts";
+import { formatTaskTimestamp, taskPeerHeading } from "../src/tasks/view.ts";
 
 test("Task draft survives focus collapse and sends only staged descriptors", async () => {
   const client = new RecordingTaskClient();
@@ -38,6 +39,17 @@ test("Task draft survives focus collapse and sends only staged descriptors", asy
   assert.equal(JSON.stringify(client.sent[0]).includes("/Users/test/private/source.png"), false);
   assert.equal(controller.snapshot.screen, "detail");
   controller.dispose();
+});
+
+test("Task headings prefer the peer nickname and include an exact local timestamp", () => {
+  const timestamp = "2026-07-27T12:34:56+08:00";
+  assert.equal(formatTaskTimestamp(timestamp), "2026年07月27日 12:34:56");
+  assert.equal(taskPeerHeading(
+    "outgoing",
+    "teti_air072700",
+    timestamp,
+    [{ identity: { tetiId: "teti_air072700", displayName: "Air0727" } }] as never
+  ), "发送给 Air0727 的协作请求【2026年07月27日 12:34:56】");
 });
 
 test("Task controller coalesces refresh requests into one poll timer", async () => {
@@ -77,6 +89,36 @@ test("Task controller coalesces refresh requests into one poll timer", async () 
   assert.equal(scheduled.length, 1);
   controller.dispose();
   assert.equal(scheduled.length, 0);
+});
+
+test("periodic Runtime refresh does not rebuild the open Task composer", async () => {
+  const scheduled: Array<() => void> = [];
+  let renders = 0;
+  const controller = new TaskController({
+    client: new RecordingTaskClient(),
+    tauri: new RecordingTauriInvoker(),
+    notchWindow: { setMode: async () => undefined } as never,
+    onChange: () => { renders += 1; },
+    schedule: (callback) => {
+      scheduled.push(callback);
+      return callback;
+    },
+    cancel: () => undefined
+  });
+
+  controller.openCompose("connection-1", "code-analysis");
+  renders = 0;
+  controller.start();
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(renders, 0);
+  assert.equal(scheduled.length, 1);
+
+  scheduled.shift()?.();
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(renders, 0);
+  controller.dispose();
 });
 
 test("Task controller can leave the task surface without rendering an idle frame", async () => {

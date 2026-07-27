@@ -2,7 +2,8 @@ import {
   MAX_TASK_ARTIFACT_TEXT_BYTES,
   MAX_TASK_IMAGE_PARTS,
   MAX_TASK_INPUT_TEXT_BYTES,
-  type TaskImageMimeType
+  type TaskImageMimeType,
+  type TaskImagePart
 } from "../task/types.ts";
 import type { AgentTaskContentMode } from "./types.ts";
 
@@ -38,6 +39,12 @@ export type CallableAdapterSafeErrorCode =
   | "ADAPTER_OUTPUT_INVALID"
   | "ADAPTER_AUTH_REQUIRED"
   | "ADAPTER_UPSTREAM_FAILED"
+  | "ADAPTER_IMAGE_RESULT_MISSING"
+  | "ADAPTER_IMAGE_RESULT_NOT_READY"
+  | "ADAPTER_IMAGE_RESULT_INVALID"
+  | "ADAPTER_IMAGE_SERVER_EXITED"
+  | "ADAPTER_IMAGE_GENERATION_TIMEOUT"
+  | "ADAPTER_IMAGE_PROTOCOL_LIMIT"
   | "ADAPTER_RUNTIME_SHUTDOWN"
   | "ADAPTER_INTERNAL_ERROR";
 
@@ -104,10 +111,23 @@ export interface CallableAdapter {
     context: Readonly<CallableAdapterLaunchContext>
   ): CallableAdapterLaunchSpec | Promise<CallableAdapterLaunchSpec>;
   /** Convert bounded process stdout into the only text eligible for Artifact. */
-  decodeArtifact?(stdout: string): string;
+  decodeArtifact?(
+    stdout: string,
+    context: Readonly<CallableAdapterLaunchContext>
+  ): string | CallableAdapterDecodedArtifact;
   /** Classify a non-zero exit without exposing process output to callers. */
   classifyFailure?(stdout: string): CallableAdapterSafeErrorCode;
 }
+
+export interface CallableAdapterDecodedArtifact {
+  kind: "parts";
+  text: string;
+  images: Array<{ path: string }>;
+}
+
+export type CallableAdapterTaskArtifact =
+  | { kind: "text"; text: string }
+  | { kind: "parts"; text: string; images: TaskImagePart[] };
 
 export interface CallableAdapterTaskSnapshot {
   schemaVersion: 2;
@@ -120,10 +140,7 @@ export interface CallableAdapterTaskSnapshot {
   updatedAt: string;
   startedAt?: string;
   completedAt?: string;
-  artifact?: {
-    kind: "text";
-    text: string;
-  };
+  artifact?: CallableAdapterTaskArtifact;
   safeErrorCode?: CallableAdapterSafeErrorCode;
 }
 

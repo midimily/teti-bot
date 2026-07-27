@@ -17,6 +17,7 @@ import {
   validateTaskReceiptPayload,
   validateTaskStatusPayload
 } from "../task/transport-validation.ts";
+import { validatePassportSchemaVersions } from "../ai-status/negotiation.ts";
 
 export class TetiApplicationProtocolError extends Error {}
 
@@ -98,7 +99,11 @@ function validatePayload(type: TetiApplicationMessageType, payload: Record<strin
   }
 
   if (type === "teti.presence") {
-    rejectUnknownKeys(payload, ["status", "timestamp", "taskProtocolVersions"], "Presence payload");
+    rejectUnknownKeys(
+      payload,
+      ["status", "timestamp", "taskProtocolVersions", "passportSchemaVersions"],
+      "Presence payload"
+    );
     requireBoundedString(payload.status, "status", 64);
     requireTimestamp(payload.timestamp, "timestamp");
     if (payload.taskProtocolVersions !== undefined) {
@@ -106,6 +111,13 @@ function validatePayload(type: TetiApplicationMessageType, payload: Record<strin
         validateTaskProtocolVersions(payload.taskProtocolVersions);
       } catch {
         throw new TetiApplicationProtocolError("Presence task protocol versions are invalid.");
+      }
+    }
+    if (payload.passportSchemaVersions !== undefined) {
+      try {
+        validatePassportSchemaVersions(payload.passportSchemaVersions);
+      } catch {
+        throw new TetiApplicationProtocolError("Presence Passport schema versions are invalid.");
       }
     }
     return;

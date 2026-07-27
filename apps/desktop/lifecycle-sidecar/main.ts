@@ -1,6 +1,8 @@
 import { createInterface } from "node:readline";
 import { stdin, stdout, stderr } from "node:process";
 import { join } from "node:path";
+import { dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   LIFECYCLE_PROTOCOL_VERSION,
   type LifecycleResponse
@@ -35,7 +37,9 @@ import { createMacAgentObserverSystem } from "./runtime/agents/system.ts";
 import { CallableAdapterKernel } from "./runtime/callable/kernel.ts";
 import { CallableQualificationSupervisor } from "./runtime/callable/qualification-supervisor.ts";
 import { qualifyCodexCallableAdapter } from "../../../integrations/agents/codex/adapter.ts";
+import { CodexImageCallableAdapter } from "../../../integrations/agents/codex/image-adapter.ts";
 import { qualifyCodeBuddyCallableAdapter } from "../../../integrations/agents/codebuddy/qualification.ts";
+import { FileTaskAttachmentStore } from "./runtime/tasks/attachments.ts";
 
 const PROCESS_SHUTDOWN_HARD_LIMIT_MS = 4_000;
 const inFlightRequestIds = new Set<string>();
@@ -80,7 +84,9 @@ async function startSidecar(): Promise<void> {
     }),
     system: createMacAgentObserverSystem()
   });
-  const callableAdapterKernel = new CallableAdapterKernel();
+  const taskAttachmentStore = new FileTaskAttachmentStore(join(profile.root, "task-attachments"));
+  const callableAdapterKernel = new CallableAdapterKernel({ artifactImageStore: taskAttachmentStore });
+  const codexImageRunnerPath = join(dirname(fileURLToPath(import.meta.url)), "codex-image-runner.mjs");
   let pathOverridesPromise: Promise<Record<string, string>> | undefined;
   const loadPathOverrides = () => {
     pathOverridesPromise ??= agentConfiguration.getPathOverrides().catch(() => ({}));
@@ -104,6 +110,15 @@ async function startSidecar(): Promise<void> {
         if (qualification.adapter) {
           callableAdapterKernel.registerAdapter(
             qualification.adapter,
+            qualification.readiness.checkedAt
+          );
+          callableAdapterKernel.registerAdapter(
+            new CodexImageCallableAdapter({
+              nodeEntrypoint: process.execPath,
+              runnerPath: codexImageRunnerPath,
+              codexEntrypoint: qualification.adapter.entrypoint,
+              ...(process.env.CODEX_HOME ? { codexHome: process.env.CODEX_HOME } : {})
+            }),
             qualification.readiness.checkedAt
           );
         }
@@ -145,7 +160,8 @@ async function startSidecar(): Promise<void> {
       heartbeatDiscovery: defaultLifecycleSidecarDependencies.heartbeatDiscovery,
       getPeerConnectionService: () => getDefaultPeerConnectionService({
         getLocalCallableAgents: () => callableAdapterKernel.getCallableAgents(),
-        taskExecutor: callableAdapterKernel
+        taskExecutor: callableAdapterKernel,
+        taskAttachmentStore
       }),
       passportSharingStore: await getDefaultPassportSharingStore(),
       codexUsageService,
