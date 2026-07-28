@@ -23,7 +23,7 @@ import { emptyAgentManagementSnapshot } from "../../../../core/observation/manag
 
 export type ResourceTone = "free" | "plus" | "pro" | "unknown" | "unavailable";
 export type ResourceIcon = "codex" | "generic";
-export type PeerReachability = "reachable" | "unreachable";
+export type PeerReachability = "reachable" | "checking" | "unreachable";
 
 export interface ResourceViewModel {
   providerName: string;
@@ -107,8 +107,10 @@ export interface ConnectionCardViewModel {
   state: PassportConnectionSnapshot["connectionState"];
   displayName: string;
   address: string;
+  compatibility: PassportConnectionSnapshot["compatibility"];
+  compatibilityLabel: "兼容" | "需要升级" | "待确认版本";
   reachability: PeerReachability;
-  reachabilityLabel: "在线" | "离线";
+  reachabilityLabel: "在线" | "状态检测中" | "离线";
   passport: RemotePassportViewModel;
 }
 
@@ -118,7 +120,8 @@ export interface PassportViewModel {
   connections: ConnectionCardViewModel[];
 }
 
-const REMOTE_TETI_HEARTBEAT_FRESH_MS = 15_000;
+const REMOTE_TETI_HEARTBEAT_FRESH_MS = 20_000;
+const REMOTE_TETI_HEARTBEAT_OFFLINE_MS = 60_000;
 
 export function toPassportViewModel(
   snapshot: PassportControllerSnapshot,
@@ -291,18 +294,44 @@ export function toConnectionCardViewModel(
   connection: PassportConnectionSnapshot,
   now = new Date()
 ): ConnectionCardViewModel {
-  const reachable = connection.connectionState === "Confirmed"
-    && Boolean(connection.lastSeen)
-    && now.getTime() - Date.parse(connection.lastSeen!) < REMOTE_TETI_HEARTBEAT_FRESH_MS;
+  const lastSeenAt = validPastOrPresentTimestamp(connection.lastSeen, now);
+  const confirmationBaseline = validPastOrPresentTimestamp(
+    connection.confirmedAt ?? connection.updatedAt,
+    now
+  );
+  const heartbeatAge = lastSeenAt === null ? NaN : now.getTime() - lastSeenAt;
+  const confirmationAge = confirmationBaseline === null ? NaN : now.getTime() - confirmationBaseline;
+  const reachability: PeerReachability = connection.connectionState !== "Confirmed"
+    ? "unreachable"
+    : Number.isFinite(heartbeatAge) && heartbeatAge < REMOTE_TETI_HEARTBEAT_FRESH_MS
+      ? "reachable"
+      : (Number.isFinite(heartbeatAge) && heartbeatAge < REMOTE_TETI_HEARTBEAT_OFFLINE_MS)
+        || (!connection.lastSeen
+          && Number.isFinite(confirmationAge)
+          && confirmationAge < REMOTE_TETI_HEARTBEAT_OFFLINE_MS)
+        ? "checking"
+        : "unreachable";
   return {
     requestId: connection.requestId,
     state: connection.connectionState,
     displayName: connection.identity.displayName || connection.identity.tetiId,
     address: connection.identity.address,
-    reachability: reachable ? "reachable" : "unreachable",
-    reachabilityLabel: reachable ? "在线" : "离线",
+    compatibility: connection.compatibility,
+    compatibilityLabel: connection.compatibility === "compatible"
+      ? "兼容"
+      : connection.compatibility === "upgrade_required"
+        ? "需要升级"
+        : "待确认版本",
+    reachability,
+    reachabilityLabel: reachability === "reachable" ? "在线" : reachability === "checking" ? "状态检测中" : "离线",
     passport: toRemotePassportViewModel(connection.passport)
   };
+}
+
+function validPastOrPresentTimestamp(value: string | null | undefined, now: Date): number | null {
+  if (!value) return null;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) && timestamp <= now.getTime() ? timestamp : null;
 }
 
 export function toResourceViewModel(resource: AiResource): ResourceViewModel {

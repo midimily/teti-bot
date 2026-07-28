@@ -1,133 +1,180 @@
-# Teti Beta 0.2.0 Roadmap
+# Teti Beta 0.2 Roadmap
 
-Status: Accepted plan
-Previous product baseline: Beta 0.1.1
-Current implemented milestone: Beta 0.1.14
-Next planned release: Beta 0.2.0
+Status: 0.2.1 Host/Child Agent Core implemented; automated release verification complete; physical two-Mac sign-off pending
 
-Product sequencing decision: 0.1.6, 0.1.7, and 0.1.8 are deferred and were not
-implemented. The application version intentionally jumps from 0.1.5 to 0.1.9;
-the skipped version numbers must not be read as completed Adapter milestones.
+Current application version: `0.2.1`
 
-## Product target
+## Release history clarification
 
-Teti is a decentralized personal AI Agent capability collaboration and
-pass-through node.
+The public product line did not land Beta 0.1.6, 0.1.7, or 0.1.8. Work once
+described as 0.1.9–0.1.12 was folded into the Beta 0.1.13 product baseline rather
+than shipped as separate product releases. The effective sequence for this
+roadmap is therefore 0.1.5 → 0.1.13 → 0.1.14 → 0.1.15 → 0.2.0 → 0.2.1.
 
-- Settings shows the broad local Agent observation catalog.
-- Adapter readiness proves whether an Agent can actually accept a controlled
-  task and return a result.
-- Only callable Agents and their curated Capabilities enter the future AI
-  Passport.
-- Confirmed Tetis discover each other's callable Passport metadata.
-- Collaboration requests travel asynchronously through Chatmail.
-- The receiving user grants or rejects each task locally.
-- Teti maps task lifecycle and results to A2A concepts without creating another
-  Agent protocol.
+## 0.2 product direction
 
-Teti 0.2.0 does not expose a public A2A endpoint or Agent Card and must not claim
-A2A protocol compliance. Chatmail remains a private asynchronous binding over
-the existing Teti Application Envelope until a separately reviewed A2A bridge
-exists.
+Teti will converge on a Runtime-owned Agent collaboration kernel:
 
-## Milestones
+- Teti remains the collaboration, trust, scheduling, consent, and audit plane.
+- Codex and CodeBuddy continue through controlled local CLI Connectors backed
+  by `ProcessTransport`.
+- Osaurus is the first local-model Runtime target in the 0.2 line.
+- Provider-specific units implement one internal Agent Connector contract instead
+  of leaking CLI, HTTP, or model-specific concepts into collaboration Tasks.
+- Workspace, durable task state, memory references, Skill references, and
+  asynchronous continuation are introduced as Teti-owned contracts before Teti
+  grows into a fuller primary Agent.
+- Additional open-source Agents are planned for Beta 0.3, after the internal
+  contract and Osaurus path are proven.
 
-| Version | Outcome | Release gate |
-| --- | --- | --- |
-| 0.1.2 | Version and Observation/Callability/Passport/Task/Grant boundary freeze | No production behavior or network change; full build green |
-| 0.1.3 | Settings Agent management and five-vendor coarse discovery | Initial scan is atomic; Agent failures remain isolated |
-| 0.1.4 | Callable Adapter kernel and fake-Agent harness | Timeout, cancel, process cleanup, output bounds, and safe errors pass |
-| 0.1.5 | Codex controlled Adapter | Official local entrypoint, local auth reuse, text-only task, bounded result |
-| 0.1.6 | Claude Code controlled Adapter — deferred, not implemented | Official surface qualification and the same execution safety gates |
-| 0.1.7 | Gemini CLI controlled Adapter — deferred, not implemented | Official headless qualification and the same execution safety gates |
-| 0.1.8 | Cursor controlled Adapter — deferred, not implemented | Official surface must pass stability and no-write validation |
-| 0.1.9 | CodeBuddy controlled Adapter — implemented | Official Headless CLI passes login, no-tools, JSONL, cancel, timeout, concurrency, and Artifact gates; safe fallback remains detected-only |
-| 0.1.10 | Callable Passport and cross-version projection — implemented | Raw Observation is local; only Runtime-qualified Agents and capabilities enter schema 3; known current peers receive no redundant legacy payload |
-| 0.1.11 | A2A-aligned Task objects over Chatmail — implemented | Versioning, identity, TTL, idempotency, replay, durable outbox, and offline receipt pass; no execution |
-| 0.1.12 | Two-Mac request, allow-once, execution, status, and Artifact UI — implemented | Text plus bounded image input; explicit approval; isolated Adapter execution; bounded text Artifact |
-| 0.1.13 | Security hardening and release candidate — implemented | Restart, duplicate, reordering, crash, timeout, expiry, malicious-envelope isolation, and old-peer tests pass |
-| 0.1.14 | Reliable image-editing result — implemented | Codex produces a real image; Task v3 transfers verified image Artifacts; text-only “success” fails closed |
-| 0.2.0 | Beta collaboration release | Complete two-Mac demo and compatibility matrix pass |
+## 0.2.0 — Breaking Collaboration Baseline
 
-Every completed milestone increments the application patch version. A
-milestone does not increment its schema or protocol versions unless that
-milestone actually changes the corresponding contract.
+Goal: close the 0.1 line and establish an intentionally incompatible baseline.
 
-The 0.1.9 qualification found official CodeBuddy Code Headless, HTTP, and ACP
-surfaces, but those belong to a separately installed `codebuddy` / `cbc` CLI.
-The CodeBuddy CN desktop bundle and its `buddycn chat` editor launcher are not a
-substitute. The audited Mac now has the standalone CLI installed and logged in;
-0.1.9 selects only Headless process execution and leaves HTTP/ACP disabled.
-Machines without the CLI or login remain fail-closed and do not register the
-Adapter.
+Implemented:
 
-## Provider priority and qualification
+- application version `0.2.0`, Application Envelope v2, collaboration epoch 2;
+- Task transport accepts and advertises only Task protocol v4;
+- network Passport accepts and advertises only Callable Passport schema 3;
+- no speculative Task or Passport downgrade for an unknown Peer;
+- 0.1 application traffic is never dispatched to Task, Passport, or other
+  application handlers;
+- bounded legacy-envelope header inspection classifies a confirmed 0.1 Peer as
+  reachable but `需要升级`, independently from Online/Checking/Offline;
+- Profile/Store v2 uses `~/.teti/store-v2` and a root `profile.json` manifest;
+- identity, Chatmail account/contact data, confirmed connections, sharing
+  settings, and Agent detector preferences are copied once into Store v2;
+- old Tasks, attachments, messages, Peer capability state, and connections are
+  copied to read-only `~/.teti/legacy-0.1` and never enter executable state;
+- active v2 Task, message-replay, and Peer-protocol stores start empty;
+- per-image local diagnostics record expected, sent, stored, acknowledged,
+  expired, and failed states without exposing local paths;
+- incomplete image sets cannot be approved, executed, or reported complete.
 
-Codex, Claude Code, Gemini CLI, Cursor, and CodeBuddy are the first Adapter
-qualification set. Priority does not allow Teti to fabricate callability.
+Compatibility policy:
 
-Every Agent shown as callable must prove:
+- 0.2 does not support a 0.1 wire-compatibility mode.
+- 0.2 never sends Application Envelope v1, Task v1–v3, or Passport v1/v2.
+- A confirmed 0.1 Peer is shown as `需要升级`; it is not misreported as offline.
+- Connection handshakes remain a separate trust-layer contract so identity and
+  confirmed relationships can migrate, but application collaboration begins
+  only after both Peers prove epoch 2.
 
-1. a supported official invocation surface;
-2. local authentication without exporting credentials to Teti peers;
-3. non-interactive task submission;
-4. observable completion or failure;
-5. timeout, cancellation, and child-process cleanup;
-6. bounded input, output, concurrency, and diagnostic data;
-7. no remote control over local path, executable, arguments, or environment;
-8. a stable mapping to curated Passport Capabilities.
+Known-defect waiver:
 
-An Agent that fails any gate remains visible in Settings as detected but does
-not enter the callable Passport.
+- `KD-0.1.15-MULTI-IMAGE-DELIVERY`: on physical dual-Mac collaboration, Tasks
+  with 2 or 4 images have historically had a high incomplete-delivery rate;
+  one-image delivery is usually successful.
+- 0.2.0 temporarily waives the physical completion-rate gate only. It does not
+  waive integrity, isolation, idempotency, authorization, or execution gates.
+- Missing images must remain visible as X/Y, remain non-actionable, and retry
+  only their own attachment IDs. Hash mismatch, cross-Task attachment binding,
+  duplicate false counts, incomplete execution, and false completion are
+  release blockers.
+- The completion-rate defect is re-tested and reviewed after both Macs have
+  completed one 0.2 upgrade cycle.
 
-## Beta 0.2.0 collaboration boundary
+Release gates:
 
-Included:
+1. 0.1.15 single-image result actions, picker stability, composer eligibility,
+   and reachability regressions pass; the multi-image rate is handled only by
+   the explicit waiver above.
+2. Two 0.2.0 Macs establish epoch-2 Presence and collaborate normally.
+3. A confirmed 0.1 Peer remains reachable, is labeled `需要升级`, and receives
+   no Task or Passport from 0.2.
+4. 0.1 Application Envelopes and historical Passport/Task contracts are
+   rejected before business dispatch.
+5. Migrated 0.1 Tasks cannot be executed or imported into active Task state,
+   including after restart or repeated migration.
+6. Codex and CodeBuddy Adapter qualification, timeout, cancellation, bounded
+   output, login recovery, and Artifact tests remain green.
+7. App and DMG build, signing verification, install launch, and two-Mac physical
+   acceptance complete.
 
-- bounded text and explicitly pasted code snippets;
-- per-task allow-once or reject;
-- submitted, working, input-required, auth-required, completed, failed,
-  canceled, and rejected states;
-- bounded text Artifacts and verified PNG/JPEG Artifacts for `image-editing`;
-- Chatmail offline delivery within Task TTL;
-- local idempotency and replay protection.
+## 0.2.1 — Host/Child Agent Core
 
-Deferred:
+Goal: freeze one local Agent integration framework and migrate the already
+working Codex and CodeBuddy paths without adding a provider.
 
-- automatic file or repository access;
-- user workspace mutation;
-- remote command, cwd, environment, URL, model, or tool selection;
-- arbitrary binary/file Artifacts other than the bounded Task image path;
-- reusable or unattended execution grants;
-- launchd availability after Teti Desktop exits;
-- public A2A HTTP/gRPC/JSON-RPC endpoints and Agent Cards;
-- MCP platform work, SDK, marketplace, and arbitrary third-party Adapters.
+Implemented:
 
-## Previous Phase 2-5 mapping
+- `TetiHostAgent` owns local authorization, execution state, isolated task
+  workspaces, Transport selection, cancellation, timeout, output limits,
+  Artifact projection, and cleanup;
+- `LocalChildAgent` is a Host-owned aggregate of one local Agent and its
+  registered Connectors and resource bindings;
+- `AgentConnector` contains only provider-specific invocation and output
+  decoding; its context excludes task text, Execution Authority, Passport,
+  Chatmail, and peer identity;
+- `ExecutionTransport` is selected by the Host from a local-only execution
+  specification;
+- `ExecutionAuthority` is short-lived, exact-input-bound, and single-use. The
+  Host validates and consumes it before any Connector or Transport starts;
+- `AgentResourceBinding` binds Child Agent, Connector, Transport kind, and
+  curated capabilities without entering Task or Passport;
+- `ProcessTransport` retains detached process-group termination, TERM/KILL
+  escalation, minimal environment, stdin delivery, timeout, and bounded output;
+- `FakeTransport` provides deterministic in-memory contract tests;
+- `LoopbackHttpTransport` is reserved but explicitly disabled and performs no
+  HTTP in 0.2.1;
+- Codex text and Codex image execution are migrated to Codex Connectors;
+- CodeBuddy text execution is migrated to a CodeBuddy Connector;
+- no new vendor is qualified or advertised.
 
-- The planned UDS Agent Status API remains an optional observation ingress. It
-  is not a prerequisite for Runtime-owned Adapter invocation.
-- Claude Hooks remain an opt-in observation mechanism and are not the primary
-  execution interface.
-- Resource Adapter qualification may proceed independently, but only official,
-  stable, privacy-safe entitlement fields enter Passport.
-- Schema-v1 Resource and schema-v2 observed-Agent payloads remain accepted.
-  Current Beta sends only one schema-v3 Callable Passport. Presence explicitly
-  advertises `passportSchemaVersions: [3]`; the independently persisted Peer
-  capability, rather than the last received Passport payload, is the future
-  negotiation input. Coarse observation is never projected into a new outgoing
-  Passport, and delayed schema 1/2 messages cannot downgrade schema 3.
-- Beta 0.1.11 reuses Application Envelope v1 for strict `teti.task.request` and
-  `teti.task.receipt` objects. Task version support is advertised passively by
-  presence and receipt. Unknown peers receive compatibility-floor v1 so an
-  offline current peer does not require a synchronous negotiation round trip;
-  known incompatible peers fail before send.
-- Beta 0.1.12 keeps Application Envelope v1 and adds Task protocol v2 multipart
-  input plus typed attachment, status, cancel and Artifact objects. Image bytes
-  use the official Chatmail file field and are verified before approval. The
-  receiver must issue one local single-use Execution Grant; receipt alone never
-  starts an Agent.
-- Beta 0.1.14 adds Task protocol v3 for reliable image results. Codex image
-  editing uses the official local app-server image-generation item, persists
-  the generated file before workspace cleanup, sends verified image bytes
-  before the Artifact manifest, and fails closed if no image was produced.
+Release gates:
+
+1. Codex text and image pipelines complete through Connector +
+   `ProcessTransport` with no Artifact regression.
+2. CodeBuddy text completes through Connector + `ProcessTransport` with no
+   qualification or output regression.
+3. Cancellation, timeout, detached process-group cleanup, shutdown cleanup,
+   combined stdout/stderr limits, and safe error projection remain green.
+4. Connector source imports no Passport, Chatmail, or connection module, and
+   Connector context carries no peer identity or authorization object.
+5. Task and callable Passport projections contain no Transport kind,
+   executable, arguments, environment, or workspace path.
+6. Reused, expired, target-mismatched, or input-mismatched
+   `ExecutionAuthority` is rejected before execution.
+7. The accepted multi-image physical-delivery defect remains visible and
+   fail-closed; it is not silently reclassified as fixed by this refactor.
+
+## Planned follow-on versions
+
+### 0.2.2 — Workspace and durable collaboration identity
+
+- introduce a Teti-owned Workspace ID and bounded Workspace manifest;
+- bind Task, Artifact, memory reference, and asynchronous continuation to the
+  Workspace without allowing a remote Peer to choose a local filesystem path;
+- define cleanup, retention, ownership, and migration rules.
+
+### 0.2.3 — Osaurus local Runtime Adapter
+
+- integrate Osaurus as a native Agent Runtime rather than treating a chat
+  completion endpoint as Teti's architectural center;
+- prefer the Osaurus Agent/CLI execution route where it preserves Agent
+  lifecycle, tool policy, cancellation, and progress semantics;
+- use `/v1/chat/completions` only as a bounded model-inference surface beneath
+  the Connector when a task genuinely needs model completion rather than Agent
+  behavior.
+
+### 0.2.4 — Memory and Skill foundations
+
+- add explicit, permissioned memory references scoped to Workspace and Task;
+- add Skill identity/version/reference contracts without transporting arbitrary
+  executable Skill content across Peers;
+- define provenance, expiration, revocation, and disclosure boundaries.
+
+### 0.2.5 — Long-running asynchronous collaboration
+
+- durable checkpoints, retry policy, pause/resume, cancellation propagation,
+  progress snapshots, and crash recovery;
+- bounded concurrency and scheduling owned by Teti Runtime;
+- no unattended reusable execution grant by default.
+
+### 0.2.6 — 0.2 stabilization
+
+- complete the post-upgrade multi-image review;
+- run the full compatibility, migration, restart, security, and physical Mac
+  matrix;
+- freeze the internal Connector, Workspace, Task, memory-reference, and Skill-
+  reference contracts for the Beta 0.3 open-source Agent expansion.

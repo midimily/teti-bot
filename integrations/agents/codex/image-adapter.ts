@@ -1,21 +1,23 @@
 import type {
-  CallableAdapter,
   CallableAdapterDecodedArtifact,
-  CallableAdapterLaunchContext,
   CallableAdapterSafeErrorCode
 } from "../../../core/callability/adapter.ts";
+import type {
+  AgentConnector,
+  AgentConnectorContext
+} from "../../../core/callability/agent-core.ts";
 
-export const CODEX_IMAGE_CALLABLE_ADAPTER = {
-  adapterId: "openai.codex.imagegen",
-  agentId: "codex",
-  adapterRevision: 1,
+export const CODEX_IMAGE_CONNECTOR = {
+  connectorId: "openai.codex.imagegen",
+  childAgentId: "codex",
+  connectorRevision: 2,
   capabilityIds: ["image-editing"],
   timeoutMs: 10 * 60 * 1_000,
   cancelGraceMs: 1_000,
   maxOutputBytes: 64 * 1024
 } as const;
 
-export interface CodexImageCallableAdapterOptions {
+export interface CodexImageConnectorOptions {
   nodeEntrypoint: string;
   runnerPath: string;
   codexEntrypoint: string;
@@ -28,34 +30,44 @@ interface CodexImageRunnerManifest {
   images: Array<{ path: string }>;
 }
 
-export class CodexImageCallableAdapter implements CallableAdapter {
+export class CodexImageConnector implements AgentConnector {
   readonly descriptor = {
-    contractVersion: 2 as const,
-    adapterId: CODEX_IMAGE_CALLABLE_ADAPTER.adapterId,
-    adapterRevision: CODEX_IMAGE_CALLABLE_ADAPTER.adapterRevision,
-    agentId: CODEX_IMAGE_CALLABLE_ADAPTER.agentId,
-    capabilityIds: [...CODEX_IMAGE_CALLABLE_ADAPTER.capabilityIds],
+    contractVersion: 1 as const,
+    connectorId: CODEX_IMAGE_CONNECTOR.connectorId,
+    connectorRevision: CODEX_IMAGE_CONNECTOR.connectorRevision,
+    childAgentId: CODEX_IMAGE_CONNECTOR.childAgentId,
+    capabilityIds: [...CODEX_IMAGE_CONNECTOR.capabilityIds],
     inputModes: ["text", "image"] as const,
     outputModes: ["text", "image"] as const,
-    timeoutMs: CODEX_IMAGE_CALLABLE_ADAPTER.timeoutMs,
-    cancelGraceMs: CODEX_IMAGE_CALLABLE_ADAPTER.cancelGraceMs,
-    maxOutputBytes: CODEX_IMAGE_CALLABLE_ADAPTER.maxOutputBytes
+    transportKind: "process" as const,
+    timeoutMs: CODEX_IMAGE_CONNECTOR.timeoutMs,
+    cancelGraceMs: CODEX_IMAGE_CONNECTOR.cancelGraceMs,
+    maxOutputBytes: CODEX_IMAGE_CONNECTOR.maxOutputBytes
   };
-  readonly entrypoint: string;
+  readonly resourceBinding = {
+    schemaVersion: 1 as const,
+    bindingId: "codex.process.image-editing",
+    childAgentId: CODEX_IMAGE_CONNECTOR.childAgentId,
+    connectorId: CODEX_IMAGE_CONNECTOR.connectorId,
+    transportKind: "process" as const,
+    capabilityIds: [...CODEX_IMAGE_CONNECTOR.capabilityIds]
+  };
+  readonly fixedProcessEntrypoint: string;
   private readonly runnerPath: string;
   private readonly codexEntrypoint: string;
   private readonly codexHome?: string;
 
-  constructor(options: CodexImageCallableAdapterOptions) {
-    this.entrypoint = options.nodeEntrypoint;
+  constructor(options: CodexImageConnectorOptions) {
+    this.fixedProcessEntrypoint = options.nodeEntrypoint;
     this.runnerPath = options.runnerPath;
     this.codexEntrypoint = options.codexEntrypoint;
     this.codexHome = options.codexHome;
   }
 
-  createLaunchSpec(context: Readonly<CallableAdapterLaunchContext>) {
+  createExecutionSpec(context: Readonly<AgentConnectorContext>) {
     return {
-      executable: this.entrypoint,
+      kind: "process" as const,
+      executable: this.fixedProcessEntrypoint,
       args: [
         this.runnerPath,
         "--codex",

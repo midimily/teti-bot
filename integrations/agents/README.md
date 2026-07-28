@@ -1,19 +1,19 @@
 # Agent Integrations
 
-Provider-specific Callable Adapters and fail-closed qualification modules live
-under this boundary. Beta 0.1.5 adds the first qualified Adapter for the
-official local Codex CLI. Beta 0.1.9 adds a qualified Adapter for the separately
-installed official CodeBuddy Code CLI while keeping the CodeBuddy CN editor as
-observation-only evidence.
+Provider-specific Agent Connectors and fail-closed qualification modules live
+under this boundary. Beta 0.2.1 migrates the already-qualified Codex and
+CodeBuddy CLI paths into the Host/Child Agent Core; it adds no new provider.
 
-The reusable contract is defined in `core/callability/adapter.ts`; execution,
-cancellation, process-tree cleanup, output limits, and error isolation are
-owned by the Desktop Runtime's `CallableAdapterKernel`.
+The frozen reusable contract is defined in `core/callability/agent-core.ts`.
+`TetiHostAgentKernel` owns Execution Authority, isolated workspaces, Transport
+selection, cancellation, process-tree cleanup, timeout, output limits,
+Artifact persistence, and error isolation. A Connector owns only fixed
+provider invocation and bounded output decoding.
 
 Qualification is deliberately outside the lifecycle startup critical path.
 The sidecar opens its request reader first, then a cancellable background
 supervisor qualifies providers in isolation and dynamically registers only the
-Adapters that pass. Provider startup latency must never consume the Desktop
+Connectors that pass. Provider startup latency must never consume the Desktop
 `lifecycle.health` budget.
 
 The Codex integration:
@@ -39,15 +39,31 @@ The CodeBuddy qualification:
   background tasks, Cron, shell snapshots, subagent forks, and marketplaces;
 - sends the task only over stdin and projects only the final successful text
   from a strictly bounded stream-JSON result;
-- reports `detected`, `needs_login`, or `degraded` without an Adapter whenever
+- reports `detected`, `needs_login`, or `degraded` without a Connector whenever
   any qualification gate fails.
 
 An integration must not enter this directory as callable merely because its
 Agent is installed or running. It must qualify an official, fixed local
-entrypoint and pass the Kernel safety tests before it may advertise `ready`.
+entrypoint and pass the Host/Transport safety tests before it may advertise
+`ready`.
 
 Beta 0.1.10 connects that qualified registration to Callable Passport. The
-public projection deliberately removes the executable, Adapter identifier,
-Adapter revision, installation/version/process evidence, credentials, prompt,
+public projection deliberately removes the executable, Connector identifier,
+Connector revision, Transport kind, installation/version/process evidence,
+credentials, prompt,
 task content, and Artifact. Only Agent identity, curated capability IDs,
 text-mode support, availability, and observation time may cross Chatmail.
+
+Connector implementations must not import Passport, Chatmail, or connection
+modules. `AgentConnectorContext` contains only task ID, curated capability,
+Host-created workspace, and Host-staged image paths. It never contains task
+text, `ExecutionAuthority`, peer identity, or collaboration consent. The Host
+delivers task text to the selected Transport over stdin after validation.
+
+Beta 0.2.1 Transport policy:
+
+- `ProcessTransport` is the only production backend and is used by Codex,
+  Codex Image, and CodeBuddy;
+- `FakeTransport` is deterministic and test-only;
+- `LoopbackHttpTransport` reserves the interface but is disabled and performs
+  no network request.

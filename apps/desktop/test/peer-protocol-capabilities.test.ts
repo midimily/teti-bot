@@ -17,6 +17,7 @@ test("Peer Passport protocol capabilities are stored independently and survive r
     const first = new FilePeerProtocolCapabilityStore(path);
     assert.equal(await first.observe({
       tetiId: PEER_ID,
+      collaborationProtocolEpoch: 2,
       passportSchemaVersions: [3],
       observedAt: "2026-07-27T01:00:00.000Z"
     }), true);
@@ -24,6 +25,7 @@ test("Peer Passport protocol capabilities are stored independently and survive r
     const restarted = new FilePeerProtocolCapabilityStore(path);
     assert.deepEqual(await restarted.get(PEER_ID), {
       tetiId: PEER_ID,
+      collaborationProtocolEpoch: 2,
       passportSchemaVersions: [3],
       observedAt: "2026-07-27T01:00:00.000Z"
     });
@@ -38,16 +40,19 @@ test("unchanged and stale capability observations do not rewrite negotiation sta
   const store = new MemoryPeerProtocolCapabilityStore();
   assert.equal(await store.observe({
     tetiId: PEER_ID,
+    collaborationProtocolEpoch: 2,
     passportSchemaVersions: [3],
     observedAt: "2026-07-27T02:00:00.000Z"
   }), true);
   assert.equal(await store.observe({
     tetiId: PEER_ID,
+    collaborationProtocolEpoch: 2,
     passportSchemaVersions: [3],
     observedAt: "2026-07-27T02:05:00.000Z"
   }), false);
   assert.equal(await store.observe({
     tetiId: PEER_ID,
+    collaborationProtocolEpoch: 2,
     passportSchemaVersions: [2],
     observedAt: "2026-07-27T01:59:00.000Z"
   }), false);
@@ -58,13 +63,31 @@ test("a newer explicit capability change is normalized and persisted", async () 
   const store = new MemoryPeerProtocolCapabilityStore();
   await store.observe({
     tetiId: PEER_ID,
+    collaborationProtocolEpoch: 2,
     passportSchemaVersions: [3],
     observedAt: "2026-07-27T02:00:00.000Z"
   });
   assert.equal(await store.observe({
     tetiId: PEER_ID,
+    collaborationProtocolEpoch: 2,
     passportSchemaVersions: [4, 3],
     observedAt: "2026-07-27T03:00:00.000Z"
   }), true);
   assert.deepEqual((await store.get(PEER_ID))?.passportSchemaVersions, [3, 4]);
+});
+
+test("a delayed legacy epoch can never downgrade a peer that proved Beta 0.2", async () => {
+  const store = new MemoryPeerProtocolCapabilityStore();
+  await store.observe({
+    tetiId: PEER_ID,
+    collaborationProtocolEpoch: 2,
+    passportSchemaVersions: [3],
+    observedAt: "2026-07-27T02:00:00.000Z"
+  });
+  assert.equal(await store.observe({
+    tetiId: PEER_ID,
+    collaborationProtocolEpoch: 1,
+    observedAt: "2026-07-27T03:00:00.000Z"
+  }), false);
+  assert.equal((await store.get(PEER_ID))?.collaborationProtocolEpoch, 2);
 });

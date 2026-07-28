@@ -4,6 +4,7 @@ import { isCanonicalTetiPublicId } from "../../../../../core/identity/public-id.
 import {
   MAX_TASK_TRANSPORT_RECORDS,
   TETI_TASK_TRANSPORT_SCHEMA_VERSION,
+  TETI_TASK_TRANSPORT_STORE_SCHEMA_VERSION,
   type CollaborationTaskTransportRecord,
   type TetiTaskTransportStoreState
 } from "../../../../../core/task/transport.ts";
@@ -72,7 +73,7 @@ export class MemoryTaskTransportStore implements TaskTransportStore {
 
 export function emptyTaskTransportStoreState(): TetiTaskTransportStoreState {
   return {
-    schemaVersion: TETI_TASK_TRANSPORT_SCHEMA_VERSION,
+    schemaVersion: TETI_TASK_TRANSPORT_STORE_SCHEMA_VERSION,
     records: [],
     peers: []
   };
@@ -81,7 +82,7 @@ export function emptyTaskTransportStoreState(): TetiTaskTransportStoreState {
 export function validateTaskTransportStoreState(
   value: unknown
 ): asserts value is TetiTaskTransportStoreState {
-  if (!isRecord(value) || value.schemaVersion !== TETI_TASK_TRANSPORT_SCHEMA_VERSION) {
+  if (!isRecord(value) || value.schemaVersion !== TETI_TASK_TRANSPORT_STORE_SCHEMA_VERSION) {
     throw new Error("Unsupported Teti Task transport store.");
   }
   rejectUnknownKeys(value, ["schemaVersion", "records", "peers"], "Teti Task transport store");
@@ -115,6 +116,11 @@ function validateRecord(value: unknown): asserts value is CollaborationTaskTrans
     "chatmailMessageId",
     "sentAttachmentIds",
     "sentArtifactAttachmentIds",
+    "acknowledgedAttachmentIds",
+    "acknowledgedArtifactAttachmentIds",
+    "attachmentDeliveryAttempts",
+    "artifactAttachmentDeliveryAttempts",
+    "attachmentDiagnostics",
     "request",
     "state",
     "approval",
@@ -137,7 +143,10 @@ function validateRecord(value: unknown): asserts value is CollaborationTaskTrans
     throw new Error("Teti Task transport record direction is invalid.");
   }
   if (!isCanonicalTetiPublicId(value.peerTetiId)
-    || (value.protocolVersion !== 1 && value.protocolVersion !== 2 && value.protocolVersion !== 3)) {
+    || (value.protocolVersion !== 1
+      && value.protocolVersion !== 2
+      && value.protocolVersion !== 3
+      && value.protocolVersion !== 4)) {
     throw new Error("Teti Task transport record peer is invalid.");
   }
   if (value.envelopeMessageId !== undefined
@@ -179,6 +188,17 @@ function validateRecord(value: unknown): asserts value is CollaborationTaskTrans
       || value.sentArtifactAttachmentIds.some((item) => typeof item !== "string"))) {
     throw new Error("Teti Task sent Artifact attachment state is invalid.");
   }
+  validateStringArray(value.acknowledgedAttachmentIds, "Teti Task acknowledged attachment state");
+  validateStringArray(
+    value.acknowledgedArtifactAttachmentIds,
+    "Teti Task acknowledged Artifact attachment state"
+  );
+  validateDeliveryAttempts(value.attachmentDeliveryAttempts, "Teti Task attachment delivery attempts");
+  validateDeliveryAttempts(
+    value.artifactAttachmentDeliveryAttempts,
+    "Teti Task Artifact attachment delivery attempts"
+  );
+  validateAttachmentDiagnostics(value.attachmentDiagnostics);
   if (value.statusRevision !== undefined
     && (!Number.isSafeInteger(value.statusRevision) || Number(value.statusRevision) < 0)) {
     throw new Error("Teti Task status revision is invalid.");
@@ -208,6 +228,81 @@ function validateRecord(value: unknown): asserts value is CollaborationTaskTrans
   if (value.safeErrorCode !== undefined
     && (typeof value.safeErrorCode !== "string" || !/^[A-Z0-9_]{1,64}$/.test(value.safeErrorCode))) {
     throw new Error("Teti Task transport safe error code is invalid.");
+  }
+}
+
+function validateAttachmentDiagnostics(value: unknown): void {
+  if (value === undefined) return;
+  if (!Array.isArray(value) || value.length > 32) {
+    throw new Error("Teti Task attachment diagnostics are invalid.");
+  }
+  const keys = new Set<string>();
+  for (const item of value) {
+    if (!isRecord(item)) throw new Error("Teti Task attachment diagnostics are invalid.");
+    rejectUnknownKeys(item, [
+      "attachmentId",
+      "purpose",
+      "ordinal",
+      "expectedCount",
+      "byteLength",
+      "sha256",
+      "attempts",
+      "state",
+      "firstSentAt",
+      "lastSentAt",
+      "storedAt",
+      "receiptReceivedAt",
+      "safeErrorCode"
+    ], "Teti Task attachment diagnostic");
+    const key = `${String(item.purpose)}:${String(item.attachmentId)}`;
+    if (typeof item.attachmentId !== "string" || !item.attachmentId.trim()
+      || (item.purpose !== "input" && item.purpose !== "artifact")
+      || keys.has(key)
+      || !Number.isSafeInteger(item.ordinal) || Number(item.ordinal) < 1
+      || !Number.isSafeInteger(item.expectedCount) || Number(item.expectedCount) < 1
+      || Number(item.ordinal) > Number(item.expectedCount)
+      || !Number.isSafeInteger(item.byteLength) || Number(item.byteLength) < 1
+      || typeof item.sha256 !== "string" || !/^sha256:[a-f0-9]{64}$/.test(item.sha256)
+      || !Number.isSafeInteger(item.attempts) || Number(item.attempts) < 0
+      || !["expected", "sent", "stored", "acknowledged", "expired", "failed"].includes(String(item.state))) {
+      throw new Error("Teti Task attachment diagnostics are invalid.");
+    }
+    keys.add(key);
+    for (const timestamp of ["firstSentAt", "lastSentAt", "storedAt", "receiptReceivedAt"] as const) {
+      if (item[timestamp] !== undefined) requireTimestamp(item[timestamp], `Attachment diagnostic ${timestamp}`);
+    }
+    if (item.safeErrorCode !== undefined
+      && (typeof item.safeErrorCode !== "string" || !/^[A-Z0-9_]{1,64}$/.test(item.safeErrorCode))) {
+      throw new Error("Teti Task attachment diagnostic error is invalid.");
+    }
+  }
+}
+
+function validateStringArray(value: unknown, label: string): void {
+  if (value === undefined) return;
+  if (!Array.isArray(value)
+    || value.length > 16
+    || value.some((item) => typeof item !== "string" || !item.trim())
+    || new Set(value).size !== value.length) {
+    throw new Error(`${label} is invalid.`);
+  }
+}
+
+function validateDeliveryAttempts(value: unknown, label: string): void {
+  if (value === undefined) return;
+  if (!Array.isArray(value) || value.length > 16) throw new Error(`${label} are invalid.`);
+  const attachmentIds = new Set<string>();
+  for (const item of value) {
+    if (!isRecord(item)) throw new Error(`${label} are invalid.`);
+    rejectUnknownKeys(item, ["attachmentId", "attempts", "lastSentAt", "nextRetryAt"], label);
+    if (typeof item.attachmentId !== "string" || !item.attachmentId.trim()
+      || attachmentIds.has(item.attachmentId)
+      || !Number.isSafeInteger(item.attempts) || Number(item.attempts) < 1) {
+      throw new Error(`${label} are invalid.`);
+    }
+    attachmentIds.add(item.attachmentId);
+    requireTimestamp(item.lastSentAt, `${label} lastSentAt`);
+    requireTimestamp(item.nextRetryAt, `${label} nextRetryAt`);
   }
 }
 

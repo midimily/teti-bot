@@ -1,246 +1,156 @@
 # Teti Application Protocol
 
-The Teti Application Protocol starts only after two Tetis have a confirmed trusted relationship.
+The Teti Application Protocol starts only after two Tetis have a confirmed
+trusted relationship. Chatmail remains the encrypted asynchronous transport;
+the protocol is not a generic chat or public A2A endpoint.
 
-```mermaid
-flowchart TD
-  A["Chatmail Identity"] --> B["Discovery Identity"]
-  B --> C["Connection Handshake"]
-  C --> D["Confirmed Connection"]
-  D --> E["Teti Application Envelope"]
-  E --> F["chatmail/core + mail.seep.im"]
-```
+## Beta 0.2 hard boundary
 
-## Layer Boundaries
+Beta 0.2 establishes collaboration epoch 2:
 
-Identity is owned by chatmail/core. Teti does not create private keys, store chatmail credentials, or implement encryption.
+- Application Envelope: version 2 only;
+- Presence: `collaborationProtocolEpoch: 2`;
+- Task protocol: version 4 only;
+- network Callable Passport: schema 3 only;
+- processed-message Store: version 2.
 
-Discovery answers which public Teti identities exist.
+Application Envelope v1 is rejected before its payload is dispatched. Task
+v1–v3 and Passport v1/v2 are not downgrade targets. Historical parsers may
+remain for read-only archive characterization, but are outside the 0.2 network
+ingress.
 
-Trust is established by the connection handshake. Application messages are allowed only when the local connection state is `Confirmed`.
+## Layer boundaries
 
-Application envelopes carry structured AI-to-AI intent after trust exists. They are not generic chat messages and they do not create a new transport layer.
+Identity is owned by chatmail/core. Discovery identifies public Teti
+identities. The connection handshake establishes trust. Only a confirmed
+connection whose Teti ID and Chatmail address match the sender may deliver an
+Application Envelope.
 
-## Envelope Schema
+The connection handshake is intentionally separate from the application epoch.
+This allows identity, contacts, and confirmed relationships to migrate while
+blocking 0.1 collaboration payloads.
+
+## Envelope v2
 
 ```json
 {
-  "version": 1,
-  "type": "teti.profile.sync",
+  "version": 2,
+  "type": "teti.presence",
   "messageId": "uuid",
   "fromTetiId": "teti_abc123xyz",
-  "createdAt": "2026-07-11T00:00:00.000Z",
+  "createdAt": "2026-07-28T00:00:00.000Z",
   "payload": {}
 }
 ```
 
-Required fields:
+The complete UTF-8 envelope is limited to 128 KiB before JSON parsing. Exact
+top-level and payload key allowlists, bounded IDs and timestamps, canonical
+`teti_[a-z0-9]{9}` identities, and private-field rejection apply before
+business handling. A malformed Chatmail message is isolated from later
+messages in the same poll.
 
-- `version`
-- `type`
-- `messageId`
-- `fromTetiId`
-- `createdAt`
-- `payload`
+For a syntactically bounded v1 envelope only the outer version, message ID, and
+sender ID may be inspected to classify a confirmed Peer as `需要升级`. Its
+payload is never parsed as a Task, Passport, or other Application Message.
 
-`fromTetiId` must match the lowercase canonical format `teti_[a-z0-9]{9}`. Application envelopes do not normalize case and reject non-canonical IDs.
-
-Beta 0.1.13 limits the complete UTF-8 envelope to 128 KiB before JSON parsing,
-rejects unknown top-level keys, and bounds identifiers and timestamps. Payload
-schemas remain independently allowlisted. One malformed Chatmail message is
-isolated and cannot block later valid messages in the same poll batch.
-
-## Message Types V1
-
-### Profile Sync
-
-```json
-{
-  "type": "teti.profile.sync",
-  "payload": {
-    "displayName": "Alex",
-    "platform": "macOS",
-    "aiEnvironment": ["Claude Code"]
-  }
-}
-```
-
-### Capability Offer
-
-```json
-{
-  "type": "teti.capability.offer",
-  "payload": {
-    "capabilities": ["coding", "research"]
-  }
-}
-```
-
-### Presence
+## Presence
 
 ```json
 {
   "type": "teti.presence",
   "payload": {
     "status": "online",
-    "timestamp": "2026-07-11T00:00:00.000Z",
-    "taskProtocolVersions": [1, 2, 3],
+    "timestamp": "2026-07-28T00:00:00.000Z",
+    "collaborationProtocolEpoch": 2,
+    "taskProtocolVersions": [4],
     "passportSchemaVersions": [3]
   }
 }
 ```
 
-`taskProtocolVersions` is optional. Beta 0.1.14 advertises versions 1, 2 and 3
-for Task version negotiation. `passportSchemaVersions` independently advertises
-the AI Passport payload schemas the Peer can consume. Protocol capabilities
-are stored separately from the latest Passport snapshot; receiving a payload
-never silently changes the advertised capability.
+All three protocol declarations are required and exact. Reachability uses the
+relay receive time rather than the sender's wall clock. Compatibility and
+reachability are independent: a confirmed v1 sender can be recently reachable
+and still require an upgrade.
 
-### AI Passport Sync
+## Callable Passport
 
-`teti.ai.status.sync` keeps one application message type and evolves its
-strictly validated payload schema:
+`teti.ai.status.sync` accepts only schema 3 on the Beta 0.2 network. It contains
+only locally qualified callable Agents, curated Capabilities, Bindings, bounded
+resource summaries, and sharing/expiry metadata.
 
-| Payload schema | Meaning | Current behavior |
-| --- | --- | --- |
-| 1 | AI Resource (`tools`) | Receive-only historical compatibility |
-| 2 | AI Resource plus coarse observed Agent | Receive-only historical compatibility |
-| 3 | AI Resource plus Callable Agent, Capability, and Binding | Only outgoing schema |
+It never includes installation paths, executable paths, command arguments,
+credentials, prompt text, Task input, result content, Adapter identity, login
+tokens, or process details. A Passport is sent only after the Peer advertises
+epoch 2 and schema 3; unknown and incompatible Peers receive no speculative
+payload.
 
-Schema 3 does not carry installation state, executable or profile paths,
-version strings, process state, command/arguments, Adapter identity, login
-state, credentials, prompt, task input, or result content. Its Agent list is
-derived only from Adapters that passed local qualification and were registered
-in Runtime.
+## Task v4
 
-Every current Presence explicitly advertises `passportSchemaVersions: [3]`.
-The sender selects the highest common version and sends exactly one payload.
-Because the current local supported set contains only schema 3, an unknown Peer
-receives schema 3 and an explicitly incompatible Peer receives no speculative
-downgrade. Schema 1 and 2 remain strictly validated on receive for queued
-historical messages, but they never influence outgoing negotiation. Once a
-valid schema-3 snapshot is established, a delayed lower-schema message cannot
-replace it.
+`teti.task.request` accepts only a `CollaborationTaskRequest` with
+`schemaVersion: 4`. It carries an immutable Task ID, requester/target IDs,
+selected offer and capability, bounded text plus up to four ordered PNG/JPEG
+descriptors, creation time, and expiry. Image bytes travel only through the
+Chatmail file field.
 
-### Chatmail Task Request
+The protocol also defines:
 
-`teti.task.request` carries a strict `CollaborationTaskRequest`. Task protocol
-v1 is the text-only compatibility floor. Task protocol v2 adds ordered parts:
-one required bounded text part followed by up to four PNG/JPEG descriptors.
-Image bytes never enter JSON. A request contains a Task ID, requester and target
-Teti IDs, selected Passport offer and Capability IDs, creation time, and expiry.
-It cannot contain a local Agent, Adapter, command, path, workspace, credential,
-tool input, or execution grant.
+- `teti.task.receipt`: durable request ingestion and supported Task `[4]`;
+- `teti.task.attachment`: verified input or Artifact bytes;
+- `teti.task.attachment.receipt`: emitted only after durable verified storage;
+- `teti.task.status`: monotonic A2A-aligned Task state revision;
+- `teti.task.cancel`: idempotent cancellation request;
+- `teti.task.artifact`: bounded text and/or verified image result manifest.
 
-### Chatmail Task Receipt
+Several Task-v4 component payloads retain `schemaVersion: 1` as their own
+structural schema. This does not mean Task protocol v1 is accepted; the
+containing Application Envelope v2 and an existing Task-v4 identity are
+required.
 
-`teti.task.receipt` reports durable transport ingestion as `received`,
-`duplicate`, `expired`, `conflict`, or `rejected`. It also advertises supported
-Task versions. A receipt is not user consent and cannot trigger an Agent.
+Transport receipt, attachment receipt, local approval, execution status, and
+Artifact are distinct events. Only the receiver's explicit Allow Once action
+creates a short-lived local Execution Grant. Chatmail data cannot grant
+execution.
 
-Beta 0.1.12 uses `(requesterTetiId, taskId)` for semantic idempotency. Duplicate
-envelopes with identical immutable Task content create one local record; a
-conflicting reuse of the Task ID never overwrites the original. The maximum
-Task TTL is 24 hours.
+## Attachment delivery and the 0.1.15 known defect
 
-### Chatmail Task Attachment
+Every input and result image requests a durable per-attachment receipt. The
+sender retries only unacknowledged attachment IDs with bounded backoff until
+receipt or Task expiry. Duplicate bytes and receipts are idempotent. Format,
+byte length, dimensions, MIME sniffing, Task/Artifact identity, and SHA-256 are
+verified before an attachment becomes ready.
 
-`teti.task.attachment` binds one Chatmail file to a Task image descriptor. The
-payload contains the Task identities, purpose (`input` or `artifact`), bounded
-metadata, SHA-256 digest and expiry. Artifact attachments also bind the
-immutable `artifactId`. The receiver MIME-sniffs, dimension-checks and hashes
-private staged bytes. Input images must verify before approval; result images
-must verify before the result is shown as ready. Paths, EXIF/GPS and source
-filenames are not protocol fields.
+`KD-0.1.15-MULTI-IMAGE-DELIVERY` records the physical dual-Mac observation that
+2- and 4-image Tasks often arrive incomplete while one-image delivery is
+usually successful. Beta 0.2.0 temporarily tolerates the completion-rate defect
+but fails closed:
 
-### Chatmail Task Status and Cancel
+- the receiver reports X/Y stored images;
+- approval and execution remain disabled until all Y verify;
+- incomplete Tasks never become completed;
+- retries cannot cross Task or Artifact identity;
+- per-image diagnostics record only safe IDs, sizes, hashes, attempts, state,
+  timestamps, and safe error codes—never local paths.
 
-`teti.task.status` carries a monotonic revision and one A2A-aligned Task state.
-Older or terminal-regressing revisions are ignored. `teti.task.cancel` is an
-idempotent cancellation request. The requester UI continues to show
-`cancellation requested` until a remote status confirms the terminal state.
+## Replay, recovery, and storage
 
-### Chatmail Task Artifact
+Generic replay IDs live in `~/.teti/store-v2/messages.json`; Task semantic state
+lives in `~/.teti/store-v2/tasks.json`; verified attachments live below
+`~/.teti/store-v2/task-attachments`. Application replay Store and Task Store
+both use Store schema version 2.
 
-`teti.task.artifact` returns a strictly validated bounded Artifact after local
-execution. Task protocol v1 returns the historical text Artifact. Protocol v2
-supports multipart input and bounded text output. Protocol v3 additionally
-supports a schema-v2 Artifact containing ordered text and verified PNG/JPEG
-descriptors. Result image bytes travel in `teti.task.attachment` messages with
-`purpose: "artifact"`; the Artifact JSON never contains local paths or bytes.
+Semantic `(requesterTetiId, taskId)` idempotency remains authoritative across
+new envelope/message IDs. Conflicting immutable content is rejected. Status
+revisions cannot roll back terminal or newer state. Interrupted execution
+becomes `failed` with `TASK_RUNTIME_RESTARTED`. Task TTL remains authoritative
+through authentication recovery and restart.
 
-For `image-editing`, a text-only Adapter response is not a successful result.
-The receiver emits `failed` with `TASK_IMAGE_RESULT_MISSING`, sends no Artifact,
-and the requester never sees a false completed state. The sender persists every
-generated image outside the transient Adapter workspace before marking local
-execution complete.
+Migrated 0.1 Tasks, attachments, messages, and Peer capability state are copied
+to read-only `~/.teti/legacy-0.1`. They are never loaded into active v2 Task or
+replay state and therefore cannot be executed again.
 
-Transport receipt, local approval, execution status and Artifact are separate
-semantic events. Only the receiver's explicit `allow once` action creates a
-short-lived local Execution Grant; grants never cross Chatmail.
+## Result-image actions
 
-## Security Model
-
-Before sending, `TetiApplicationManager` loads the local connection state and requires `Confirmed`.
-
-These states cannot send application envelopes:
-
-- `Requested`
-- `PendingApproval`
-- `Accepted`
-- `Rejected`
-- `Blocked`
-
-Inbound envelopes are processed only when their `fromTetiId` and chatmail sender address match a confirmed local connection.
-
-Application envelopes must not contain:
-
-- private keys
-- chatmail credentials
-- database paths
-- chat history
-
-## Replay Protection
-
-Generic `TetiApplicationManager` consumers can track processed application
-`messageId` values locally in `~/.teti/messages.json`.
-
-The file is only replay protection metadata. It is not a message history store and does not contain payloads.
-
-Duplicate `messageId` values are ignored after the first successful generic
-processing. Production Task transport additionally deduplicates by Task ID so
-retries with a new envelope or Chatmail message ID remain idempotent.
-
-## Beta 0.1.13 Recovery Rules
-
-- semantic Task ID deduplication is authoritative even when a retry has a new
-  Application Envelope message ID;
-- status revision and receipt time ordering cannot roll a terminal or newer
-  state backward;
-- a receipt too far in the future is rejected instead of pinning ordering;
-- interrupted local work becomes `failed` with `TASK_RUNTIME_RESTARTED` after
-  Runtime recovery and is reported to the requester;
-- an expired local Agent login becomes `auth_required`; the receiver must log
-  in locally and explicitly allow once again before a new execution attempt;
-- all pending and authentication-required Tasks still expire at their original
-  absolute TTL;
-- a known Task-v1 peer continues to receive text-only requests and schema-v1
-  text Artifacts.
-
-These rules do not broaden permission scope, transmit credentials, or introduce
-a public A2A endpoint.
-
-## Beta 0.1.14 Image Artifact Rules
-
-- Task protocol v3 is selected only after Presence or a receipt explicitly
-  advertises it; image-editing is not sent to a lower-version Peer.
-- Result image attachments are durably queued and sent before their immutable
-  Artifact manifest. Completed status may still arrive first through Chatmail,
-  so the requester shows `任务已完成 · 结果接收中` until verification finishes.
-- An attachment or Artifact that arrives before its dependent local record is
-  left unacknowledged for bounded retry instead of being silently discarded.
-- A Chatmail message is marked seen only after validation and durable business
-  processing succeeds. Transient persistence failures are retried.
-- PNG/JPEG format, byte size, dimensions and SHA-256 must match the descriptor;
-  local paths, credentials, prompt transcripts and source filenames remain
-  outside the Application Envelope.
+Open, Reveal in Finder, and Save As accept only canonical verified PNG/JPEG
+files below Teti's private v2 Artifact directory. No remote field can select an
+arbitrary local path.

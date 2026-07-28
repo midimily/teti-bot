@@ -21,7 +21,11 @@ import {
   acquireTetiRuntimeProfileLock,
   type TetiRuntimeProfileLock
 } from "./runtime/profile-lock.ts";
-import { ensureProfileDirectories, resolveTetiProfile } from "./profile.ts";
+import {
+  ensureProfileBootstrapDirectories,
+  ensureProfileDirectories,
+  resolveTetiProfile
+} from "./profile.ts";
 import {
   closeDefaultPeerConnectionService,
   getDefaultPeerConnectionService,
@@ -34,11 +38,11 @@ import {
 } from "./runtime/agents/config.ts";
 import { AgentObserverSupervisor } from "./runtime/agents/supervisor.ts";
 import { createMacAgentObserverSystem } from "./runtime/agents/system.ts";
-import { CallableAdapterKernel } from "./runtime/callable/kernel.ts";
+import { TetiHostAgentKernel } from "./runtime/callable/kernel.ts";
 import { CallableQualificationSupervisor } from "./runtime/callable/qualification-supervisor.ts";
-import { qualifyCodexCallableAdapter } from "../../../integrations/agents/codex/adapter.ts";
-import { CodexImageCallableAdapter } from "../../../integrations/agents/codex/image-adapter.ts";
-import { qualifyCodeBuddyCallableAdapter } from "../../../integrations/agents/codebuddy/qualification.ts";
+import { qualifyCodexConnector } from "../../../integrations/agents/codex/adapter.ts";
+import { CodexImageConnector } from "../../../integrations/agents/codex/image-adapter.ts";
+import { qualifyCodeBuddyConnector } from "../../../integrations/agents/codebuddy/qualification.ts";
 import { FileTaskAttachmentStore } from "./runtime/tasks/attachments.ts";
 
 const PROCESS_SHUTDOWN_HARD_LIMIT_MS = 4_000;
@@ -73,10 +77,11 @@ try {
 
 async function startSidecar(): Promise<void> {
   const profile = await resolveTetiProfile();
-  await ensureProfileDirectories(profile);
+  await ensureProfileBootstrapDirectories(profile);
   profileLock = await acquireTetiRuntimeProfileLock(profile);
+  await ensureProfileDirectories(profile);
   const codexUsageService = getDefaultCodexUsageService();
-  const agentConfigPath = join(profile.root, "agent-detectors.override.json");
+  const agentConfigPath = join(profile.storeDir, "agent-detectors.override.json");
   const agentConfiguration = new FileAgentDetectorConfiguration(agentConfigPath);
   const agentObserver = new AgentObserverSupervisor({
     loadCatalog: () => loadAgentDetectorCatalog({
@@ -84,8 +89,8 @@ async function startSidecar(): Promise<void> {
     }),
     system: createMacAgentObserverSystem()
   });
-  const taskAttachmentStore = new FileTaskAttachmentStore(join(profile.root, "task-attachments"));
-  const callableAdapterKernel = new CallableAdapterKernel({ artifactImageStore: taskAttachmentStore });
+  const taskAttachmentStore = new FileTaskAttachmentStore(join(profile.storeDir, "task-attachments"));
+  const hostAgent = new TetiHostAgentKernel({ artifactImageStore: taskAttachmentStore });
   const codexImageRunnerPath = join(dirname(fileURLToPath(import.meta.url)), "codex-image-runner.mjs");
   let pathOverridesPromise: Promise<Record<string, string>> | undefined;
   const loadPathOverrides = () => {
@@ -97,7 +102,7 @@ async function startSidecar(): Promise<void> {
       async (signal) => {
         const pathOverrides = await loadPathOverrides();
         if (signal.aborted) return;
-        const qualification = await qualifyCodexCallableAdapter({
+        const qualification = await qualifyCodexConnector({
           pathOverride: pathOverrides.codex,
           signal
         });
@@ -107,16 +112,16 @@ async function startSidecar(): Promise<void> {
           code: qualification.readiness.reasonCode,
           adapterRevision: qualification.readiness.adapterRevision
         });
-        if (qualification.adapter) {
-          callableAdapterKernel.registerAdapter(
-            qualification.adapter,
+        if (qualification.connector) {
+          hostAgent.registerConnector(
+            qualification.connector,
             qualification.readiness.checkedAt
           );
-          callableAdapterKernel.registerAdapter(
-            new CodexImageCallableAdapter({
+          hostAgent.registerConnector(
+            new CodexImageConnector({
               nodeEntrypoint: process.execPath,
               runnerPath: codexImageRunnerPath,
-              codexEntrypoint: qualification.adapter.entrypoint,
+              codexEntrypoint: qualification.connector.fixedProcessEntrypoint,
               ...(process.env.CODEX_HOME ? { codexHome: process.env.CODEX_HOME } : {})
             }),
             qualification.readiness.checkedAt
@@ -126,7 +131,7 @@ async function startSidecar(): Promise<void> {
       async (signal) => {
         const pathOverrides = await loadPathOverrides();
         if (signal.aborted) return;
-        const qualification = await qualifyCodeBuddyCallableAdapter({
+        const qualification = await qualifyCodeBuddyConnector({
           pathOverride: pathOverrides.codebuddy,
           signal
         });
@@ -138,9 +143,9 @@ async function startSidecar(): Promise<void> {
           desktopDetected: qualification.evidence.desktopDetected,
           officialCliDetected: qualification.evidence.officialCliDetected
         });
-        if (qualification.adapter) {
-          callableAdapterKernel.registerAdapter(
-            qualification.adapter,
+        if (qualification.connector) {
+          hostAgent.registerConnector(
+            qualification.connector,
             qualification.readiness.checkedAt
           );
         }
@@ -159,15 +164,15 @@ async function startSidecar(): Promise<void> {
       loadTetiAccount: defaultLifecycleSidecarDependencies.loadTetiAccount,
       heartbeatDiscovery: defaultLifecycleSidecarDependencies.heartbeatDiscovery,
       getPeerConnectionService: () => getDefaultPeerConnectionService({
-        getLocalCallableAgents: () => callableAdapterKernel.getCallableAgents(),
-        taskExecutor: callableAdapterKernel,
+        getLocalCallableAgents: () => hostAgent.getCallableAgents(),
+        taskExecutor: hostAgent,
         taskAttachmentStore
       }),
       passportSharingStore: await getDefaultPassportSharingStore(),
       codexUsageService,
       agentObserver,
       agentConfiguration,
-      callableAdapterKernel,
+      hostAgent,
       dispose: async () => {
         await qualificationSupervisor.stop();
         await closeDefaultPeerConnectionService();

@@ -6,13 +6,17 @@ import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import test from "node:test";
 import { build } from "esbuild";
-import type { CallableAdapter } from "../../../core/callability/adapter.ts";
-import { CodexImageCallableAdapter } from "../../../integrations/agents/codex/image-adapter.ts";
+import type { CallableAdapterTaskRequest } from "../../../core/callability/adapter.ts";
+import {
+  issueExecutionAuthority,
+  type AgentConnector
+} from "../../../core/callability/agent-core.ts";
+import { CodexImageConnector } from "../../../integrations/agents/codex/image-adapter.ts";
 import {
   CodexImageOutputError,
   persistCodexGeneratedImages
 } from "../lifecycle-sidecar/runtime/callable/codex-image-output.ts";
-import { CallableAdapterKernel } from "../lifecycle-sidecar/runtime/callable/kernel.ts";
+import { TetiHostAgentKernel } from "../lifecycle-sidecar/runtime/callable/kernel.ts";
 import { FileTaskAttachmentStore } from "../lifecycle-sidecar/runtime/tasks/attachments.ts";
 
 const testRoot = dirname(fileURLToPath(import.meta.url));
@@ -160,7 +164,7 @@ test("Codex image runner reports the dedicated safe code above eight MiB", async
   }
 });
 
-test("real Codex image runner completes through Kernel and Artifact Store", async () => {
+test("real Codex image runner completes through Host Agent and Artifact Store", async () => {
   const root = await mkdtemp(join(tmpdir(), "teti-codex-image-full-pipeline-"));
   const workspaceRoot = join(root, "workspaces");
   const fakeCodexPath = join(root, "codex");
@@ -178,16 +182,17 @@ test("real Codex image runner completes through Kernel and Artifact Store", asyn
     logLevel: "silent"
   });
 
-  const productionAdapter = new CodexImageCallableAdapter({
+  const productionConnector = new CodexImageConnector({
     nodeEntrypoint: process.execPath,
     runnerPath: bundledRunnerPath,
     codexEntrypoint: fakeCodexPath
   });
-  const adapter: CallableAdapter = {
-    descriptor: productionAdapter.descriptor,
-    entrypoint: productionAdapter.entrypoint,
-    createLaunchSpec: async (context) => {
-      const launch = productionAdapter.createLaunchSpec(context);
+  const connector: AgentConnector = {
+    descriptor: productionConnector.descriptor,
+    resourceBinding: productionConnector.resourceBinding,
+    fixedProcessEntrypoint: productionConnector.fixedProcessEntrypoint,
+    createExecutionSpec: async (context) => {
+      const launch = productionConnector.createExecutionSpec(context);
       return {
         ...launch,
         environment: {
@@ -196,19 +201,19 @@ test("real Codex image runner completes through Kernel and Artifact Store", asyn
         }
       };
     },
-    decodeArtifact: (stdout) => productionAdapter.decodeArtifact(stdout),
-    classifyFailure: (stdout) => productionAdapter.classifyFailure(stdout)
+    decodeArtifact: (stdout) => productionConnector.decodeArtifact(stdout),
+    classifyFailure: (stdout) => productionConnector.classifyFailure(stdout)
   };
   const artifactStore = new FileTaskAttachmentStore(join(root, "artifacts"));
-  const kernel = new CallableAdapterKernel({
-    adapters: [adapter],
+  const hostAgent = new TetiHostAgentKernel({
+    connectors: [connector],
     workspaceRoot,
     artifactImageStore: artifactStore
   });
 
   try {
     const taskId = "codex-image-full-pipeline";
-    const result = await kernel.execute({
+    const request: CallableAdapterTaskRequest = {
       schemaVersion: 2,
       taskId,
       adapterId: "openai.codex.imagegen",
@@ -216,7 +221,8 @@ test("real Codex image runner completes through Kernel and Artifact Store", asyn
       capabilityId: "image-editing",
       input: { kind: "parts", text: "bounded image test" },
       createdAt: new Date().toISOString()
-    });
+    };
+    const result = await hostAgent.execute(request, issueExecutionAuthority(request));
 
     assert.equal(result.state, "completed");
     assert.equal(result.artifact?.kind, "parts");
@@ -231,7 +237,7 @@ test("real Codex image runner completes through Kernel and Artifact Store", asyn
     assert.ok(storedPath);
     assert.equal((await readFile(storedPath)).subarray(0, 8).toString("hex"), "89504e470d0a1a0a");
   } finally {
-    await kernel.shutdown();
+    await hostAgent.shutdown();
     await rm(root, { recursive: true, force: true });
   }
 });

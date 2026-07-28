@@ -7,18 +7,18 @@ import type {
   AgentAdapterReadiness
 } from "../../../core/callability/types.ts";
 import type {
-  CallableAdapter,
-  CallableAdapterLaunchContext
-} from "../../../core/callability/adapter.ts";
+  AgentConnector,
+  AgentConnectorContext
+} from "../../../core/callability/agent-core.ts";
 import {
   classifyCodexFailure,
   decodeCodexArtifact
 } from "./jsonl.ts";
 
-export const CODEX_CALLABLE_ADAPTER = {
-  adapterId: "openai.codex.exec",
-  agentId: "codex",
-  adapterRevision: 2,
+export const CODEX_CONNECTOR = {
+  connectorId: "openai.codex.exec",
+  childAgentId: "codex",
+  connectorRevision: 3,
   capabilityIds: ["code-analysis"],
   timeoutMs: 5 * 60 * 1_000,
   cancelGraceMs: 500,
@@ -57,17 +57,17 @@ export const CODEX_CONTROLLED_EXEC_ARGS = Object.freeze([
   "unified_exec"
 ]);
 
-export interface CodexCallableAdapterOptions {
+export interface CodexConnectorOptions {
   entrypoint: string;
   codexHome?: string;
 }
 
-export interface CodexAdapterQualification {
+export interface CodexConnectorQualification {
   readiness: AgentAdapterReadiness;
-  adapter: CodexCallableAdapter | null;
+  connector: CodexConnector | null;
 }
 
-export interface QualifyCodexAdapterOptions {
+export interface QualifyCodexConnectorOptions {
   pathOverride?: string | null;
   environment?: NodeJS.ProcessEnv;
   homeDirectory?: string;
@@ -77,30 +77,40 @@ export interface QualifyCodexAdapterOptions {
   probeLogin?: (entrypoint: string) => Promise<"ready" | "needs_login" | "degraded">;
 }
 
-export class CodexCallableAdapter implements CallableAdapter {
+export class CodexConnector implements AgentConnector {
   readonly descriptor = {
-    contractVersion: 2 as const,
-    adapterId: CODEX_CALLABLE_ADAPTER.adapterId,
-    adapterRevision: CODEX_CALLABLE_ADAPTER.adapterRevision,
-    agentId: CODEX_CALLABLE_ADAPTER.agentId,
-    capabilityIds: [...CODEX_CALLABLE_ADAPTER.capabilityIds],
+    contractVersion: 1 as const,
+    connectorId: CODEX_CONNECTOR.connectorId,
+    connectorRevision: CODEX_CONNECTOR.connectorRevision,
+    childAgentId: CODEX_CONNECTOR.childAgentId,
+    capabilityIds: [...CODEX_CONNECTOR.capabilityIds],
     inputModes: ["text", "image"] as const,
     outputModes: ["text"] as const,
-    timeoutMs: CODEX_CALLABLE_ADAPTER.timeoutMs,
-    cancelGraceMs: CODEX_CALLABLE_ADAPTER.cancelGraceMs,
-    maxOutputBytes: CODEX_CALLABLE_ADAPTER.maxOutputBytes
+    transportKind: "process" as const,
+    timeoutMs: CODEX_CONNECTOR.timeoutMs,
+    cancelGraceMs: CODEX_CONNECTOR.cancelGraceMs,
+    maxOutputBytes: CODEX_CONNECTOR.maxOutputBytes
   };
-  readonly entrypoint: string;
+  readonly resourceBinding = {
+    schemaVersion: 1 as const,
+    bindingId: "codex.process.code-analysis",
+    childAgentId: CODEX_CONNECTOR.childAgentId,
+    connectorId: CODEX_CONNECTOR.connectorId,
+    transportKind: "process" as const,
+    capabilityIds: [...CODEX_CONNECTOR.capabilityIds]
+  };
+  readonly fixedProcessEntrypoint: string;
   private readonly codexHome: string | undefined;
 
-  constructor(options: CodexCallableAdapterOptions) {
-    this.entrypoint = options.entrypoint;
+  constructor(options: CodexConnectorOptions) {
+    this.fixedProcessEntrypoint = options.entrypoint;
     this.codexHome = options.codexHome;
   }
 
-  createLaunchSpec(context: Readonly<CallableAdapterLaunchContext>) {
+  createExecutionSpec(context: Readonly<AgentConnectorContext>) {
     return {
-      executable: this.entrypoint,
+      kind: "process" as const,
+      executable: this.fixedProcessEntrypoint,
       args: [
         ...CODEX_CONTROLLED_EXEC_ARGS,
         ...(context.images ?? []).flatMap((image) => ["--image", image.path]),
@@ -124,9 +134,9 @@ export class CodexCallableAdapter implements CallableAdapter {
   }
 }
 
-export async function qualifyCodexCallableAdapter(
-  options: QualifyCodexAdapterOptions = {}
-): Promise<CodexAdapterQualification> {
+export async function qualifyCodexConnector(
+  options: QualifyCodexConnectorOptions = {}
+): Promise<CodexConnectorQualification> {
   const now = options.now ?? (() => new Date());
   const environment = options.environment ?? process.env;
   const homeDirectory = options.homeDirectory ?? homedir();
@@ -139,13 +149,13 @@ export async function qualifyCodexCallableAdapter(
   if (options.signal?.aborted) {
     return {
       readiness: readiness("degraded", checkedAt, "CODEX_QUALIFICATION_ABORTED"),
-      adapter: null
+      connector: null
     };
   }
   if (!entrypoint) {
     return {
       readiness: readiness("not_detected", checkedAt, "CODEX_EXECUTABLE_NOT_FOUND"),
-      adapter: null
+      connector: null
     };
   }
 
@@ -162,13 +172,13 @@ export async function qualifyCodexCallableAdapter(
         checkedAt,
         loginState === "needs_login" ? "CODEX_LOGIN_REQUIRED" : "CODEX_LOGIN_PROBE_FAILED"
       ),
-      adapter: null
+      connector: null
     };
   }
 
   return {
     readiness: readiness("ready", checkedAt),
-    adapter: new CodexCallableAdapter({
+    connector: new CodexConnector({
       entrypoint,
       ...(environment.CODEX_HOME ? { codexHome: environment.CODEX_HOME } : {})
     })
@@ -264,11 +274,11 @@ function readiness(
 ): AgentAdapterReadiness {
   return {
     schemaVersion: 1,
-    agentId: CODEX_CALLABLE_ADAPTER.agentId,
-    adapterId: CODEX_CALLABLE_ADAPTER.adapterId,
-    adapterRevision: CODEX_CALLABLE_ADAPTER.adapterRevision,
+    agentId: CODEX_CONNECTOR.childAgentId,
+    adapterId: CODEX_CONNECTOR.connectorId,
+    adapterRevision: CODEX_CONNECTOR.connectorRevision,
     state,
-    capabilityIds: [...CODEX_CALLABLE_ADAPTER.capabilityIds],
+    capabilityIds: [...CODEX_CONNECTOR.capabilityIds],
     inputModes: ["text", "image"],
     outputModes: ["text"],
     checkedAt,

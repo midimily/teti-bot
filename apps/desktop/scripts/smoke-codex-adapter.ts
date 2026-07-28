@@ -1,18 +1,20 @@
-import { CallableAdapterKernel } from "../lifecycle-sidecar/runtime/callable/kernel.ts";
-import { qualifyCodexCallableAdapter } from "../../../integrations/agents/codex/adapter.ts";
+import { issueExecutionAuthority } from "../../../core/callability/agent-core.ts";
+import type { CallableAdapterTaskRequest } from "../../../core/callability/adapter.ts";
+import { TetiHostAgentKernel } from "../lifecycle-sidecar/runtime/callable/kernel.ts";
+import { qualifyCodexConnector } from "../../../integrations/agents/codex/adapter.ts";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const EXPECTED_MARKER = "TETI_CODEX_ADAPTER_OK";
 const imagePath = join(dirname(fileURLToPath(import.meta.url)), "..", "src-tauri", "icons", "32x32.png");
-const qualification = await qualifyCodexCallableAdapter();
-if (!qualification.adapter || qualification.readiness.state !== "ready") {
-  throw new Error(`Codex Adapter is not ready: ${qualification.readiness.reasonCode ?? qualification.readiness.state}`);
+const qualification = await qualifyCodexConnector();
+if (!qualification.connector || qualification.readiness.state !== "ready") {
+  throw new Error(`Codex Connector is not ready: ${qualification.readiness.reasonCode ?? qualification.readiness.state}`);
 }
 
-const kernel = new CallableAdapterKernel({ adapters: [qualification.adapter] });
+const hostAgent = new TetiHostAgentKernel({ connectors: [qualification.connector] });
 try {
-  const result = await kernel.execute({
+  const request: CallableAdapterTaskRequest = {
     schemaVersion: 2,
     taskId: `codex-smoke-${Date.now()}`,
     adapterId: "openai.codex.exec",
@@ -28,17 +30,18 @@ try {
       }]
     },
     createdAt: new Date().toISOString()
-  });
+  };
+  const result = await hostAgent.execute(request, issueExecutionAuthority(request));
   if (result.state !== "completed" || result.artifact?.text.trim() !== EXPECTED_MARKER) {
-    throw new Error(`Codex Adapter smoke failed with ${result.safeErrorCode ?? result.state}.`);
+    throw new Error(`Codex Connector smoke failed with ${result.safeErrorCode ?? result.state}.`);
   }
   console.log(JSON.stringify({
     ok: true,
     adapterId: qualification.readiness.adapterId,
     adapterRevision: qualification.readiness.adapterRevision,
-    inputModes: qualification.adapter.descriptor.inputModes,
+    inputModes: qualification.connector.descriptor.inputModes,
     artifact: EXPECTED_MARKER
   }));
 } finally {
-  await kernel.shutdown();
+  await hostAgent.shutdown();
 }

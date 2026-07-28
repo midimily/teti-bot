@@ -10,8 +10,8 @@ test("the current Passport capability advertises only schema 3", () => {
   assert.deepEqual(TETI_SUPPORTED_PASSPORT_SCHEMA_VERSIONS, [3]);
 });
 
-test("unknown and compatible peers select one current Passport schema", () => {
-  assert.equal(selectAiStatusSchemaForPeer(undefined), 3);
+test("only explicitly compatible peers select the current Passport schema", () => {
+  assert.equal(selectAiStatusSchemaForPeer(undefined), null);
   assert.equal(selectAiStatusSchemaForPeer([1, 3]), 3);
   assert.equal(selectAiStatusSchemaForPeer([3, 4]), 3);
 });

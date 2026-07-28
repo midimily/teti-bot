@@ -128,6 +128,46 @@ test("onboarding reset clears first-launch state while preserving Chatmail accou
   }
 });
 
+test("Beta 0.2 onboarding reset clears the active Store but preserves v2 Chatmail accounts", async () => {
+  const home = await mkdtemp(join(tmpdir(), "teti-onboarding-v2-reset-"));
+  try {
+    const storeDir = join(home, ".teti", "store-v2");
+    const accountDir = join(storeDir, "account");
+    const chatmailDir = join(storeDir, "credentials", "chatmail-accounts");
+    await mkdir(accountDir, { recursive: true });
+    await mkdir(chatmailDir, { recursive: true });
+    await writeFile(
+      join(accountDir, "account.json"),
+      JSON.stringify({
+        id: "teti_v2a123xyz",
+        address: "v2a123xyz@mail.seep.im"
+      }),
+      "utf8"
+    );
+    for (const file of [
+      "connections.json",
+      "messages.json",
+      "tasks.json",
+      "peer-protocol-capabilities.json"
+    ]) {
+      await writeFile(join(storeDir, file), "{}", "utf8");
+    }
+    await writeFile(join(chatmailDir, "accounts.toml"), "preserved-v2", "utf8");
+
+    const result = await resetTetiOnboarding({
+      home,
+      confirmation: ONBOARDING_RESET_CONFIRMATION
+    });
+
+    assert.equal(result.localTetiId, "teti_v2a123xyz");
+    await assert.rejects(() => stat(accountDir), /ENOENT/);
+    await assert.rejects(() => stat(join(storeDir, "tasks.json")), /ENOENT/);
+    assert.equal(await readFile(join(chatmailDir, "accounts.toml"), "utf8"), "preserved-v2");
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
 test("onboarding reset refuses to run while the Teti Runtime lock owner is alive", async () => {
   const home = await mkdtemp(join(tmpdir(), "teti-onboarding-active-"));
   try {
@@ -241,6 +281,7 @@ test("onboarding reset target list excludes the Chatmail credential directory", 
     false
   );
   assert.ok(targets.includes(join(home, ".teti", "account")));
+  assert.ok(targets.includes(join(home, ".teti", "store-v2", "account")));
   assert.ok(targets.includes(join(home, "Library", "Logs", "Teti")));
 });
 

@@ -36,7 +36,7 @@ mail.seep.im is used as a relay for encrypted messages. The relay transports cip
 
 ### Layer 3: Confirmed-peer application semantics
 
-The version-1 Teti Application Envelope carries Passport and Task semantic
+The version-2 Teti Application Envelope carries Passport and Task semantic
 objects over Chatmail. Beta 0.1.12 adds reliable text and image Task input,
 transport receipts, explicit allow-once execution, state synchronization,
 cancellation and bounded text Artifacts with identity binding, TTL,
@@ -46,7 +46,19 @@ delivery.
 This layer is A2A-aligned at the Task model boundary, but it is not a public A2A
 endpoint and does not replace A2A. Transport receipt is separate from local
 user approval and Agent execution. Local execution remains behind a qualified
-Adapter, an isolated task directory and a short-lived single-use grant.
+Host Agent, an isolated task directory and a short-lived single-use Authority.
+
+### Layer 4: Host/Child Agent execution
+
+Beta 0.2.1 freezes `TetiHostAgent`, `LocalChildAgent`, `AgentConnector`,
+`ExecutionTransport`, `ExecutionAuthority`, and `AgentResourceBinding`.
+Collaboration stays Teti-owned while Codex and CodeBuddy become local Child
+Agents reached through provider Connectors and `ProcessTransport`.
+
+The Host owns authorization, workspaces, lifecycle, limits and Artifact
+persistence. A Connector owns provider-specific invocation and decoding but
+cannot access Passport, Chatmail or peer identity through its contract.
+Transport details remain local and cannot enter a Task or Passport.
 
 ## Boundary
 

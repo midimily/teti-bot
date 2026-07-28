@@ -83,7 +83,7 @@ export class MemoryTetiAccountStorage implements TetiAccountStorage {
 }
 
 export function defaultTetiAccountPath(): string {
-  return join(homedir(), ".teti", "account.json");
+  return join(homedir(), ".teti", "store-v2", "account", "account.json");
 }
 
 function validateStoredAccount(account: TetiAccount): void {

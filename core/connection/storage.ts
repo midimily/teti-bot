@@ -146,7 +146,7 @@ export class MemoryTetiConnectionStorage implements TetiConnectionStorage {
 }
 
 export function defaultTetiConnectionsPath(): string {
-  return join(homedir(), ".teti", "connections.json");
+  return join(homedir(), ".teti", "store-v2", "connections.json");
 }
 
 export function validateConnectionStore(store: TetiConnectionStore): void {

@@ -7,13 +7,14 @@ import type {
 } from "./types.ts";
 
 export const TETI_TASK_TRANSPORT_SCHEMA_VERSION = 1;
-export const TETI_SUPPORTED_TASK_PROTOCOL_VERSIONS = [1, 2, 3] as const;
+export const TETI_TASK_TRANSPORT_STORE_SCHEMA_VERSION = 2;
+export const TETI_SUPPORTED_TASK_PROTOCOL_VERSIONS = [4] as const;
 export const DEFAULT_TASK_REQUEST_TTL_MS = 60 * 60 * 1_000;
 export const MAX_TASK_CLOCK_SKEW_MS = 5 * 60 * 1_000;
 export const MAX_TASK_PROTOCOL_VERSIONS = 8;
 export const MAX_TASK_TRANSPORT_RECORDS = 512;
 
-export type TetiTaskProtocolVersion = 1 | 2 | 3;
+export type TetiTaskProtocolVersion = 1 | 2 | 3 | 4;
 
 export type TetiTaskReceiptStatus =
   | "received"
@@ -53,6 +54,56 @@ export interface TetiTaskAttachmentPayload {
   part: TaskImagePart;
   createdAt: string;
   expiresAt: string;
+  /** Task v4 requests a durable per-attachment receipt. Omitted by v1-v3. */
+  deliveryReceiptRequested?: true;
+}
+
+/**
+ * Task v4 end-to-end delivery receipt. The receiver sends this only after the
+ * attachment bytes have been validated and durably copied into the local Task
+ * store. Chatmail queueing or download completion alone is not an ACK.
+ */
+export interface TetiTaskAttachmentReceiptPayload {
+  schemaVersion: 1;
+  taskId: string;
+  requesterTetiId: string;
+  targetTetiId: string;
+  purpose: TetiTaskAttachmentPurpose;
+  artifactId?: string;
+  attachmentId: string;
+  receivedAt: string;
+}
+
+export interface TaskAttachmentDeliveryAttempt {
+  attachmentId: string;
+  attempts: number;
+  lastSentAt: string;
+  nextRetryAt: string;
+}
+
+export type TaskAttachmentDiagnosticState =
+  | "expected"
+  | "sent"
+  | "stored"
+  | "acknowledged"
+  | "expired"
+  | "failed";
+
+/** Local-only delivery evidence. It never crosses the Application Envelope. */
+export interface TaskAttachmentDiagnostic {
+  attachmentId: string;
+  purpose: TetiTaskAttachmentPurpose;
+  ordinal: number;
+  expectedCount: number;
+  byteLength: number;
+  sha256: string;
+  attempts: number;
+  state: TaskAttachmentDiagnosticState;
+  firstSentAt?: string;
+  lastSentAt?: string;
+  storedAt?: string;
+  receiptReceivedAt?: string;
+  safeErrorCode?: string;
 }
 
 export interface TetiTaskStatusPayload {
@@ -117,6 +168,11 @@ export interface CollaborationTaskTransportRecord {
   chatmailMessageId?: number;
   sentAttachmentIds?: string[];
   sentArtifactAttachmentIds?: string[];
+  acknowledgedAttachmentIds?: string[];
+  acknowledgedArtifactAttachmentIds?: string[];
+  attachmentDeliveryAttempts?: TaskAttachmentDeliveryAttempt[];
+  artifactAttachmentDeliveryAttempts?: TaskAttachmentDeliveryAttempt[];
+  attachmentDiagnostics?: TaskAttachmentDiagnostic[];
   request: CollaborationTaskRequest;
   state: CollaborationTaskState;
   approval: TaskApprovalState;
@@ -144,6 +200,7 @@ export interface CollaborationTaskSummary {
   capabilityId: string;
   textPreview: string;
   imageCount: number;
+  receivedImageCount: number;
   artifactCount: number;
   state: CollaborationTaskState;
   approval: TaskApprovalState;
@@ -177,7 +234,7 @@ export interface CollaborationTaskTransportSnapshot {
 }
 
 export interface TetiTaskTransportStoreState {
-  schemaVersion: 1;
+  schemaVersion: 2;
   records: CollaborationTaskTransportRecord[];
   peers: TetiTaskPeerProtocolCapability[];
 }

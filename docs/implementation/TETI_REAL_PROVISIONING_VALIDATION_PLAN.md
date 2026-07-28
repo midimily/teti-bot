@@ -6,7 +6,7 @@ Current local storage paths:
 
 - Teti account: `~/.teti/account.json` from `core/account/storage.ts`.
 - Teti connection store: `~/.teti/connections.json` from `core/connection/storage.ts`.
-- Teti application messages: `~/.teti/messages.json` from `core/application/manager.ts`.
+- Teti application replay state: `~/.teti/store-v2/messages.json` from `core/application/manager.ts`.
 - Chatmail accounts: `~/.teti/chatmail-accounts` from `integrations/chatmail/runtime-config.ts`.
 - Chatmail RPC server path: `TETI_DELTACHAT_RPC_PATH` or `deltachat-rpc-server`.
 - Chatmail accounts override: `TETI_CHATMAIL_ACCOUNTS_PATH`.

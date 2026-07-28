@@ -5,6 +5,7 @@ import {
   TETI_SUPPORTED_TASK_PROTOCOL_VERSIONS,
   type TetiTaskProtocolVersion,
   type TetiTaskArtifactPayload,
+  type TetiTaskAttachmentReceiptPayload,
   type TetiTaskAttachmentPayload,
   type TetiTaskCancelPayload,
   type TetiTaskReceiptPayload,
@@ -82,7 +83,7 @@ export function validateTaskAttachmentPayload(
     "part",
     "createdAt",
     "expiresAt"
-  ], ["artifactId"], "Task attachment");
+  ], ["artifactId", "deliveryReceiptRequested"], "Task attachment");
   if (payload.schemaVersion !== 1) throw new TaskTransportContractError("Unsupported Task attachment version.");
   taskIdentity(payload);
   if (payload.purpose !== "input" && payload.purpose !== "artifact") {
@@ -92,10 +93,40 @@ export function validateTaskAttachmentPayload(
   if (payload.purpose === "input" && payload.artifactId !== undefined) {
     throw new TaskTransportContractError("Task input attachment cannot name an Artifact.");
   }
+  if (payload.deliveryReceiptRequested !== undefined && payload.deliveryReceiptRequested !== true) {
+    throw new TaskTransportContractError("Task attachment receipt request is invalid.");
+  }
   validateTaskImagePart(payload.part);
   const createdAt = timestamp(payload.createdAt, "createdAt");
   const expiresAt = timestamp(payload.expiresAt, "expiresAt");
   if (expiresAt <= createdAt) throw new TaskTransportContractError("Task attachment expiry is invalid.");
+}
+
+export function validateTaskAttachmentReceiptPayload(
+  value: unknown
+): asserts value is TetiTaskAttachmentReceiptPayload {
+  const payload = exactOptionalRecord(value, [
+    "schemaVersion",
+    "taskId",
+    "requesterTetiId",
+    "targetTetiId",
+    "purpose",
+    "attachmentId",
+    "receivedAt"
+  ], ["artifactId"], "Task attachment receipt");
+  if (payload.schemaVersion !== 1) {
+    throw new TaskTransportContractError("Unsupported Task attachment receipt version.");
+  }
+  taskIdentity(payload);
+  if (payload.purpose !== "input" && payload.purpose !== "artifact") {
+    throw new TaskTransportContractError("Task attachment receipt purpose is invalid.");
+  }
+  safeId(payload.attachmentId, "attachmentId");
+  if (payload.purpose === "artifact") safeId(payload.artifactId, "artifactId");
+  if (payload.purpose === "input" && payload.artifactId !== undefined) {
+    throw new TaskTransportContractError("Task input attachment receipt cannot name an Artifact.");
+  }
+  timestamp(payload.receivedAt, "receivedAt");
 }
 
 export function validateTaskStatusPayload(
@@ -161,15 +192,11 @@ export function validateTaskArtifactPayload(
   timestamp(payload.createdAt, "createdAt");
 }
 
-/**
- * Unknown peers receive the compatibility floor so a currently-offline current
- * peer can still receive its first Task. Once a peer has advertised versions,
- * no common version is a hard failure instead of a speculative send.
- */
+/** Beta 0.2 never speculatively downgrades or sends before a v4 advertisement. */
 export function selectTaskProtocolVersion(
   remoteVersions?: readonly number[]
 ): TetiTaskProtocolVersion | null {
-  if (!remoteVersions) return TETI_SUPPORTED_TASK_PROTOCOL_VERSIONS[0];
+  if (!remoteVersions) return null;
   const supported = [...TETI_SUPPORTED_TASK_PROTOCOL_VERSIONS]
     .sort((left, right) => right - left)
     .find((version) => remoteVersions.includes(version));

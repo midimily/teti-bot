@@ -5,7 +5,8 @@ import type { PassportConnectionSnapshot } from "../../../core/passport/snapshot
 import { toConnectionCardViewModel } from "../src/passport/view-model.ts";
 
 const now = Date.parse("2026-07-19T04:00:00.000Z");
-const remoteHeartbeatFreshMs = 15_000;
+const remoteHeartbeatFreshMs = 20_000;
+const remoteHeartbeatOfflineMs = 60_000;
 
 test("a fresh confirmed peer maps to the blue online presentation", () => {
   const connection = confirmedPeer(new Date(now - remoteHeartbeatFreshMs + 1).toISOString());
@@ -14,17 +15,40 @@ test("a fresh confirmed peer maps to the blue online presentation", () => {
   assert.equal(viewModel.reachabilityLabel, "在线");
 });
 
-test("a stale confirmed peer maps to the gray offline presentation", () => {
+test("a briefly stale confirmed peer maps to the checking presentation", () => {
   const connection = confirmedPeer(new Date(now - remoteHeartbeatFreshMs).toISOString());
+  const viewModel = toConnectionCardViewModel(connection, new Date(now));
+  assert.equal(viewModel.reachability, "checking");
+  assert.equal(viewModel.reachabilityLabel, "状态检测中");
+});
+
+test("a heartbeat beyond the grace window maps to the gray offline presentation", () => {
+  const connection = confirmedPeer(new Date(now - remoteHeartbeatOfflineMs).toISOString());
   const viewModel = toConnectionCardViewModel(connection, new Date(now));
   assert.equal(viewModel.reachability, "unreachable");
   assert.equal(viewModel.reachabilityLabel, "离线");
 });
 
-test("missing, invalid, and non-confirmed heartbeat state fail closed to offline", () => {
+test("a newly confirmed peer without a heartbeat gets one bounded checking window", () => {
+  const recent = {
+    ...confirmedPeer(undefined),
+    confirmedAt: new Date(now - 1_000).toISOString(),
+    updatedAt: new Date(now - 1_000).toISOString()
+  };
+  assert.equal(toConnectionCardViewModel(recent, new Date(now)).reachability, "checking");
+
+  const expired = {
+    ...recent,
+    confirmedAt: new Date(now - remoteHeartbeatOfflineMs).toISOString(),
+    updatedAt: new Date(now - remoteHeartbeatOfflineMs).toISOString()
+  };
+  assert.equal(toConnectionCardViewModel(expired, new Date(now)).reachability, "unreachable");
+});
+
+test("invalid, future, and non-confirmed heartbeat state fail closed to offline", () => {
   const cases = [
-    confirmedPeer(undefined),
     confirmedPeer("not-a-date"),
+    confirmedPeer(new Date(now + 1_000).toISOString()),
     { ...confirmedPeer(new Date(now).toISOString()), connectionState: "Requested" as const }
   ];
 
@@ -45,7 +69,7 @@ test("different peer cards derive reachability independently", () => {
   );
 });
 
-test("remote avatar uses one transparent source mask with no animation or status dot", async () => {
+test("remote avatar uses an accessible blue silhouette with a static yellow checking dot", async () => {
   const [component, app, styles, asset] = await Promise.all([
     readFile(new URL("../src/connections/remote-teti-avatar.ts", import.meta.url), "utf8"),
     readFile(new URL("../src/app.ts", import.meta.url), "utf8"),
@@ -53,29 +77,43 @@ test("remote avatar uses one transparent source mask with no animation or status
     readFile(new URL("../assets/remote-teti-silhouette.png", import.meta.url))
   ]);
   const avatarStyles = cssBlock(styles, ".teti-remote-avatar");
+  const silhouetteStyles = cssBlock(styles, ".teti-remote-avatar-silhouette");
+  const checkingStyles = cssBlock(styles, ".teti-remote-avatar.is-checking");
+  const indicatorStyles = cssBlock(styles, ".teti-remote-avatar-indicator");
 
   assert.equal(asset.readUInt32BE(16), 929);
   assert.equal(asset.readUInt32BE(20), 816);
   assert.equal(asset[25], 4, "PNG should use grayscale plus alpha for a reusable mask");
   assert.match(component, /remote-teti-silhouette\.png/);
-  assert.match(component, /aria-hidden", "true"/);
-  assert.match(avatarStyles, /mask-image/);
-  assert.doesNotMatch(avatarStyles, /animation|box-shadow|border-radius/);
+  assert.match(component, /setAttribute\("role", "img"\)/);
+  assert.match(component, /aria-label/);
+  assert.match(component, /teti-remote-avatar-silhouette/);
+  assert.match(component, /teti-remote-avatar-indicator/);
+  assert.doesNotMatch(avatarStyles, /mask-image/);
+  assert.match(silhouetteStyles, /mask-image/);
+  assert.match(checkingStyles, /var\(--teti-remote-reachable\)/);
+  assert.match(indicatorStyles, /position:\s*absolute/);
+  assert.match(indicatorStyles, /background:\s*var\(--teti-remote-checking\)/);
+  assert.doesNotMatch(indicatorStyles, /animation/);
   assert.match(styles, /--teti-remote-reachable:\s*var\(--teti-blue-primary\)/);
   assert.match(styles, /--teti-remote-unreachable:\s*#aebdca/);
   assert.doesNotMatch(app, /createElement\(Radio/);
 });
 
-test("confirmed cards retain relationship and AI status while the brand stays isolated", async () => {
+test("confirmed cards use only the avatar for presence while retaining AI status", async () => {
   const [app, styles] = await Promise.all([
     readFile(new URL("../src/app.ts", import.meta.url), "utf8"),
     readFile(new URL("../src/styles.css", import.meta.url), "utf8")
   ]);
 
-  assert.match(app, /row\.prepend\(createRemoteTetiAvatar\(\{ reachability: connection\.reachability, size: 28 \}\)\)/);
-  assert.match(app, /relationship\.textContent = "已建联"/);
-  assert.match(app, /`\[对方\$\{connection\.reachabilityLabel\}\]`/);
-  assert.match(app, /state\.append\(presence, createRemotePassport\(connection\.passport\)\)/);
+  assert.match(app, /row\.prepend\(createRemoteTetiAvatar\(\{/);
+  assert.match(app, /label:\s*connection\.reachabilityLabel/);
+  assert.doesNotMatch(app, /teti-connection-presence|teti-connection-relationship|teti-connection-reachability/);
+  assert.match(app, /state\.append\(createRemotePassport\(connection\.passport\)\)/);
+  assert.match(app, /connection\.compatibility !== "compatible"/);
+  assert.match(app, /setAttribute\("role", "alertdialog"\)/);
+  assert.match(app, /本机 Teti 的所有功能均暂停使用/);
+  assert.doesNotMatch(app, /teti-protocol-blocker-button/);
   assert.match(app, /const brand = createTetiBotBrandLink\(\{ ownerDocument: header\.ownerDocument \}\)/);
   assert.doesNotMatch(app, /teti-brand-dot/);
   assert.match(

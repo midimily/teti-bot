@@ -56,7 +56,10 @@ test("pending connection is rejected before sending", async () => {
     () =>
       manager.sendPresence("request-1", {
         status: "online",
-        timestamp: fixedNow
+        timestamp: fixedNow,
+        collaborationProtocolEpoch: 2,
+        taskProtocolVersions: [4],
+        passportSchemaVersions: [3]
       }),
     /Confirmed connection/
   );
@@ -67,7 +70,7 @@ test("invalid application envelope is rejected", () => {
   assert.throws(
     () =>
       validateApplicationEnvelope({
-        version: 1,
+        version: 2,
         type: "teti.capability.offer",
         messageId: "bad-message",
         fromTetiId: "teti_remote001",
@@ -83,16 +86,44 @@ test("invalid application envelope is rejected", () => {
   );
 });
 
+test("0.1 Application Envelopes are rejected before their payload is parsed", () => {
+  assert.throws(() => validateApplicationEnvelope({
+    version: 1,
+    type: "teti.task.request",
+    messageId: "legacy-task",
+    fromTetiId: "teti_remote001",
+    createdAt: fixedNow,
+    payload: { privateKey: "must-never-be-inspected-as-a-task" }
+  }), /Unsupported Teti application envelope version/);
+});
+
+test("0.2 Application Envelopes reject historical Passport payloads", () => {
+  assert.throws(() => validateApplicationEnvelope({
+    version: 2,
+    type: "teti.ai.status.sync",
+    messageId: "legacy-passport",
+    fromTetiId: "teti_remote001",
+    createdAt: fixedNow,
+    payload: {
+      schemaVersion: 1,
+      sharing: "disabled",
+      generatedAt: fixedNow,
+      expiresAt: "2026-07-11T01:00:00.000Z",
+      tools: []
+    }
+  }), /AI status sync payload is invalid/);
+});
+
 test("application protocol rejects a non-canonical fromTetiId", () => {
   assert.throws(
     () =>
       validateApplicationEnvelope({
-        version: 1,
+        version: 2,
         type: "teti.presence",
         messageId: "bad-public-id",
         fromTetiId: "teti_REMOTE001",
         createdAt: fixedNow,
-        payload: { status: "online", timestamp: fixedNow }
+        payload: { status: "online", timestamp: fixedNow, collaborationProtocolEpoch: 2 }
       }),
     (error) =>
       error instanceof TetiApplicationProtocolError &&
@@ -102,7 +133,7 @@ test("application protocol rejects a non-canonical fromTetiId", () => {
 
 test("Presence accepts explicit Passport capability and rejects malformed version lists", () => {
   assert.doesNotThrow(() => validateApplicationEnvelope({
-    version: 1,
+    version: 2,
     type: "teti.presence",
     messageId: "passport-capability",
     fromTetiId: "teti_remote001",
@@ -110,49 +141,56 @@ test("Presence accepts explicit Passport capability and rejects malformed versio
     payload: {
       status: "online",
       timestamp: fixedNow,
-      taskProtocolVersions: [1, 2],
+      collaborationProtocolEpoch: 2,
+      taskProtocolVersions: [4],
       passportSchemaVersions: [3]
     }
   }));
-  for (const passportSchemaVersions of [[], [3, 3], [0], [256]]) {
+  for (const passportSchemaVersions of [[], [1], [3, 3], [0], [3, 4], [256]]) {
     assert.throws(() => validateApplicationEnvelope({
-      version: 1,
+      version: 2,
       type: "teti.presence",
       messageId: "bad-passport-capability",
       fromTetiId: "teti_remote001",
       createdAt: fixedNow,
-      payload: { status: "online", timestamp: fixedNow, passportSchemaVersions }
+      payload: {
+        status: "online",
+        timestamp: fixedNow,
+        collaborationProtocolEpoch: 2,
+        taskProtocolVersions: [4],
+        passportSchemaVersions
+      }
     }), /Passport schema versions/);
   }
 });
 
 test("application protocol rejects oversized raw JSON and envelope extension fields", () => {
   const oversized = JSON.stringify({
-    version: 1,
+    version: 2,
     type: "teti.presence",
     messageId: "oversized-message",
     fromTetiId: "teti_remote001",
     createdAt: fixedNow,
-    payload: { status: "online", timestamp: fixedNow },
+    payload: { status: "online", timestamp: fixedNow, collaborationProtocolEpoch: 2 },
     padding: "x".repeat(MAX_TETI_APPLICATION_ENVELOPE_BYTES)
   });
   assert.throws(() => parseApplicationEnvelope(oversized), /exceeds the allowed size/);
   assert.throws(() => validateApplicationEnvelope({
-    version: 1,
+    version: 2,
     type: "teti.presence",
     messageId: "extension-message",
     fromTetiId: "teti_remote001",
     createdAt: fixedNow,
-    payload: { status: "online", timestamp: fixedNow },
+    payload: { status: "online", timestamp: fixedNow, collaborationProtocolEpoch: 2 },
     command: "unsafe"
   }), /unsupported field/);
   assert.throws(() => validateApplicationEnvelope({
-    version: 1,
+    version: 2,
     type: "teti.presence",
     messageId: "payload-extension-message",
     fromTetiId: "teti_remote001",
     createdAt: fixedNow,
-    payload: { status: "online", timestamp: fixedNow, command: "unsafe" }
+    payload: { status: "online", timestamp: fixedNow, collaborationProtocolEpoch: 2, command: "unsafe" }
   }), /unsupported field/);
 });
 
@@ -168,7 +206,10 @@ test("duplicate message is ignored after first processing", async () => {
     createdAt: fixedNow,
     payload: {
       status: "online",
-      timestamp: fixedNow
+      timestamp: fixedNow,
+      collaborationProtocolEpoch: 2,
+      taskProtocolVersions: [4],
+      passportSchemaVersions: [3]
     }
   });
   chatmailAdapter.receivedMessages.push(
@@ -233,22 +274,35 @@ test("Task request and receipt use the existing Application Envelope", async () 
     messageId: "task-envelope"
   });
   const request = {
-    schemaVersion: 1 as const,
+    schemaVersion: 4 as const,
     taskId: "task-001",
     requesterTetiId: "teti_local0001",
     targetTetiId: "teti_remote001",
     offerId: "offer-001",
     capabilityId: "code-analysis",
-    input: { kind: "text" as const, text: "Review this text." },
+    input: { kind: "parts" as const, parts: [{ kind: "text" as const, text: "Review this text." }] },
     createdAt: fixedNow,
     expiresAt: "2026-07-11T01:00:00.000Z"
   };
 
   const sent = await manager.sendTaskRequest("request-1", request);
-  assert.equal(sent.envelope.version, 1);
+  assert.equal(sent.envelope.version, 2);
   assert.equal(sent.envelope.type, "teti.task.request");
   assert.equal((sent.envelope.payload as typeof request).taskId, "task-001");
   assert.equal(chatmailAdapter.sendCalls.length, 1);
+
+  const attachmentReceipt = await manager.sendTaskAttachmentReceipt("request-1", {
+    schemaVersion: 1,
+    taskId: request.taskId,
+    requesterTetiId: request.requesterTetiId,
+    targetTetiId: request.targetTetiId,
+    purpose: "input",
+    attachmentId: "image-001",
+    receivedAt: fixedNow
+  });
+  assert.equal(attachmentReceipt.envelope.type, "teti.task.attachment.receipt");
+  assert.equal(chatmailAdapter.sendCalls.length, 2);
+  assert.equal(chatmailAdapter.sendCalls[1]?.attachment, undefined);
 
   assert.throws(() => createApplicationEnvelope({
     type: "teti.task.request",

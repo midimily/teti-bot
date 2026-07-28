@@ -11,6 +11,7 @@ import {
 import type { LifecycleErrorDto } from "../src/lifecycle-bridge/protocol.ts";
 import { createLifecycleError } from "./security.ts";
 import { writeRuntimeDiagnostic } from "./diagnostics.ts";
+import { migrateTetiProfileToV2 } from "./profile-migration.ts";
 
 export const TETI_PROFILE_DIR = "TETI_PROFILE_DIR";
 export const TETI_ALLOW_REAL_PROVISIONING = "TETI_ALLOW_REAL_PROVISIONING";
@@ -19,6 +20,9 @@ export const TETI_DESKTOP_NATIVE_PROVISIONING = "TETI_DESKTOP_NATIVE_PROVISIONIN
 
 export interface TetiProfile {
   root: string;
+  storeDir: string;
+  profileMetadataPath: string;
+  legacyArchiveDir: string;
   accountDir: string;
   accountPath: string;
   credentialsDir: string;
@@ -43,12 +47,16 @@ export async function resolveTetiProfile(env: NodeJS.ProcessEnv = process.env): 
   const explicitRoot = env[TETI_PROFILE_DIR];
   const root = normalizeProfileRoot(explicitRoot ?? defaultProductionProfileRoot());
   const productionRoot = normalizeProfileRoot(defaultProductionProfileRoot());
+  const storeDir = join(root, "store-v2");
   const profile: TetiProfile = {
     root,
-    accountDir: join(root, "account"),
-    accountPath: join(root, "account", "account.json"),
-    credentialsDir: join(root, "credentials"),
-    chatmailAccountsPath: join(root, "credentials", "chatmail-accounts"),
+    storeDir,
+    profileMetadataPath: join(root, "profile.json"),
+    legacyArchiveDir: join(root, "legacy-0.1"),
+    accountDir: join(storeDir, "account"),
+    accountPath: join(storeDir, "account", "account.json"),
+    credentialsDir: join(storeDir, "credentials"),
+    chatmailAccountsPath: join(storeDir, "credentials", "chatmail-accounts"),
     lifecycleDir: join(root, "lifecycle"),
     markerPath: join(root, "lifecycle", "creation-marker.json"),
     logsDir: join(root, "logs"),
@@ -62,9 +70,18 @@ export async function resolveTetiProfile(env: NodeJS.ProcessEnv = process.env): 
 }
 
 export async function ensureProfileDirectories(profile: TetiProfile): Promise<void> {
+  await ensureProfileBootstrapDirectories(profile);
+  await migrateTetiProfileToV2(profile);
   await mkdir(profile.accountDir, { recursive: true });
   await mkdir(profile.credentialsDir, { recursive: true });
   await mkdir(profile.chatmailAccountsPath, { recursive: true });
+  await mkdir(profile.lifecycleDir, { recursive: true });
+  await mkdir(profile.logsDir, { recursive: true });
+  await mkdir(profile.diagnosticsDir, { recursive: true });
+}
+
+export async function ensureProfileBootstrapDirectories(profile: TetiProfile): Promise<void> {
+  await mkdir(profile.root, { recursive: true });
   await mkdir(profile.lifecycleDir, { recursive: true });
   await mkdir(profile.logsDir, { recursive: true });
   await mkdir(profile.diagnosticsDir, { recursive: true });
@@ -197,6 +214,8 @@ export async function writeProfileStatus(profile: TetiProfile): Promise<Record<s
   const markerRaw = await readOptionalJson(profile.markerPath);
   return {
     profileRoot: profile.root,
+    profileStore: profile.storeDir,
+    profileSchemaVersion: 2,
     accountPath: profile.accountPath,
     chatmailAccountsPath: profile.chatmailAccountsPath,
     markerPath: profile.markerPath,

@@ -9,14 +9,13 @@ export type AiStatusSchemaVersion = typeof TETI_SUPPORTED_PASSPORT_SCHEMA_VERSIO
 
 /**
  * Passport support is negotiated from an explicit Peer capability, never from
- * the last received Passport snapshot. Unknown peers receive the current
- * schema so a newly confirmed, offline-first Peer can receive its first
- * Callable Passport before its Presence arrives.
+ * the last received Passport snapshot. Beta 0.2 waits for the peer's explicit
+ * epoch-2 Presence and never speculatively sends or downgrades a Passport.
  */
 export function selectAiStatusSchemaForPeer(
   remoteVersions?: readonly number[]
 ): AiStatusSchemaVersion | null {
-  if (!remoteVersions) return TETI_AI_STATUS_SCHEMA_VERSION;
+  if (!remoteVersions) return null;
   const selected = [...TETI_SUPPORTED_PASSPORT_SCHEMA_VERSIONS]
     .sort((left, right) => right - left)
     .find((version) => remoteVersions.includes(version));

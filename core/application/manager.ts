@@ -29,6 +29,7 @@ import type { CollaborationTaskRequest } from "../task/types.ts";
 import type {
   TetiTaskArtifactPayload,
   TetiTaskAttachmentPayload,
+  TetiTaskAttachmentReceiptPayload,
   TetiTaskCancelPayload,
   TetiTaskReceiptPayload,
   TetiTaskStatusPayload
@@ -167,6 +168,17 @@ export class TetiApplicationManager {
       type: "teti.task.attachment",
       payload,
       attachment
+    });
+  }
+
+  async sendTaskAttachmentReceipt(
+    connectionRequestId: string,
+    payload: TetiTaskAttachmentReceiptPayload
+  ): Promise<SentApplicationEnvelope> {
+    return this.sendApplicationEnvelope({
+      connectionRequestId,
+      type: "teti.task.attachment.receipt",
+      payload
     });
   }
 
@@ -368,7 +380,7 @@ export class MemoryTetiMessageTracker implements TetiMessageTracker {
 }
 
 export function defaultTetiMessagesPath(): string {
-  return join(homedir(), ".teti", "messages.json");
+  return join(homedir(), ".teti", "store-v2", "messages.json");
 }
 
 function validateMessageStore(store: TetiProcessedMessageStore): void {

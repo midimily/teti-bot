@@ -18,11 +18,14 @@ test("Task transport store is private, atomic, and fails closed on corruption", 
     assert.equal(metadata.mode & 0o777, 0o600);
     assert.doesNotMatch(await readFile(path, "utf8"), /token|credential|privateKey/);
 
-    await writeFile(path, '{"schemaVersion":1,"records":"damaged","peers":[]}\n', "utf8");
+    await writeFile(path, '{"schemaVersion":2,"records":"damaged","peers":[]}\n', "utf8");
     await assert.rejects(() => store.load(), /records are invalid/);
 
-    await writeFile(path, '{"schemaVersion":1,"records":[],"peers":[],"token":"leak"}\n', "utf8");
+    await writeFile(path, '{"schemaVersion":2,"records":[],"peers":[],"token":"leak"}\n', "utf8");
     await assert.rejects(() => store.load(), /unsupported field/);
+
+    await writeFile(path, '{"schemaVersion":1,"records":[],"peers":[]}\n', "utf8");
+    await assert.rejects(() => store.load(), /Unsupported Teti Task transport store/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

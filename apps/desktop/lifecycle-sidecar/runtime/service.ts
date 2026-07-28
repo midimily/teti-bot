@@ -61,7 +61,7 @@ export interface RuntimeCodexUsageService {
   refreshNow(): Promise<CodexUsageState>;
 }
 
-export interface RuntimeCallableAdapterKernel {
+export interface RuntimeTetiHostAgent {
   getCallableAgents(): CallableAgent[];
   shutdown(): Promise<void>;
 }
@@ -74,7 +74,7 @@ export interface TetiRuntimeDependencies {
   codexUsageService: RuntimeCodexUsageService;
   agentObserver?: RuntimeAgentObserver;
   agentConfiguration?: RuntimeAgentConfiguration;
-  callableAdapterKernel?: RuntimeCallableAdapterKernel;
+  hostAgent?: RuntimeTetiHostAgent;
   dispose?(): Promise<void>;
 }
 
@@ -132,7 +132,7 @@ export class TetiRuntime {
         loadAccount: () => this.loadAccount(),
         getConnections: () => this.peerConnections ?? [],
         getCodexUsage: () => this.getCodexUsageState(),
-        getCallableAgents: () => this.dependencies.callableAdapterKernel?.getCallableAgents() ?? [],
+        getCallableAgents: () => this.dependencies.hostAgent?.getCallableAgents() ?? [],
         getRegistry: () => clone(this.registryStatus),
         getSharing: () => this.dependencies.passportSharingStore.load()
       },
@@ -224,7 +224,7 @@ export class TetiRuntime {
     const draining = this.host.stop();
     const disposing = Promise.resolve().then(() => this.dependencies.dispose?.());
     const stoppingCallableAdapters = Promise.resolve().then(
-      () => this.dependencies.callableAdapterKernel?.shutdown()
+      () => this.dependencies.hostAgent?.shutdown()
     );
     this.stopPromise = settleWithin(
       [draining, disposing, stoppingCallableAdapters],

@@ -16,6 +16,7 @@ import {
   type SendCollaborationTaskInput,
   type TetiTaskArtifactPayload,
   type TetiTaskAttachmentPayload,
+  type TetiTaskAttachmentReceiptPayload,
   type TetiTaskCancelPayload,
   type TetiTaskReceiptPayload,
   type TetiTaskStatusPayload,
@@ -48,11 +49,16 @@ import type {
   CallableAdapterTaskRequest,
   CallableAdapterTaskSnapshot
 } from "../../../../../core/callability/adapter.ts";
+import {
+  issueExecutionAuthority,
+  type ExecutionAuthority
+} from "../../../../../core/callability/agent-core.ts";
 import type { TaskTransportStore } from "./store.ts";
 import type { StagedTaskImage, TaskAttachmentStore } from "./attachments.ts";
 
 const SAFE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const SAFE_SLUG_PATTERN = /^[a-z0-9]+(?:[._-][a-z0-9]+)*$/;
+const ATTACHMENT_RETRY_DELAYS_MS = [15_000, 30_000, 60_000, 120_000, 300_000] as const;
 
 export class TaskTransportRuntimeError extends Error {
   readonly code: string;
@@ -76,8 +82,8 @@ interface TaskTransportRuntimeOptions {
 }
 
 export interface TaskExecutionTarget {
-  adapterId: string;
-  agentId: string;
+  connectorId: string;
+  childAgentId: string;
   capabilityId: string;
 }
 
@@ -86,7 +92,10 @@ export interface TaskExecutionBridge {
     capabilityId: string,
     requiredInputModes: readonly ("text" | "image")[]
   ): TaskExecutionTarget | null;
-  execute(request: CallableAdapterTaskRequest): Promise<CallableAdapterTaskSnapshot>;
+  execute(
+    request: CallableAdapterTaskRequest,
+    authority: ExecutionAuthority
+  ): Promise<CallableAdapterTaskSnapshot>;
   getTask(taskId: string): CallableAdapterTaskSnapshot | null;
   cancel(taskId: string): boolean;
 }
@@ -155,6 +164,7 @@ export class TaskTransportRuntime {
           capabilityId: record.request.capabilityId,
           textPreview: taskInputText(record.request.input).slice(0, 240),
           imageCount: taskInputImages(record.request.input).length,
+          receivedImageCount: receivedInputImageCount(record),
           artifactCount: record.artifactAttachmentsReady === false ? 0 : record.artifacts?.length ?? 0,
           state: record.state,
           approval: record.approval,
@@ -288,7 +298,8 @@ export class TaskTransportRuntime {
       delivery: "queued",
       createdAt: request.createdAt,
       updatedAt: request.createdAt,
-      attachmentsReady: true
+      attachmentsReady: true,
+      attachmentDiagnostics: createAttachmentDiagnostics("input", taskInputImages(request.input))
     };
     state.records.push(record);
     await this.store.save(state);
@@ -392,15 +403,16 @@ export class TaskTransportRuntime {
     connection: TetiConnectionRecord;
     filePath: string;
     receivedAt?: string;
-  }): Promise<void> {
+  }): Promise<TetiTaskAttachmentReceiptPayload | null> {
     if (!this.attachmentStore) {
       throw new TaskTransportRuntimeError("TASK_ATTACHMENTS_UNAVAILABLE", "Task image attachments are unavailable.");
     }
     const account = await this.accountStorage.load();
     if (!account) throw new TaskTransportRuntimeError("TASK_ACCOUNT_REQUIRED", "A local Teti account is required.");
     const payload = input.envelope.payload;
-    if (Date.parse(payload.expiresAt) <= this.now().getTime()) return;
+    if (Date.parse(payload.expiresAt) <= this.now().getTime()) return null;
     const state = await this.store.load();
+    const receivedAt = validTimestampOrNow(input.receivedAt, this.now()).toISOString();
     if (payload.purpose === "artifact") {
       requireOutboundTaskIdentity(input.envelope, input.connection, account.id, payload);
       const record = findTaskRecord(state, "outgoing", account.id, payload.taskId);
@@ -410,7 +422,7 @@ export class TaskTransportRuntime {
           "Task Artifact attachment is waiting for its local Task record."
         );
       }
-      if (record.protocolVersion < 3 || ["failed", "canceled", "rejected"].includes(record.state)) return;
+      if (record.protocolVersion < 3 || ["failed", "canceled", "rejected"].includes(record.state)) return null;
       const artifact = record.artifacts?.find((candidate) => candidate.artifactId === payload.artifactId);
       if (artifact) {
         const declared = taskArtifactImages(artifact).find(
@@ -429,15 +441,17 @@ export class TaskTransportRuntime {
         part: payload.part,
         sourcePath: input.filePath
       });
+      markAttachmentStored(record, "artifact", payload.part, receivedAt);
       if (artifact) record.artifactAttachmentsReady = await this.areArtifactAttachmentsReady(record);
-      record.updatedAt = validTimestampOrNow(input.receivedAt, this.now()).toISOString();
+      record.updatedAt = receivedAt;
       await this.store.save(state);
-      return;
+      return payload.deliveryReceiptRequested
+        ? createAttachmentReceipt(payload, receivedAt)
+        : null;
     }
     requireInboundTaskIdentity(input.envelope, input.connection, account.id, payload);
     const record = findTaskRecord(state, "incoming", payload.requesterTetiId, payload.taskId);
     if (record) {
-      if (isTerminalTaskState(record.state)) return;
       const declared = taskInputImages(record.request.input).find(
         (part) => part.attachmentId === payload.part.attachmentId
       );
@@ -447,6 +461,16 @@ export class TaskTransportRuntime {
           "Task attachment does not match the immutable request."
         );
       }
+      if (isTerminalTaskState(record.state)) {
+        const stored = await this.attachmentStore.resolveImage({
+          taskId: payload.taskId,
+          purpose: "input",
+          part: payload.part
+        });
+        return stored && payload.deliveryReceiptRequested
+          ? createAttachmentReceipt(payload, receivedAt)
+          : null;
+      }
     }
     await this.attachmentStore.ingestImage({
       taskId: payload.taskId,
@@ -455,10 +479,68 @@ export class TaskTransportRuntime {
       sourcePath: input.filePath
     });
     if (record) {
+      markAttachmentStored(record, "input", payload.part, receivedAt);
       record.attachmentsReady = await this.areInputAttachmentsReady(record);
-      record.updatedAt = validTimestampOrNow(input.receivedAt, this.now()).toISOString();
+      record.updatedAt = receivedAt;
       await this.store.save(state);
     }
+    return payload.deliveryReceiptRequested
+      ? createAttachmentReceipt(payload, receivedAt)
+      : null;
+  }
+
+  async receiveAttachmentReceipt(input: {
+    envelope: TetiApplicationEnvelope<TetiTaskAttachmentReceiptPayload>;
+    connection: TetiConnectionRecord;
+    receivedAt?: string;
+  }): Promise<void> {
+    const account = await this.accountStorage.load();
+    if (!account) throw new TaskTransportRuntimeError("TASK_ACCOUNT_REQUIRED", "A local Teti account is required.");
+    const receipt = input.envelope.payload;
+    const state = await this.store.load();
+    const record = receipt.purpose === "input"
+      ? findTaskRecord(state, "outgoing", account.id, receipt.taskId)
+      : findTaskRecord(state, "incoming", receipt.requesterTetiId, receipt.taskId);
+    if (!record || record.protocolVersion < 4) return;
+    if (receipt.purpose === "input") {
+      if (input.envelope.fromTetiId !== receipt.targetTetiId
+        || input.connection.remoteTetiId !== receipt.targetTetiId
+        || receipt.requesterTetiId !== account.id
+        || record.request.targetTetiId !== receipt.targetTetiId
+        || !taskInputImages(record.request.input).some((part) => part.attachmentId === receipt.attachmentId)) {
+        throw new TaskTransportRuntimeError("TASK_IDENTITY_MISMATCH", "Task attachment receipt binding is invalid.");
+      }
+      record.acknowledgedAttachmentIds = appendUnique(
+        record.acknowledgedAttachmentIds,
+        receipt.attachmentId
+      );
+      record.attachmentDeliveryAttempts = removeDeliveryAttempt(
+        record.attachmentDeliveryAttempts,
+        receipt.attachmentId
+      );
+      markAttachmentAcknowledged(record, "input", receipt.attachmentId, receipt.receivedAt);
+    } else {
+      const artifact = record.artifacts?.find((item) => item.artifactId === receipt.artifactId);
+      if (input.envelope.fromTetiId !== receipt.requesterTetiId
+        || input.connection.remoteTetiId !== receipt.requesterTetiId
+        || receipt.targetTetiId !== account.id
+        || record.request.requesterTetiId !== receipt.requesterTetiId
+        || !artifact
+        || !taskArtifactImages(artifact).some((part) => part.attachmentId === receipt.attachmentId)) {
+        throw new TaskTransportRuntimeError("TASK_IDENTITY_MISMATCH", "Task Artifact receipt binding is invalid.");
+      }
+      record.acknowledgedArtifactAttachmentIds = appendUnique(
+        record.acknowledgedArtifactAttachmentIds,
+        receipt.attachmentId
+      );
+      record.artifactAttachmentDeliveryAttempts = removeDeliveryAttempt(
+        record.artifactAttachmentDeliveryAttempts,
+        receipt.attachmentId
+      );
+      markAttachmentAcknowledged(record, "artifact", receipt.attachmentId, receipt.receivedAt);
+    }
+    record.updatedAt = validTimestampOrNow(input.receivedAt, this.now()).toISOString();
+    await this.store.save(state);
   }
 
   async receiveStatus(input: {
@@ -519,6 +601,7 @@ export class TaskTransportRuntime {
       throw new TaskTransportRuntimeError("TASK_ARTIFACT_CONFLICT", "Task Artifact conflicts with the stored result.");
     }
     if (!existing) record.artifacts = [structuredClone(payload.artifact)];
+    initializeAttachmentDiagnostics(record, "artifact", imageParts);
     record.artifactAttachmentsReady = await this.areArtifactAttachmentsReady(record);
     record.updatedAt = validTimestampOrNow(input.receivedAt, this.now()).toISOString();
     await this.store.save(state);
@@ -586,8 +669,8 @@ export class TaskTransportRuntime {
     const execution: CallableAdapterTaskRequest = {
       schemaVersion: 2,
       taskId: record.request.taskId,
-      adapterId: target.adapterId,
-      agentId: target.agentId,
+      adapterId: target.connectorId,
+      agentId: target.childAgentId,
       capabilityId: target.capabilityId,
       input: {
         kind: imageInputs.length > 0 ? "parts" : "text",
@@ -596,7 +679,8 @@ export class TaskTransportRuntime {
       },
       createdAt: this.now().toISOString()
     };
-    void this.executor.execute(execution).then(
+    const authority = createExecutionAuthority(grant, execution, target);
+    void this.executor.execute(execution, authority).then(
       (result) => this.enqueueOperation(() => this.finishExecution(record.request.taskId, result)),
       () => this.enqueueOperation(() => this.finishExecution(record.request.taskId, null))
     ).catch(() => undefined);
@@ -645,6 +729,9 @@ export class TaskTransportRuntime {
       if (record.direction === "outgoing"
         && (record.delivery === "queued" || record.delivery === "send_failed")) {
         await this.trySendStoredRecord(state, record);
+      }
+      if (record.direction === "outgoing" && record.protocolVersion >= 4) {
+        await this.trySendInputAttachments(state, record);
       }
       if (record.direction === "incoming" && record.receiptPending && record.receipt) {
         try {
@@ -710,28 +797,34 @@ export class TaskTransportRuntime {
     const images = taskInputImages(record.request.input);
     if (images.length === 0) return true;
     if (!this.attachmentStore) return false;
+    let ready = true;
     for (const part of images) {
-      if (!await this.attachmentStore.resolveImage({
+      const path = await this.attachmentStore.resolveImage({
         taskId: record.request.taskId,
         purpose: "input",
         part
-      })) return false;
+      });
+      if (path) markAttachmentStored(record, "input", part, this.now().toISOString());
+      else ready = false;
     }
-    return true;
+    return ready;
   }
 
   private async areArtifactAttachmentsReady(record: CollaborationTaskTransportRecord): Promise<boolean> {
     const images = (record.artifacts ?? []).flatMap(taskArtifactImages);
     if (images.length === 0) return true;
     if (!this.attachmentStore) return false;
+    let ready = true;
     for (const part of images) {
-      if (!await this.attachmentStore.resolveImage({
+      const path = await this.attachmentStore.resolveImage({
         taskId: record.request.taskId,
         purpose: "artifact",
         part
-      })) return false;
+      });
+      if (path) markAttachmentStored(record, "artifact", part, this.now().toISOString());
+      else ready = false;
     }
-    return true;
+    return ready;
   }
 
   private async trySendPendingForRecord(
@@ -740,10 +833,11 @@ export class TaskTransportRuntime {
   ): Promise<void> {
     const connection = await this.findConfirmedConnectionForPeer(record.peerTetiId);
     if (!connection) return;
-    if (record.direction === "incoming" && record.artifactPending && record.artifacts?.length) {
+    if (record.direction === "incoming" && record.artifacts?.length
+      && (record.artifactPending || record.protocolVersion >= 4)) {
       const artifact = record.artifacts.at(-1)!;
       for (const part of taskArtifactImages(artifact)) {
-        if (record.sentArtifactAttachmentIds?.includes(part.attachmentId)) continue;
+        if (!shouldSendAttachment(record, part.attachmentId, "artifact", this.now())) continue;
         if (!this.attachmentStore || record.protocolVersion < 3) return;
         const path = await this.attachmentStore.resolveImage({
           taskId: record.request.taskId,
@@ -761,36 +855,44 @@ export class TaskTransportRuntime {
           artifactId: artifact.artifactId,
           part: structuredClone(part),
           createdAt,
-          expiresAt: new Date(Date.parse(createdAt) + DEFAULT_TASK_REQUEST_TTL_MS).toISOString()
+          expiresAt: new Date(Date.parse(createdAt) + DEFAULT_TASK_REQUEST_TTL_MS).toISOString(),
+          ...(record.protocolVersion >= 4 ? { deliveryReceiptRequested: true as const } : {})
         };
         try {
           await this.applicationManager.sendTaskAttachment(connection.requestId, attachmentPayload, {
             path,
             filename: taskImageFileName(part)
           });
-          record.sentArtifactAttachmentIds = [
-            ...(record.sentArtifactAttachmentIds ?? []),
-            part.attachmentId
-          ];
+          record.sentArtifactAttachmentIds = appendUnique(record.sentArtifactAttachmentIds, part.attachmentId);
+          if (record.protocolVersion >= 4) {
+            record.artifactAttachmentDeliveryAttempts = recordDeliveryAttempt(
+              record.artifactAttachmentDeliveryAttempts,
+              part.attachmentId,
+              this.now()
+            );
+          }
+          markAttachmentSent(record, "artifact", part, this.now().toISOString());
           await this.store.save(state);
         } catch {
           return;
         }
       }
-      const payload: TetiTaskArtifactPayload = {
-        schemaVersion: 1,
-        taskId: record.request.taskId,
-        requesterTetiId: record.request.requesterTetiId,
-        targetTetiId: record.request.targetTetiId,
-        artifact: structuredClone(artifact),
-        createdAt: artifact.createdAt
-      };
-      try {
-        await this.applicationManager.sendTaskArtifact(connection.requestId, payload);
-        record.artifactPending = false;
-        await this.store.save(state);
-      } catch {
-        return;
+      if (record.artifactPending) {
+        const payload: TetiTaskArtifactPayload = {
+          schemaVersion: 1,
+          taskId: record.request.taskId,
+          requesterTetiId: record.request.requesterTetiId,
+          targetTetiId: record.request.targetTetiId,
+          artifact: structuredClone(artifact),
+          createdAt: artifact.createdAt
+        };
+        try {
+          await this.applicationManager.sendTaskArtifact(connection.requestId, payload);
+          record.artifactPending = false;
+          await this.store.save(state);
+        } catch {
+          return;
+        }
       }
     }
     if (record.direction === "incoming" && record.statusPending && record.statusRevision) {
@@ -884,6 +986,7 @@ export class TaskTransportRuntime {
           };
       validateTaskArtifact(artifact);
       record.artifacts = [...(record.artifacts ?? []), artifact];
+      initializeAttachmentDiagnostics(record, "artifact", taskArtifactImages(artifact));
       record.artifactPending = true;
       record.artifactAttachmentsReady = true;
       record.state = "completed";
@@ -932,28 +1035,7 @@ export class TaskTransportRuntime {
       return;
     }
     try {
-      for (const part of taskInputImages(record.request.input)) {
-        if (record.sentAttachmentIds?.includes(part.attachmentId)) continue;
-        if (!this.attachmentStore) throw new Error("TASK_ATTACHMENTS_UNAVAILABLE");
-        const staged = await this.attachmentStore.getStagedImage(part);
-        const payload: TetiTaskAttachmentPayload = {
-          schemaVersion: 1,
-          taskId: record.request.taskId,
-          requesterTetiId: record.request.requesterTetiId,
-          targetTetiId: record.request.targetTetiId,
-          purpose: "input",
-          part: structuredClone(part),
-          createdAt: record.request.createdAt,
-          expiresAt: record.request.expiresAt
-        };
-        await this.applicationManager.sendTaskAttachment(connection.requestId, payload, {
-          path: staged.path,
-          filename: staged.safeFileName
-        });
-        record.sentAttachmentIds = [...(record.sentAttachmentIds ?? []), part.attachmentId];
-        record.updatedAt = this.now().toISOString();
-        await this.store.save(state);
-      }
+      await this.trySendInputAttachments(state, record, connection);
       const sent = await this.applicationManager.sendTaskRequest(connection.requestId, record.request);
       record.delivery = "sent";
       record.envelopeMessageId = sent.envelope.messageId;
@@ -965,6 +1047,54 @@ export class TaskTransportRuntime {
     }
     record.updatedAt = this.now().toISOString();
     await this.store.save(state);
+  }
+
+  private async trySendInputAttachments(
+    state: TetiTaskTransportStoreState,
+    record: CollaborationTaskTransportRecord,
+    existingConnection?: TetiConnectionRecord
+  ): Promise<void> {
+    if (record.direction !== "outgoing"
+      || isTerminalTaskState(record.state)
+      || Date.parse(record.request.expiresAt) <= this.now().getTime()) return;
+    const parts = taskInputImages(record.request.input);
+    if (parts.length === 0) return;
+    const connection = existingConnection ?? await this.findConfirmedConnectionForPeer(record.peerTetiId);
+    if (!connection) return;
+    if (!this.attachmentStore) {
+      if (existingConnection) throw new Error("TASK_ATTACHMENTS_UNAVAILABLE");
+      return;
+    }
+    for (const part of parts) {
+      if (!shouldSendAttachment(record, part.attachmentId, "input", this.now())) continue;
+      const staged = await this.attachmentStore.getStagedImage(part);
+      const payload: TetiTaskAttachmentPayload = {
+        schemaVersion: 1,
+        taskId: record.request.taskId,
+        requesterTetiId: record.request.requesterTetiId,
+        targetTetiId: record.request.targetTetiId,
+        purpose: "input",
+        part: structuredClone(part),
+        createdAt: record.request.createdAt,
+        expiresAt: record.request.expiresAt,
+        ...(record.protocolVersion >= 4 ? { deliveryReceiptRequested: true as const } : {})
+      };
+      await this.applicationManager.sendTaskAttachment(connection.requestId, payload, {
+        path: staged.path,
+        filename: staged.safeFileName
+      });
+      record.sentAttachmentIds = appendUnique(record.sentAttachmentIds, part.attachmentId);
+      if (record.protocolVersion >= 4) {
+        record.attachmentDeliveryAttempts = recordDeliveryAttempt(
+          record.attachmentDeliveryAttempts,
+          part.attachmentId,
+          this.now()
+        );
+      }
+      markAttachmentSent(record, "input", part, this.now().toISOString());
+      record.updatedAt = this.now().toISOString();
+      await this.store.save(state);
+    }
   }
 
   private async requireConfirmedConnection(requestId: string): Promise<TetiConnectionRecord> {
@@ -1059,7 +1189,7 @@ function requireMatchingRetry(
 }
 
 function taskInputForVersion(
-  version: 1 | 2 | 3,
+  version: 1 | 2 | 3 | 4,
   text: string,
   attachments: readonly TaskImagePart[]
 ): CollaborationTaskInput {
@@ -1069,6 +1199,72 @@ function taskInputForVersion(
         kind: "parts",
         parts: [{ kind: "text", text }, ...structuredClone(attachments)]
       };
+}
+
+function createAttachmentReceipt(
+  payload: TetiTaskAttachmentPayload,
+  receivedAt: string
+): TetiTaskAttachmentReceiptPayload {
+  return {
+    schemaVersion: 1,
+    taskId: payload.taskId,
+    requesterTetiId: payload.requesterTetiId,
+    targetTetiId: payload.targetTetiId,
+    purpose: payload.purpose,
+    ...(payload.artifactId ? { artifactId: payload.artifactId } : {}),
+    attachmentId: payload.part.attachmentId,
+    receivedAt
+  };
+}
+
+function appendUnique(values: string[] | undefined, value: string): string[] {
+  return values?.includes(value) ? values : [...(values ?? []), value];
+}
+
+function removeDeliveryAttempt(
+  attempts: CollaborationTaskTransportRecord["attachmentDeliveryAttempts"],
+  attachmentId: string
+): CollaborationTaskTransportRecord["attachmentDeliveryAttempts"] {
+  const remaining = attempts?.filter((attempt) => attempt.attachmentId !== attachmentId) ?? [];
+  return remaining.length > 0 ? remaining : undefined;
+}
+
+function shouldSendAttachment(
+  record: CollaborationTaskTransportRecord,
+  attachmentId: string,
+  purpose: "input" | "artifact",
+  now: Date
+): boolean {
+  const sent = purpose === "input" ? record.sentAttachmentIds : record.sentArtifactAttachmentIds;
+  if (record.protocolVersion < 4) return !sent?.includes(attachmentId);
+  const acknowledged = purpose === "input"
+    ? record.acknowledgedAttachmentIds
+    : record.acknowledgedArtifactAttachmentIds;
+  if (acknowledged?.includes(attachmentId)) return false;
+  const attempts = purpose === "input"
+    ? record.attachmentDeliveryAttempts
+    : record.artifactAttachmentDeliveryAttempts;
+  const attempt = attempts?.find((item) => item.attachmentId === attachmentId);
+  return !attempt || Date.parse(attempt.nextRetryAt) <= now.getTime();
+}
+
+function recordDeliveryAttempt(
+  attempts: CollaborationTaskTransportRecord["attachmentDeliveryAttempts"],
+  attachmentId: string,
+  now: Date
+): NonNullable<CollaborationTaskTransportRecord["attachmentDeliveryAttempts"]> {
+  const current = attempts?.find((attempt) => attempt.attachmentId === attachmentId);
+  const nextAttempt = (current?.attempts ?? 0) + 1;
+  const delay = ATTACHMENT_RETRY_DELAYS_MS[
+    Math.min(nextAttempt - 1, ATTACHMENT_RETRY_DELAYS_MS.length - 1)
+  ];
+  const updated = {
+    attachmentId,
+    attempts: nextAttempt,
+    lastSentAt: now.toISOString(),
+    nextRetryAt: new Date(now.getTime() + delay).toISOString()
+  };
+  return [...(attempts ?? []).filter((attempt) => attempt.attachmentId !== attachmentId), updated];
 }
 
 function sameImagePart(left: TaskImagePart, right: TaskImagePart): boolean {
@@ -1107,6 +1303,10 @@ function incomingRecord(
     createdAt: receivedAt,
     updatedAt: receivedAt,
     attachmentsReady: taskInputImages(input.envelope.payload.input).length === 0,
+    attachmentDiagnostics: createAttachmentDiagnostics(
+      "input",
+      taskInputImages(input.envelope.payload.input)
+    ),
     ...(delivery === "expired"
       ? { safeErrorCode: "TASK_EXPIRED" }
       : delivery === "rejected"
@@ -1214,11 +1414,130 @@ function expireRecord(record: CollaborationTaskTransportRecord, timestamp: strin
   record.approval = "expired";
   record.safeErrorCode = "TASK_EXPIRED";
   record.receiptPending = false;
+  for (const diagnostic of record.attachmentDiagnostics ?? []) {
+    if (diagnostic.state === "acknowledged" || diagnostic.state === "stored") continue;
+    diagnostic.state = "expired";
+    diagnostic.safeErrorCode = "TASK_EXPIRED";
+  }
   if (record.direction === "incoming") {
     record.statusRevision = (record.statusRevision ?? 0) + 1;
     record.statusPending = true;
   }
   record.updatedAt = timestamp;
+}
+
+function createAttachmentDiagnostics(
+  purpose: "input" | "artifact",
+  parts: readonly TaskImagePart[]
+): NonNullable<CollaborationTaskTransportRecord["attachmentDiagnostics"]> {
+  return parts.map((part, index) => ({
+    attachmentId: part.attachmentId,
+    purpose,
+    ordinal: index + 1,
+    expectedCount: parts.length,
+    byteLength: part.byteLength,
+    sha256: part.sha256,
+    attempts: 0,
+    state: "expected"
+  }));
+}
+
+function initializeAttachmentDiagnostics(
+  record: CollaborationTaskTransportRecord,
+  purpose: "input" | "artifact",
+  parts: readonly TaskImagePart[]
+): void {
+  const existing = new Map((record.attachmentDiagnostics ?? [])
+    .filter((item) => item.purpose === purpose)
+    .map((item) => [item.attachmentId, item]));
+  const other = (record.attachmentDiagnostics ?? []).filter((item) => item.purpose !== purpose);
+  record.attachmentDiagnostics = [
+    ...other,
+    ...parts.map((part, index) => {
+      const prior = existing.get(part.attachmentId);
+      return {
+        ...(prior ?? createAttachmentDiagnostics(purpose, [part])[0]!),
+        attachmentId: part.attachmentId,
+        purpose,
+        ordinal: index + 1,
+        expectedCount: parts.length,
+        byteLength: part.byteLength,
+        sha256: part.sha256
+      };
+    })
+  ];
+}
+
+function markAttachmentSent(
+  record: CollaborationTaskTransportRecord,
+  purpose: "input" | "artifact",
+  part: TaskImagePart,
+  timestamp: string
+): void {
+  ensureSingleAttachmentDiagnostic(record, purpose, part);
+  const diagnostic = record.attachmentDiagnostics?.find((item) =>
+    item.purpose === purpose && item.attachmentId === part.attachmentId
+  );
+  if (!diagnostic) return;
+  diagnostic.attempts += 1;
+  diagnostic.firstSentAt ??= timestamp;
+  diagnostic.lastSentAt = timestamp;
+  if (diagnostic.state !== "acknowledged" && diagnostic.state !== "stored") diagnostic.state = "sent";
+}
+
+function markAttachmentStored(
+  record: CollaborationTaskTransportRecord,
+  purpose: "input" | "artifact",
+  part: TaskImagePart,
+  timestamp: string
+): void {
+  ensureSingleAttachmentDiagnostic(record, purpose, part);
+  const diagnostic = record.attachmentDiagnostics?.find((item) =>
+    item.purpose === purpose && item.attachmentId === part.attachmentId
+  );
+  if (!diagnostic) return;
+  diagnostic.storedAt ??= timestamp;
+  if (diagnostic.state !== "acknowledged") diagnostic.state = "stored";
+  delete diagnostic.safeErrorCode;
+}
+
+function markAttachmentAcknowledged(
+  record: CollaborationTaskTransportRecord,
+  purpose: "input" | "artifact",
+  attachmentId: string,
+  timestamp: string
+): void {
+  const diagnostic = record.attachmentDiagnostics?.find((item) =>
+    item.purpose === purpose && item.attachmentId === attachmentId
+  );
+  if (!diagnostic) return;
+  diagnostic.receiptReceivedAt = timestamp;
+  diagnostic.state = "acknowledged";
+  delete diagnostic.safeErrorCode;
+}
+
+function ensureSingleAttachmentDiagnostic(
+  record: CollaborationTaskTransportRecord,
+  purpose: "input" | "artifact",
+  part: TaskImagePart
+): void {
+  if (record.attachmentDiagnostics?.some((item) =>
+    item.purpose === purpose && item.attachmentId === part.attachmentId
+  )) return;
+  record.attachmentDiagnostics = [
+    ...(record.attachmentDiagnostics ?? []),
+    ...createAttachmentDiagnostics(purpose, [part])
+  ];
+}
+
+function receivedInputImageCount(record: CollaborationTaskTransportRecord): number {
+  const expected = taskInputImages(record.request.input);
+  if (expected.length === 0) return 0;
+  const delivered = new Set((record.attachmentDiagnostics ?? [])
+    .filter((item) => item.purpose === "input"
+      && (record.direction === "incoming" ? item.state === "stored" : item.state === "acknowledged"))
+    .map((item) => item.attachmentId));
+  return expected.filter((part) => delivered.has(part.attachmentId)).length;
 }
 
 function ensureCapacity(state: TetiTaskTransportStoreState, now: Date): boolean {
@@ -1371,8 +1690,8 @@ function createExecutionGrant(
     taskId: request.taskId,
     requesterTetiId: request.requesterTetiId,
     capabilityId: request.capabilityId,
-    agentId: target.agentId,
-    adapterId: target.adapterId,
+    agentId: target.childAgentId,
+    adapterId: target.connectorId,
     inputDigest: `sha256:${createHash("sha256").update(canonicalTaskRequestJson(request)).digest("hex")}`,
     issuedAt,
     expiresAt: new Date(now.getTime() + 2 * 60 * 1_000).toISOString(),
@@ -1382,4 +1701,21 @@ function createExecutionGrant(
     commandPolicy: "fixed_adapter_entrypoint",
     networkPolicy: "agent_managed"
   };
+}
+
+function createExecutionAuthority(
+  grant: ExecutionGrant,
+  request: CallableAdapterTaskRequest,
+  target: TaskExecutionTarget
+): ExecutionAuthority {
+  if (request.adapterId !== target.connectorId
+    || request.agentId !== target.childAgentId
+    || request.capabilityId !== target.capabilityId) {
+    throw new TaskTransportRuntimeError("TASK_EXECUTION_TARGET_INVALID", "Execution target changed after approval.");
+  }
+  return issueExecutionAuthority(request, {
+    authorityId: grant.grantId,
+    issuedAt: grant.issuedAt,
+    expiresAt: grant.expiresAt
+  });
 }

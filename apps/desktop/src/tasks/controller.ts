@@ -160,6 +160,14 @@ export class TaskController {
     delete this.snapshotValue.error;
   }
 
+  canSendDraft(): boolean {
+    const draft = this.snapshotValue.draft;
+    return !this.snapshotValue.busy
+      && Boolean(draft.connectionRequestId)
+      && Boolean(draft.capabilityId)
+      && Boolean(draft.text.trim());
+  }
+
   removeDraftImage(attachmentId: string): void {
     this.snapshotValue.draft.images = this.snapshotValue.draft.images.filter(
       (image) => image.part.attachmentId !== attachmentId
@@ -201,6 +209,18 @@ export class TaskController {
       this.snapshotValue.draft = { connectionRequestId: "", capabilityId: "", text: "", images: [] };
       await this.refreshSummary();
     });
+  }
+
+  openResultImage(path: string): Promise<void> {
+    return this.run(() => this.tauri.invoke("open_task_result_image", { path }));
+  }
+
+  revealResultImage(path: string): Promise<void> {
+    return this.run(() => this.tauri.invoke("reveal_task_result_image", { path }));
+  }
+
+  saveResultImage(path: string): Promise<void> {
+    return this.run(() => this.tauri.invoke("save_task_result_image", { path }));
   }
 
   async select(taskId: string): Promise<void> {

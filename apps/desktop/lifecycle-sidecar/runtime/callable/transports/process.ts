@@ -1,51 +1,39 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { homedir, tmpdir } from "node:os";
-import type { CallableAdapterLaunchSpec } from "../../../../../core/callability/adapter.ts";
-
-export interface AdapterProcessExit {
-  code: number | null;
-  signal: NodeJS.Signals | null;
-}
-
-export interface ManagedAdapterProcess {
-  readonly pid: number | undefined;
-  readonly stdout: NodeJS.ReadableStream;
-  readonly stderr: NodeJS.ReadableStream;
-  readonly completion: Promise<AdapterProcessExit>;
-  writeInput(text: string): Promise<void>;
-  terminate(graceMs: number): Promise<void>;
-  forceKill(): void;
-}
-
-export interface AdapterProcessSpawner {
-  spawn(input: {
-    launch: CallableAdapterLaunchSpec;
-    workspacePath: string;
-  }): ManagedAdapterProcess;
-}
+import type {
+  ExecutionExit,
+  ExecutionHandle,
+  ExecutionSpec,
+  ExecutionTransport
+} from "../../../../../../core/callability/agent-core.ts";
 
 const FORCE_KILL_WAIT_MS = 1_000;
 
-export class NodeAdapterProcessSpawner implements AdapterProcessSpawner {
-  spawn(input: {
-    launch: CallableAdapterLaunchSpec;
+export class ProcessTransport implements ExecutionTransport {
+  readonly kind = "process" as const;
+
+  start(input: {
+    spec: ExecutionSpec;
     workspacePath: string;
-  }): ManagedAdapterProcess {
-    const child = spawn(input.launch.executable, input.launch.args, {
+  }): ExecutionHandle {
+    if (input.spec.kind !== this.kind) {
+      throw new Error("ProcessTransport received a non-process execution specification.");
+    }
+    const child = spawn(input.spec.executable, input.spec.args, {
       cwd: input.workspacePath,
       detached: process.platform !== "win32",
-      env: minimalEnvironment(input.launch.environment),
+      env: minimalEnvironment(input.spec.environment),
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true
     });
-    return new NodeManagedAdapterProcess(child);
+    return new ManagedProcessExecution(child);
   }
 }
 
-class NodeManagedAdapterProcess implements ManagedAdapterProcess {
+class ManagedProcessExecution implements ExecutionHandle {
   readonly stdout: NodeJS.ReadableStream;
   readonly stderr: NodeJS.ReadableStream;
-  readonly completion: Promise<AdapterProcessExit>;
+  readonly completion: Promise<ExecutionExit>;
   private readonly child: ChildProcessWithoutNullStreams;
   private running = true;
   private terminationPromise: Promise<void> | null = null;
@@ -54,7 +42,7 @@ class NodeManagedAdapterProcess implements ManagedAdapterProcess {
     this.child = child;
     this.stdout = child.stdout;
     this.stderr = child.stderr;
-    this.completion = new Promise<AdapterProcessExit>((resolve, reject) => {
+    this.completion = new Promise<ExecutionExit>((resolve, reject) => {
       child.once("error", reject);
       child.once("close", (code, signal) => {
         this.running = false;
@@ -108,7 +96,7 @@ class NodeManagedAdapterProcess implements ManagedAdapterProcess {
 
     this.signalProcessTree("SIGKILL");
     if (await settlesWithin(this.completion, FORCE_KILL_WAIT_MS)) return;
-    throw new Error("Callable Adapter process did not exit after SIGKILL.");
+    throw new Error("Child Agent process did not exit after SIGKILL.");
   }
 
   private signalProcessTree(signal: NodeJS.Signals): void {
@@ -121,8 +109,7 @@ class NodeManagedAdapterProcess implements ManagedAdapterProcess {
         this.child.kill(signal);
       }
     } catch (error) {
-      const code = readErrorCode(error);
-      if (code !== "ESRCH") throw error;
+      if (readErrorCode(error) !== "ESRCH") throw error;
     }
   }
 }

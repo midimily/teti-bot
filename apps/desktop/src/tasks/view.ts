@@ -1,5 +1,5 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { ArrowLeft, ImagePlus, Plus, X, createElement } from "lucide";
+import { ArrowLeft, Download, ExternalLink, FolderOpen, ImagePlus, Plus, X, createElement } from "lucide";
 import { taskArtifactImages, taskInputImages, taskInputText } from "../../../../core/task/types.ts";
 import type { PassportConnectionSnapshot } from "../../../../core/passport/snapshot.ts";
 import type {
@@ -95,7 +95,9 @@ function createInbox(
     copy.append(peer, preview);
     const meta = document.createElement("span");
     meta.className = "teti-task-row-meta";
-    meta.textContent = `${task.imageCount ? `${task.imageCount} 图 · ` : ""}${taskStatusLabel(task)}`;
+    meta.textContent = `${task.imageCount
+      ? `${task.receivedImageCount}/${task.imageCount} 图 · `
+      : ""}${taskStatusLabel(task)}`;
     row.append(copy, meta);
     row.addEventListener("click", () => void controller.select(task.taskId));
     list.append(row);
@@ -113,7 +115,9 @@ function createComposer(
   const form = document.createElement("form");
   form.className = "teti-task-scroll teti-task-composer";
   const peers = connections.filter((connection) =>
-    connection.connectionState === "Confirmed" && availableCapabilities(connection).length > 0
+    connection.connectionState === "Confirmed"
+    && connection.compatibility === "compatible"
+    && availableCapabilities(connection).length > 0
   );
   const selectedPeer = peers.find((peer) => peer.requestId === snapshot.draft.connectionRequestId) ?? peers[0];
   const capabilities = selectedPeer ? availableCapabilities(selectedPeer) : [];
@@ -157,7 +161,6 @@ function createComposer(
   prompt.maxLength = 6_000;
   prompt.disabled = snapshot.busy || !selectedCapability;
   prompt.setAttribute("aria-label", "任务内容");
-  prompt.addEventListener("input", () => controller.updateDraft({ text: prompt.value }));
 
   const supportsImages = Boolean(selectedPeer && selectedCapability
     && capabilityAcceptsImages(selectedPeer, selectedCapability.id));
@@ -195,8 +198,21 @@ function createComposer(
     || !selectedCapability
     || !snapshot.draft.text.trim()
     || (snapshot.draft.images.length > 0 && !supportsImages);
+  const syncSendState = (): void => {
+    controller.updateDraft({ text: prompt.value });
+    send.disabled = !controller.canSendDraft()
+      || (snapshot.draft.images.length > 0 && !supportsImages);
+  };
+  prompt.addEventListener("input", syncSendState);
   footer.append(hint, send);
   form.append(selectors, prompt, attachments);
+  if (snapshot.draft.images.length >= 2) {
+    const warning = document.createElement("p");
+    warning.className = "teti-task-known-defect";
+    warning.setAttribute("role", "status");
+    warning.textContent = "0.2.1 已知限制：多图送达仍在实机复盘；若图片不完整，对方无法授权或执行任务。";
+    form.append(warning);
+  }
   if (snapshot.error) form.append(errorText(snapshot.error));
   form.append(footer);
   form.addEventListener("submit", (event) => {
@@ -241,6 +257,10 @@ function createTaskDetail(
   text.textContent = taskInputText(record.request.input);
   prompt.append(promptTitle, text);
   const images = taskInputImages(record.request.input);
+  const receivedInputImages = (record.attachmentDiagnostics ?? []).filter((item) =>
+    item.purpose === "input"
+    && (record.direction === "incoming" ? item.state === "stored" : item.state === "acknowledged")
+  ).length;
   if (images.length > 0) {
     const gallery = document.createElement("div");
     gallery.className = "teti-task-detail-images";
@@ -250,7 +270,9 @@ function createTaskDetail(
       else {
         const pending = document.createElement("span");
         pending.className = "teti-task-image-pending";
-        pending.textContent = record.attachmentsReady === false ? "图片接收中…" : "图片不可用";
+        pending.textContent = record.attachmentsReady === false
+          ? `图片接收中 ${receivedInputImages}/${images.length}…`
+          : "图片不可用";
         gallery.append(pending);
       }
     }
@@ -290,7 +312,7 @@ function createTaskDetail(
       gallery.className = "teti-task-detail-images is-artifact";
       for (const image of artifactImages) {
         const path = snapshot.selectedImagePaths[image.attachmentId];
-        if (path) gallery.append(imagePreview(path, image.attachmentId));
+        if (path) gallery.append(artifactImagePreview(controller, path, image.attachmentId));
         else {
           const pending = document.createElement("span");
           pending.className = "teti-task-image-pending";
@@ -432,6 +454,24 @@ function imagePreview(path: string, attachmentId: string, remove?: () => void): 
     item.append(button);
   }
   item.dataset.attachmentId = attachmentId;
+  return item;
+}
+
+function artifactImagePreview(
+  controller: TaskController,
+  path: string,
+  attachmentId: string
+): HTMLElement {
+  const item = imagePreview(path, attachmentId);
+  item.classList.add("is-artifact");
+  const actions = document.createElement("figcaption");
+  actions.className = "teti-task-image-actions";
+  actions.append(
+    iconButton(ExternalLink, "打开结果图片", () => void controller.openResultImage(path)),
+    iconButton(FolderOpen, "在 Finder 中显示", () => void controller.revealResultImage(path)),
+    iconButton(Download, "另存为", () => void controller.saveResultImage(path))
+  );
+  item.append(actions);
   return item;
 }
 

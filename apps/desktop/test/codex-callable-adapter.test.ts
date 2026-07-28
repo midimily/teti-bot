@@ -5,19 +5,20 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import type { CallableAdapterTaskRequest } from "../../../core/callability/adapter.ts";
+import { issueExecutionAuthority } from "../../../core/callability/agent-core.ts";
 import {
   CODEX_CONTROLLED_EXEC_ARGS,
-  CodexCallableAdapter,
+  CodexConnector,
   probeCodexLogin,
-  qualifyCodexCallableAdapter,
+  qualifyCodexConnector,
   resolveCodexEntrypoint
 } from "../../../integrations/agents/codex/adapter.ts";
 import {
-  CodexImageCallableAdapter,
+  CodexImageConnector,
   parseRunnerFailureCode,
   parseRunnerManifest
 } from "../../../integrations/agents/codex/image-adapter.ts";
-import { CallableAdapterKernel } from "../lifecycle-sidecar/runtime/callable/kernel.ts";
+import { TetiHostAgentKernel } from "../lifecycle-sidecar/runtime/callable/kernel.ts";
 
 const sourceFixture = join(
   dirname(fileURLToPath(import.meta.url)),
@@ -25,12 +26,12 @@ const sourceFixture = join(
   "fake-codex-cli.mjs"
 );
 
-test("Codex Adapter uses a fixed non-interactive, ephemeral, read-only JSONL entrypoint", () => {
-  const adapter = new CodexCallableAdapter({
+test("Codex Connector uses a fixed non-interactive, ephemeral, read-only JSONL entrypoint", () => {
+  const connector = new CodexConnector({
     entrypoint: "/Applications/ChatGPT.app/Contents/Resources/codex",
     codexHome: "/safe/local/codex-home"
   });
-  const launch = adapter.createLaunchSpec({
+  const launch = connector.createExecutionSpec({
     taskId: "task-001",
     capabilityId: "code-analysis",
     workspacePath: "/private/tmp/isolated",
@@ -52,7 +53,7 @@ test("Codex Adapter uses a fixed non-interactive, ephemeral, read-only JSONL ent
     CODEX_HOME: "/safe/local/codex-home"
   });
 
-  const imageLaunch = adapter.createLaunchSpec({
+  const imageLaunch = connector.createExecutionSpec({
     taskId: "task-image",
     capabilityId: "code-analysis",
     workspacePath: "/private/tmp/isolated",
@@ -70,14 +71,14 @@ test("Codex Adapter uses a fixed non-interactive, ephemeral, read-only JSONL ent
   ]);
 });
 
-test("Codex image Adapter fixes the app-server runner and accepts only image manifests", () => {
-  const adapter = new CodexImageCallableAdapter({
+test("Codex image Connector fixes the app-server runner and accepts only image manifests", () => {
+  const connector = new CodexImageConnector({
     nodeEntrypoint: "/Teti.app/Contents/Resources/runtime/node",
     runnerPath: "/Teti.app/Contents/Resources/lifecycle-sidecar/codex-image-runner.mjs",
     codexEntrypoint: "/Applications/ChatGPT.app/Contents/Resources/codex",
     codexHome: "/safe/local/codex-home"
   });
-  const launch = adapter.createLaunchSpec({
+  const launch = connector.createExecutionSpec({
     taskId: "task-image",
     capabilityId: "image-editing",
     workspacePath: "/private/tmp/teti-image-task",
@@ -121,23 +122,23 @@ test("Codex image Adapter fixes the app-server runner and accepts only image man
     text: "路径越界。",
     images: [{ path: "relative-output.png" }]
   })), /CODEX_IMAGE_OUTPUT_INVALID/);
-  assert.equal(adapter.classifyFailure(JSON.stringify({
+  assert.equal(connector.classifyFailure(JSON.stringify({
     schemaVersion: 1,
     error: { code: "CODEX_IMAGE_RESULT_NOT_READY" }
   })), "ADAPTER_IMAGE_RESULT_NOT_READY");
-  assert.equal(adapter.classifyFailure(JSON.stringify({
+  assert.equal(connector.classifyFailure(JSON.stringify({
     schemaVersion: 1,
     error: { code: "CODEX_IMAGE_RESULT_INVALID" }
   })), "ADAPTER_IMAGE_RESULT_INVALID");
-  assert.equal(adapter.classifyFailure(JSON.stringify({
+  assert.equal(connector.classifyFailure(JSON.stringify({
     schemaVersion: 1,
     error: { code: "CODEX_IMAGE_SERVER_EXITED" }
   })), "ADAPTER_IMAGE_SERVER_EXITED");
-  assert.equal(adapter.classifyFailure(JSON.stringify({
+  assert.equal(connector.classifyFailure(JSON.stringify({
     schemaVersion: 1,
     error: { code: "CODEX_IMAGE_PROTOCOL_LIMIT" }
   })), "ADAPTER_IMAGE_PROTOCOL_LIMIT");
-  assert.equal(adapter.classifyFailure("not-json"), "ADAPTER_EXIT_NONZERO");
+  assert.equal(connector.classifyFailure("not-json"), "ADAPTER_EXIT_NONZERO");
   assert.equal(parseRunnerFailureCode(JSON.stringify({
     schemaVersion: 1,
     error: { code: "CODEX_IMAGE_RESULT_INVALID", detail: "must-not-cross-boundary" }
@@ -145,26 +146,26 @@ test("Codex image Adapter fixes the app-server runner and accepts only image man
 });
 
 test("Codex qualification fails closed for missing executable or login", async () => {
-  const missing = await qualifyCodexCallableAdapter({
+  const missing = await qualifyCodexConnector({
     resolveEntrypoint: async () => null,
     now: fixedNow
   });
   assert.equal(missing.readiness.state, "not_detected");
-  assert.equal(missing.adapter, null);
+  assert.equal(missing.connector, null);
 
-  const signedOut = await qualifyCodexCallableAdapter({
+  const signedOut = await qualifyCodexConnector({
     resolveEntrypoint: async () => "/usr/local/bin/codex",
     probeLogin: async () => "needs_login",
     now: fixedNow
   });
   assert.equal(signedOut.readiness.state, "needs_login");
   assert.equal(signedOut.readiness.reasonCode, "CODEX_LOGIN_REQUIRED");
-  assert.equal(signedOut.adapter, null);
+  assert.equal(signedOut.connector, null);
 });
 
-test("Codex qualification registers a ready Adapter without reading auth material", async () => {
+test("Codex qualification registers a ready Connector without reading auth material", async () => {
   let probedPath = "";
-  const qualified = await qualifyCodexCallableAdapter({
+  const qualified = await qualifyCodexConnector({
     resolveEntrypoint: async () => "/usr/local/bin/codex",
     probeLogin: async (entrypoint) => {
       probedPath = entrypoint;
@@ -176,9 +177,9 @@ test("Codex qualification registers a ready Adapter without reading auth materia
 
   assert.equal(probedPath, "/usr/local/bin/codex");
   assert.equal(qualified.readiness.state, "ready");
-  assert.equal(qualified.adapter?.entrypoint, "/usr/local/bin/codex");
+  assert.equal(qualified.connector?.fixedProcessEntrypoint, "/usr/local/bin/codex");
   assert.deepEqual(
-    qualified.adapter?.createLaunchSpec({
+    qualified.connector?.createExecutionSpec({
       taskId: "task",
       capabilityId: "code-analysis",
       workspacePath: "/tmp/task",
@@ -199,20 +200,21 @@ test("fake Codex CLI proves login reuse, stdin delivery, JSONL decoding, and Art
       environment: { PATH: process.env.PATH },
       homeDirectory: fixture.root
     }), "ready");
-    const qualified = await qualifyCodexCallableAdapter({
+    const qualified = await qualifyCodexConnector({
       pathOverride: fixture.path,
       environment: { PATH: process.env.PATH },
       homeDirectory: fixture.root
     });
     assert.equal(qualified.readiness.state, "ready");
-    assert.ok(qualified.adapter);
+    assert.ok(qualified.connector);
 
-    const kernel = new CallableAdapterKernel({ adapters: [qualified.adapter!] });
-    const result = await kernel.execute(task());
+    const hostAgent = new TetiHostAgentKernel({ connectors: [qualified.connector!] });
+    const request = task();
+    const result = await hostAgent.execute(request, issueExecutionAuthority(request));
     assert.equal(result.state, "completed");
     assert.equal(result.artifact?.text, "codex:Review this explicit snippet.");
     assert.equal(result.artifact?.text.includes("must-not-project"), false);
-    await kernel.shutdown();
+    await hostAgent.shutdown();
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }

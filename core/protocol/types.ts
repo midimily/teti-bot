@@ -2,13 +2,15 @@ import type { AiStatusSyncPayload } from "../ai-status/types.ts";
 import type { CollaborationTaskRequest } from "../task/types.ts";
 import type {
   TetiTaskArtifactPayload,
+  TetiTaskAttachmentReceiptPayload,
   TetiTaskAttachmentPayload,
   TetiTaskCancelPayload,
   TetiTaskReceiptPayload,
   TetiTaskStatusPayload
 } from "../task/transport.ts";
 
-export const TETI_APPLICATION_PROTOCOL_VERSION = 1;
+export const TETI_COLLABORATION_PROTOCOL_EPOCH = 2;
+export const TETI_APPLICATION_PROTOCOL_VERSION = 2;
 export const MAX_TETI_APPLICATION_ENVELOPE_BYTES = 128 * 1024;
 export const MAX_TETI_APPLICATION_MESSAGE_ID_BYTES = 128;
 export const MAX_TETI_APPLICATION_TIMESTAMP_BYTES = 64;
@@ -21,12 +23,13 @@ export type TetiApplicationMessageType =
   | "teti.task.request"
   | "teti.task.receipt"
   | "teti.task.attachment"
+  | "teti.task.attachment.receipt"
   | "teti.task.status"
   | "teti.task.cancel"
   | "teti.task.artifact";
 
 export interface TetiApplicationEnvelope<TPayload = unknown> {
-  version: 1;
+  version: 2;
   type: TetiApplicationMessageType;
   messageId: string;
   fromTetiId: string;
@@ -47,10 +50,10 @@ export interface TetiCapabilityOfferPayload {
 export interface TetiPresencePayload {
   status: string;
   timestamp: string;
-  /** Optional for compatibility with pre-0.1.11 peers. */
-  taskProtocolVersions?: number[];
+  collaborationProtocolEpoch: 2;
+  taskProtocolVersions: [4];
   /** Explicit Passport capability; independent from the latest shared snapshot. */
-  passportSchemaVersions?: number[];
+  passportSchemaVersions: [3];
 }
 
 export type TetiKnownApplicationEnvelope =
@@ -61,11 +64,12 @@ export type TetiKnownApplicationEnvelope =
   | TetiApplicationEnvelope<CollaborationTaskRequest>
   | TetiApplicationEnvelope<TetiTaskReceiptPayload>
   | TetiApplicationEnvelope<TetiTaskAttachmentPayload>
+  | TetiApplicationEnvelope<TetiTaskAttachmentReceiptPayload>
   | TetiApplicationEnvelope<TetiTaskStatusPayload>
   | TetiApplicationEnvelope<TetiTaskCancelPayload>
   | TetiApplicationEnvelope<TetiTaskArtifactPayload>;
 
 export interface TetiProcessedMessageStore {
-  version: 1;
+  version: 2;
   messageIds: string[];
 }

@@ -5,54 +5,54 @@ import { join } from "node:path";
 import {
   CallableAdapterContractError,
   CallableAdapterOutputError,
-  callableAdapterInputModes,
-  callableAdapterOutputModes,
   validateCallableAdapterArtifactText,
-  validateCallableAdapterDescriptor,
-  validateCallableAdapterLaunchSpec,
   validateCallableAdapterTaskRequest,
-  type CallableAdapter,
   type CallableAdapterDecodedArtifact,
-  type CallableAdapterDescriptor,
   type CallableAdapterImageInput,
   type CallableAdapterSafeErrorCode,
   type CallableAdapterTaskRequest,
   type CallableAdapterTaskSnapshot
 } from "../../../../../core/callability/adapter.ts";
+import {
+  connectorDescriptorAsAdapterDescriptor,
+  localChildAgentFromConnectors,
+  validateAgentConnector,
+  validateExecutionAuthority,
+  validateExecutionSpec,
+  type AgentConnector,
+  type AgentConnectorDescriptor,
+  type ExecutionAuthority,
+  type ExecutionHandle,
+  type ExecutionTransport,
+  type LocalChildAgent,
+  type TetiHostAgent,
+  type TetiHostAgentTarget
+} from "../../../../../core/callability/agent-core.ts";
 import { CallableTaskStateMachine } from "../../../../../core/callability/task-machine.ts";
 import {
   projectCallableAgent,
   type CallableAgent
 } from "../../../../../core/callability/types.ts";
-import {
-  NodeAdapterProcessSpawner,
-  type AdapterProcessSpawner,
-  type ManagedAdapterProcess
-} from "./process-runner.ts";
+import { ProcessTransport } from "./transports/process.ts";
 import type { TaskAttachmentStore } from "../tasks/attachments.ts";
 
-export const CALLABLE_ADAPTER_KERNEL_DEFAULTS = {
+export const TETI_HOST_AGENT_DEFAULTS = {
   maxConcurrentTasks: 4,
   maxRetainedTasks: 128
 } as const;
 
-export interface CallableAdapterKernelSnapshot {
+export interface TetiHostAgentSnapshot {
   acceptingTasks: boolean;
   activeTaskCount: number;
-  adapters: CallableAdapterDescriptor[];
+  connectors: AgentConnectorDescriptor[];
+  localChildAgents: LocalChildAgent[];
   callableAgents: CallableAgent[];
   tasks: CallableAdapterTaskSnapshot[];
 }
 
-export interface CallableAdapterTarget {
-  adapterId: string;
-  agentId: string;
-  capabilityId: string;
-}
-
-export interface CallableAdapterKernelOptions {
-  adapters?: readonly CallableAdapter[];
-  processSpawner?: AdapterProcessSpawner;
+export interface TetiHostAgentKernelOptions {
+  connectors?: readonly AgentConnector[];
+  transports?: readonly ExecutionTransport[];
   workspaceRoot?: string;
   maxConcurrentTasks?: number;
   maxRetainedTasks?: number;
@@ -60,12 +60,12 @@ export interface CallableAdapterKernelOptions {
   artifactImageStore?: Pick<TaskAttachmentStore, "ingestGeneratedImage">;
 }
 
-export class CallableAdapterKernelError extends Error {
+export class TetiHostAgentError extends Error {
   readonly code: string;
 
   constructor(code: string, message: string) {
     super(message);
-    this.name = "CallableAdapterKernelError";
+    this.name = "TetiHostAgentError";
     this.code = code;
   }
 }
@@ -74,23 +74,24 @@ type TerminationReason = "cancel" | "timeout" | "output_limit" | "shutdown";
 
 interface ExecutionControl {
   machine: CallableTaskStateMachine;
-  process: ManagedAdapterProcess | null;
+  process: ExecutionHandle | null;
   terminationReason: TerminationReason | null;
   termination: Deferred<TerminationReason>;
   completion: Promise<CallableAdapterTaskSnapshot>;
 }
 
 /**
- * Process-local execution kernel. It has no Lifecycle task method, remote task
- * endpoint, or Chatmail execution path. Beta 0.1.10 exposes only its bounded
- * readiness metadata to Callable Passport.
+ * Process-local Host Agent. It owns authorization, workspace isolation,
+ * transports, output bounds, cancellation, and task state. Connectors cannot
+ * access network collaboration services or peer identity through this API.
  */
-export class CallableAdapterKernel {
-  private readonly adapters = new Map<string, CallableAdapter>();
+export class TetiHostAgentKernel implements TetiHostAgent {
+  private readonly connectors = new Map<string, AgentConnector>();
   private readonly callableAgents = new Map<string, CallableAgent>();
   private readonly tasks = new Map<string, CallableTaskStateMachine>();
   private readonly active = new Map<string, ExecutionControl>();
-  private readonly processSpawner: AdapterProcessSpawner;
+  private readonly transports = new Map<string, ExecutionTransport>();
+  private readonly consumedAuthorities = new Map<string, number>();
   private readonly workspaceRoot: string;
   private readonly maxConcurrentTasks: number;
   private readonly maxRetainedTasks: number;
@@ -99,70 +100,84 @@ export class CallableAdapterKernel {
   private acceptingTasks = true;
   private shutdownPromise: Promise<void> | null = null;
 
-  constructor(options: CallableAdapterKernelOptions = {}) {
-    this.processSpawner = options.processSpawner ?? new NodeAdapterProcessSpawner();
+  constructor(options: TetiHostAgentKernelOptions = {}) {
+    for (const transport of options.transports ?? [new ProcessTransport()]) {
+      if (this.transports.has(transport.kind)) {
+        throw new TetiHostAgentError("HOST_TRANSPORT_DUPLICATE", `Duplicate Execution Transport: ${transport.kind}`);
+      }
+      this.transports.set(transport.kind, transport);
+    }
     this.workspaceRoot = options.workspaceRoot ?? tmpdir();
     this.maxConcurrentTasks = positiveInteger(
-      options.maxConcurrentTasks ?? CALLABLE_ADAPTER_KERNEL_DEFAULTS.maxConcurrentTasks,
+      options.maxConcurrentTasks ?? TETI_HOST_AGENT_DEFAULTS.maxConcurrentTasks,
       "maxConcurrentTasks"
     );
     this.maxRetainedTasks = positiveInteger(
-      options.maxRetainedTasks ?? CALLABLE_ADAPTER_KERNEL_DEFAULTS.maxRetainedTasks,
+      options.maxRetainedTasks ?? TETI_HOST_AGENT_DEFAULTS.maxRetainedTasks,
       "maxRetainedTasks"
     );
     this.now = options.now ?? (() => new Date());
     this.artifactImageStore = options.artifactImageStore;
 
-    for (const adapter of options.adapters ?? []) this.registerAdapter(adapter);
+    for (const connector of options.connectors ?? []) this.registerConnector(connector);
   }
 
-  get snapshot(): CallableAdapterKernelSnapshot {
+  get snapshot(): TetiHostAgentSnapshot {
     return {
       acceptingTasks: this.acceptingTasks,
       activeTaskCount: this.active.size,
-      adapters: [...this.adapters.values()]
-        .map((adapter) => structuredClone(adapter.descriptor))
-        .sort((left, right) => left.adapterId.localeCompare(right.adapterId)),
+      connectors: [...this.connectors.values()]
+        .map((connector) => structuredClone(connector.descriptor))
+        .sort((left, right) => left.connectorId.localeCompare(right.connectorId)),
+      localChildAgents: this.getLocalChildAgents(),
       callableAgents: this.getCallableAgents(),
       tasks: [...this.tasks.values()].map((machine) => machine.snapshot)
     };
   }
 
-  registerAdapter(adapter: CallableAdapter, readyAt = this.now().toISOString()): CallableAdapterDescriptor {
+  registerConnector(
+    connector: AgentConnector,
+    readyAt = this.now().toISOString()
+  ): AgentConnectorDescriptor {
     if (!this.acceptingTasks) {
-      throw new CallableAdapterKernelError(
-        "ADAPTER_KERNEL_STOPPED",
-        "Callable Adapter Kernel is stopping."
+      throw new TetiHostAgentError(
+        "HOST_AGENT_STOPPED",
+        "Teti Host Agent is stopping."
       );
     }
-    validateCallableAdapterDescriptor(adapter.descriptor);
-    validateCallableAdapterLaunchSpec({ executable: adapter.entrypoint, args: [] });
-    if (this.adapters.has(adapter.descriptor.adapterId)) {
-      throw new CallableAdapterKernelError(
-        "ADAPTER_DUPLICATE",
-        `Duplicate Callable Adapter ID: ${adapter.descriptor.adapterId}`
+    validateAgentConnector(connector);
+    if (!this.transports.has(connector.descriptor.transportKind)) {
+      throw new TetiHostAgentError(
+        "HOST_TRANSPORT_UNAVAILABLE",
+        `Execution Transport is unavailable: ${connector.descriptor.transportKind}`
+      );
+    }
+    if (this.connectors.has(connector.descriptor.connectorId)) {
+      throw new TetiHostAgentError(
+        "CONNECTOR_DUPLICATE",
+        `Duplicate Agent Connector ID: ${connector.descriptor.connectorId}`
       );
     }
     const callableAgent = projectCallableAgent({
       schemaVersion: 1,
-      agentId: adapter.descriptor.agentId,
-      adapterId: adapter.descriptor.adapterId,
-      adapterRevision: adapter.descriptor.adapterRevision,
+      agentId: connector.descriptor.childAgentId,
+      adapterId: connector.descriptor.connectorId,
+      adapterRevision: connector.descriptor.connectorRevision,
       state: "ready",
-      capabilityIds: [...adapter.descriptor.capabilityIds],
-      inputModes: callableAdapterInputModes(adapter.descriptor),
-      outputModes: callableAdapterOutputModes(adapter.descriptor),
+      capabilityIds: [...connector.descriptor.capabilityIds],
+      inputModes: [...connector.descriptor.inputModes],
+      outputModes: [...connector.descriptor.outputModes],
       checkedAt: readyAt
     });
     if (!callableAgent) {
-      throw new CallableAdapterKernelError(
-        "ADAPTER_CALLABILITY_INVALID",
-        "Callable Adapter could not be projected into a safe Passport identity."
+      throw new TetiHostAgentError(
+        "CONNECTOR_CALLABILITY_INVALID",
+        "Agent Connector could not be projected into a safe Passport identity."
       );
     }
-    this.adapters.set(adapter.descriptor.adapterId, adapter);
-    this.callableAgents.set(adapter.descriptor.adapterId, callableAgent);
-    return structuredClone(adapter.descriptor);
+    this.connectors.set(connector.descriptor.connectorId, connector);
+    this.callableAgents.set(connector.descriptor.connectorId, callableAgent);
+    return structuredClone(connector.descriptor);
   }
 
   getCallableAgents(): CallableAgent[] {
@@ -171,22 +186,34 @@ export class CallableAdapterKernel {
       .sort((left, right) => left.agentId.localeCompare(right.agentId));
   }
 
+  getLocalChildAgents(): LocalChildAgent[] {
+    const childAgentIds = [...new Set(
+      [...this.connectors.values()].map((connector) => connector.descriptor.childAgentId)
+    )].sort();
+    return childAgentIds.map((childAgentId) => localChildAgentFromConnectors(
+      childAgentId,
+      [...this.connectors.values()].filter(
+        (connector) => connector.descriptor.childAgentId === childAgentId
+      )
+    ));
+  }
+
   resolveTarget(
     capabilityId: string,
     requiredInputModes: readonly ("text" | "image")[] = ["text"]
-  ): CallableAdapterTarget | null {
-    const candidates = [...this.adapters.values()]
-      .filter((adapter) => adapter.descriptor.capabilityIds.includes(capabilityId))
-      .filter((adapter) => {
-        const modes = callableAdapterInputModes(adapter.descriptor);
+  ): TetiHostAgentTarget | null {
+    const candidates = [...this.connectors.values()]
+      .filter((connector) => connector.descriptor.capabilityIds.includes(capabilityId))
+      .filter((connector) => {
+        const modes = connector.descriptor.inputModes;
         return requiredInputModes.every((mode) => modes.includes(mode));
       })
-      .sort((left, right) => left.descriptor.adapterId.localeCompare(right.descriptor.adapterId));
-    const adapter = candidates[0];
-    return adapter
+      .sort((left, right) => left.descriptor.connectorId.localeCompare(right.descriptor.connectorId));
+    const connector = candidates[0];
+    return connector
       ? {
-          adapterId: adapter.descriptor.adapterId,
-          agentId: adapter.descriptor.agentId,
+          connectorId: connector.descriptor.connectorId,
+          childAgentId: connector.descriptor.childAgentId,
           capabilityId
         }
       : null;
@@ -196,33 +223,57 @@ export class CallableAdapterKernel {
     return this.tasks.get(taskId)?.snapshot ?? null;
   }
 
-  execute(request: CallableAdapterTaskRequest): Promise<CallableAdapterTaskSnapshot> {
+  execute(
+    request: CallableAdapterTaskRequest,
+    authority: ExecutionAuthority
+  ): Promise<CallableAdapterTaskSnapshot> {
     if (!this.acceptingTasks) {
-      return Promise.reject(new CallableAdapterKernelError(
-        "ADAPTER_KERNEL_STOPPED",
-        "Callable Adapter Kernel is stopping."
+      return Promise.reject(new TetiHostAgentError(
+        "HOST_AGENT_STOPPED",
+        "Teti Host Agent is stopping."
       ));
     }
-    const adapter = this.adapters.get(request.adapterId);
-    if (!adapter) {
-      return Promise.reject(new CallableAdapterKernelError(
-        "ADAPTER_NOT_FOUND",
-        "Callable Adapter is not registered."
+    const connector = this.connectors.get(request.adapterId);
+    if (!connector) {
+      return Promise.reject(new TetiHostAgentError(
+        "CONNECTOR_NOT_FOUND",
+        "Agent Connector is not registered."
       ));
     }
-    validateCallableAdapterTaskRequest(request, adapter.descriptor);
+    const adapterDescriptor = connectorDescriptorAsAdapterDescriptor(connector.descriptor);
+    try {
+      validateCallableAdapterTaskRequest(request, adapterDescriptor);
+    } catch (error) {
+      return Promise.reject(error);
+    }
     if (this.tasks.has(request.taskId)) {
-      return Promise.reject(new CallableAdapterKernelError(
-        "ADAPTER_TASK_DUPLICATE",
-        "Callable Adapter task ID already exists."
+      return Promise.reject(new TetiHostAgentError(
+        "HOST_TASK_DUPLICATE",
+        "Host Agent task ID already exists."
       ));
     }
     if (this.active.size >= this.maxConcurrentTasks) {
-      return Promise.reject(new CallableAdapterKernelError(
-        "ADAPTER_KERNEL_BUSY",
-        "Callable Adapter Kernel has reached its local concurrency limit."
+      return Promise.reject(new TetiHostAgentError(
+        "HOST_AGENT_BUSY",
+        "Teti Host Agent has reached its local concurrency limit."
       ));
     }
+    try {
+      validateExecutionAuthority(authority, request, connector, this.now());
+    } catch (error) {
+      return Promise.reject(error);
+    }
+    const now = this.now().getTime();
+    for (const [authorityId, expiresAt] of this.consumedAuthorities) {
+      if (expiresAt < now) this.consumedAuthorities.delete(authorityId);
+    }
+    if (this.consumedAuthorities.has(authority.authorityId)) {
+      return Promise.reject(new TetiHostAgentError(
+        "EXECUTION_AUTHORITY_CONSUMED",
+        "Execution Authority has already been consumed."
+      ));
+    }
+    this.consumedAuthorities.set(authority.authorityId, Date.parse(authority.expiresAt));
 
     const machine = new CallableTaskStateMachine(request, this.now);
     this.tasks.set(request.taskId, machine);
@@ -233,7 +284,7 @@ export class CallableAdapterKernel {
       termination: deferred<TerminationReason>(),
       completion: Promise.resolve(machine.snapshot)
     };
-    control.completion = this.run(adapter, request, control);
+    control.completion = this.run(connector, request, control);
     this.active.set(request.taskId, control);
     return control.completion;
   }
@@ -251,8 +302,8 @@ export class CallableAdapterKernel {
     for (const control of this.active.values()) {
       this.requestTermination(control, "shutdown", control.machine.snapshot.adapterId);
       // Runtime shutdown has a shorter global deadline than the maximum
-      // per-Adapter cancellation grace. Never let that mismatch orphan a
-      // detached Adapter process group when the sidecar exits.
+      // per-Connector cancellation grace. Never let that mismatch orphan a
+      // detached Child Agent process group when the sidecar exits.
       control.process?.forceKill();
     }
     this.shutdownPromise = Promise.allSettled(
@@ -262,14 +313,14 @@ export class CallableAdapterKernel {
   }
 
   private async run(
-    adapter: CallableAdapter,
+    connector: AgentConnector,
     request: CallableAdapterTaskRequest,
     control: ExecutionControl
   ): Promise<CallableAdapterTaskSnapshot> {
-    const descriptor = adapter.descriptor;
+    const descriptor = connector.descriptor;
     control.machine.start();
     const timeout = setTimeout(() => {
-      this.requestTermination(control, "timeout", descriptor.adapterId);
+      this.requestTermination(control, "timeout", descriptor.connectorId);
     }, descriptor.timeoutMs);
     let workspacePath: string | null = null;
     let output: BoundedProcessOutput | null = null;
@@ -278,13 +329,13 @@ export class CallableAdapterKernel {
       workspacePath = await mkdtemp(join(this.workspaceRoot, "teti-agent-task-"));
       const images = await stageTaskImages(request, workspacePath);
       const launchOutcome = await Promise.race([
-        Promise.resolve(adapter.createLaunchSpec({
+        Promise.resolve(connector.createExecutionSpec({
           taskId: request.taskId,
           capabilityId: request.capabilityId,
           workspacePath,
           images
         })).then(
-          (launch) => ({ type: "launch" as const, launch }),
+          (spec) => ({ type: "spec" as const, spec }),
           () => ({ type: "prepare_error" as const })
         ),
         control.termination.promise.then((reason) => ({ type: "terminated" as const, reason }))
@@ -298,9 +349,11 @@ export class CallableAdapterKernel {
       }
 
       try {
-        validateCallableAdapterLaunchSpec(launchOutcome.launch, adapter.entrypoint);
-        control.process = this.processSpawner.spawn({
-          launch: launchOutcome.launch,
+        validateExecutionSpec(launchOutcome.spec, connector);
+        const transport = this.transports.get(connector.descriptor.transportKind);
+        if (!transport) throw new Error("Execution Transport is unavailable.");
+        control.process = transport.start({
+          spec: launchOutcome.spec,
           workspacePath
         });
       } catch {
@@ -310,7 +363,7 @@ export class CallableAdapterKernel {
       output = new BoundedProcessOutput(
         control.process,
         descriptor.maxOutputBytes,
-        () => this.requestTermination(control, "output_limit", descriptor.adapterId)
+        () => this.requestTermination(control, "output_limit", descriptor.connectorId)
       );
       await control.process.writeInput(request.input.text);
 
@@ -343,14 +396,14 @@ export class CallableAdapterKernel {
       if (processOutcome.exit.code !== 0) {
         try {
           return control.machine.fail(
-            adapter.classifyFailure?.(stdout) ?? "ADAPTER_EXIT_NONZERO"
+            connector.classifyFailure?.(stdout) ?? "ADAPTER_EXIT_NONZERO"
           );
         } catch {
           return control.machine.fail("ADAPTER_EXIT_NONZERO");
         }
       }
       try {
-        const artifact = adapter.decodeArtifact?.(stdout, {
+        const artifact = connector.decodeArtifact?.(stdout, {
           taskId: request.taskId,
           capabilityId: request.capabilityId,
           workspacePath,
@@ -363,7 +416,7 @@ export class CallableAdapterKernel {
         return control.machine.complete(await this.persistImageArtifact(
           request.taskId,
           workspacePath,
-          adapter,
+          connector,
           artifact
         ));
       } catch (error) {
@@ -401,11 +454,11 @@ export class CallableAdapterKernel {
   private async persistImageArtifact(
     taskId: string,
     workspacePath: string,
-    adapter: CallableAdapter,
+    connector: AgentConnector,
     artifact: CallableAdapterDecodedArtifact
   ) {
     validateCallableAdapterArtifactText(artifact.text);
-    if (!callableAdapterOutputModes(adapter.descriptor).includes("image")
+    if (!connector.descriptor.outputModes.includes("image")
       || artifact.images.length === 0
       || artifact.images.length > 4
       || !this.artifactImageStore) {
@@ -424,7 +477,7 @@ export class CallableAdapterKernel {
   private requestTermination(
     control: ExecutionControl,
     reason: TerminationReason,
-    _adapterId: string
+    _connectorId: string
   ): void {
     if (control.terminationReason || control.machine.isTerminal) return;
     control.terminationReason = reason;
@@ -486,7 +539,7 @@ async function stageTaskImages(
 
 class BoundedProcessOutput {
   private readonly stdoutChunks: Buffer[] = [];
-  private readonly process: ManagedAdapterProcess;
+  private readonly process: ExecutionHandle;
   private readonly maxBytes: number;
   private readonly stdoutListener: (chunk: Buffer | string) => void;
   private readonly stderrListener: (chunk: Buffer | string) => void;
@@ -494,7 +547,7 @@ class BoundedProcessOutput {
   private exceeded = false;
 
   constructor(
-    process: ManagedAdapterProcess,
+    process: ExecutionHandle,
     maxBytes: number,
     onLimit: () => void
   ) {
@@ -507,7 +560,7 @@ class BoundedProcessOutput {
   }
 
   readStdout(): string {
-    if (this.exceeded) throw new Error("Callable Adapter output limit exceeded.");
+    if (this.exceeded) throw new Error("Child Agent output limit exceeded.");
     return new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(this.stdoutChunks));
   }
 
@@ -543,7 +596,7 @@ function deferred<T>(): Deferred<T> {
 
 function positiveInteger(value: number, label: string): number {
   if (!Number.isInteger(value) || value <= 0) {
-    throw new CallableAdapterKernelError("ADAPTER_KERNEL_CONFIG", `${label} must be positive.`);
+    throw new TetiHostAgentError("HOST_AGENT_CONFIG", `${label} must be positive.`);
   }
   return value;
 }

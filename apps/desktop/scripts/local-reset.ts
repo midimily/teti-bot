@@ -211,7 +211,15 @@ export function onboardingResetTargets(
   bundleId = TETI_DESKTOP_BUNDLE_ID
 ): string[] {
   const profileRoot = join(home, ".teti");
+  const storeV2 = join(profileRoot, "store-v2");
   return unique([
+    join(storeV2, "account"),
+    join(storeV2, "connections.json"),
+    join(storeV2, "settings.json"),
+    join(storeV2, "messages.json"),
+    join(storeV2, "tasks.json"),
+    join(storeV2, "peer-protocol-capabilities.json"),
+    join(storeV2, "task-attachments"),
     join(profileRoot, "account"),
     join(profileRoot, "account.json"),
     join(profileRoot, "connections.json"),
@@ -246,7 +254,11 @@ function assertSafeExtraProfile(path: string): string {
 
 async function assertNoRealAccountWouldBeOrphaned(home: string, allowed: boolean): Promise<void> {
   if (allowed) return;
-  for (const accountPath of [join(home, ".teti", "account", "account.json"), join(home, ".teti", "account.json")]) {
+  for (const accountPath of [
+    join(home, ".teti", "store-v2", "account", "account.json"),
+    join(home, ".teti", "account", "account.json"),
+    join(home, ".teti", "account.json")
+  ]) {
     try {
       const account = JSON.parse(await readFile(accountPath, "utf8")) as { address?: unknown };
       if (typeof account.address === "string" && account.address.endsWith("@mail.seep.im")) {
@@ -275,6 +287,7 @@ async function readLocalTetiIdentity(
   home: string
 ): Promise<{ id: string; address?: string } | null> {
   const accountPaths = [
+    join(home, ".teti", "store-v2", "account", "account.json"),
     join(home, ".teti", "account", "account.json"),
     join(home, ".teti", "account.json")
   ];

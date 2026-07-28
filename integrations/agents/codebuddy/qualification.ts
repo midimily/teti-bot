@@ -4,9 +4,9 @@ import { access, mkdtemp, realpath, rm, stat } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { basename, delimiter, join } from "node:path";
 import type {
-  CallableAdapter,
-  CallableAdapterLaunchContext
-} from "../../../core/callability/adapter.ts";
+  AgentConnector,
+  AgentConnectorContext
+} from "../../../core/callability/agent-core.ts";
 import type { AgentAdapterReadiness } from "../../../core/callability/types.ts";
 import {
   classifyCodeBuddyFailure,
@@ -14,10 +14,10 @@ import {
   parseCodeBuddyJsonl
 } from "./jsonl.ts";
 
-export const CODEBUDDY_CALLABLE_ADAPTER = {
-  adapterId: "tencent.codebuddy.code",
-  agentId: "codebuddy",
-  adapterRevision: 1,
+export const CODEBUDDY_CONNECTOR = {
+  connectorId: "tencent.codebuddy.code",
+  childAgentId: "codebuddy",
+  connectorRevision: 2,
   capabilityIds: ["code-analysis"],
   timeoutMs: 5 * 60 * 1_000,
   cancelGraceMs: 500,
@@ -88,16 +88,16 @@ const LOGIN_PROBE_MAX_BYTES = 256 * 1024;
 const PLIST_PROBE_TIMEOUT_MS = 1_000;
 const PLIST_PROBE_MAX_BYTES = 8 * 1024;
 
-export interface CodeBuddyAdapterQualification {
+export interface CodeBuddyConnectorQualification {
   readiness: AgentAdapterReadiness;
-  adapter: CodeBuddyCallableAdapter | null;
+  connector: CodeBuddyConnector | null;
   evidence: {
     desktopDetected: boolean;
     officialCliDetected: boolean;
   };
 }
 
-export interface QualifyCodeBuddyAdapterOptions {
+export interface QualifyCodeBuddyConnectorOptions {
   pathOverride?: string | null;
   environment?: NodeJS.ProcessEnv;
   homeDirectory?: string;
@@ -110,28 +110,38 @@ export interface QualifyCodeBuddyAdapterOptions {
   ) => Promise<"ready" | "needs_login" | "degraded">;
 }
 
-export class CodeBuddyCallableAdapter implements CallableAdapter {
+export class CodeBuddyConnector implements AgentConnector {
   readonly descriptor = {
     contractVersion: 1 as const,
-    adapterId: CODEBUDDY_CALLABLE_ADAPTER.adapterId,
-    adapterRevision: CODEBUDDY_CALLABLE_ADAPTER.adapterRevision,
-    agentId: CODEBUDDY_CALLABLE_ADAPTER.agentId,
-    capabilityIds: [...CODEBUDDY_CALLABLE_ADAPTER.capabilityIds],
-    inputMode: "text" as const,
-    outputMode: "text" as const,
-    timeoutMs: CODEBUDDY_CALLABLE_ADAPTER.timeoutMs,
-    cancelGraceMs: CODEBUDDY_CALLABLE_ADAPTER.cancelGraceMs,
-    maxOutputBytes: CODEBUDDY_CALLABLE_ADAPTER.maxOutputBytes
+    connectorId: CODEBUDDY_CONNECTOR.connectorId,
+    connectorRevision: CODEBUDDY_CONNECTOR.connectorRevision,
+    childAgentId: CODEBUDDY_CONNECTOR.childAgentId,
+    capabilityIds: [...CODEBUDDY_CONNECTOR.capabilityIds],
+    inputModes: ["text"] as const,
+    outputModes: ["text"] as const,
+    transportKind: "process" as const,
+    timeoutMs: CODEBUDDY_CONNECTOR.timeoutMs,
+    cancelGraceMs: CODEBUDDY_CONNECTOR.cancelGraceMs,
+    maxOutputBytes: CODEBUDDY_CONNECTOR.maxOutputBytes
   };
-  readonly entrypoint: string;
+  readonly resourceBinding = {
+    schemaVersion: 1 as const,
+    bindingId: "codebuddy.process.code-analysis",
+    childAgentId: CODEBUDDY_CONNECTOR.childAgentId,
+    connectorId: CODEBUDDY_CONNECTOR.connectorId,
+    transportKind: "process" as const,
+    capabilityIds: [...CODEBUDDY_CONNECTOR.capabilityIds]
+  };
+  readonly fixedProcessEntrypoint: string;
 
   constructor(entrypoint: string) {
-    this.entrypoint = entrypoint;
+    this.fixedProcessEntrypoint = entrypoint;
   }
 
-  createLaunchSpec(_context: Readonly<CallableAdapterLaunchContext>) {
+  createExecutionSpec(_context: Readonly<AgentConnectorContext>) {
     return {
-      executable: this.entrypoint,
+      kind: "process" as const,
+      executable: this.fixedProcessEntrypoint,
       args: [...CODEBUDDY_CONTROLLED_HEADLESS_ARGS],
       environment: { ...CODEBUDDY_CONTROLLED_ENVIRONMENT }
     };
@@ -151,9 +161,9 @@ export class CodeBuddyCallableAdapter implements CallableAdapter {
  * CodeBuddy CN Electron app and its `buddycn` editor launcher remain
  * observation evidence and can never register this Adapter.
  */
-export async function qualifyCodeBuddyCallableAdapter(
-  options: QualifyCodeBuddyAdapterOptions = {}
-): Promise<CodeBuddyAdapterQualification> {
+export async function qualifyCodeBuddyConnector(
+  options: QualifyCodeBuddyConnectorOptions = {}
+): Promise<CodeBuddyConnectorQualification> {
   const environment = options.environment ?? process.env;
   const homeDirectory = options.homeDirectory ?? homedir();
   const [cliEntrypoint, desktopDetected] = await Promise.all([
@@ -214,7 +224,7 @@ export async function qualifyCodeBuddyCallableAdapter(
     undefined,
     desktopDetected,
     officialCliDetected,
-    new CodeBuddyCallableAdapter(cliEntrypoint)
+    new CodeBuddyConnector(cliEntrypoint)
   );
 }
 
@@ -432,22 +442,22 @@ function qualificationResult(
   reasonCode: string | undefined,
   desktopDetected: boolean,
   officialCliDetected: boolean,
-  adapter: CodeBuddyCallableAdapter | null
-): CodeBuddyAdapterQualification {
+  connector: CodeBuddyConnector | null
+): CodeBuddyConnectorQualification {
   return {
     readiness: {
       schemaVersion: 1,
-      agentId: CODEBUDDY_CALLABLE_ADAPTER.agentId,
-      adapterId: CODEBUDDY_CALLABLE_ADAPTER.adapterId,
-      adapterRevision: CODEBUDDY_CALLABLE_ADAPTER.adapterRevision,
+      agentId: CODEBUDDY_CONNECTOR.childAgentId,
+      adapterId: CODEBUDDY_CONNECTOR.connectorId,
+      adapterRevision: CODEBUDDY_CONNECTOR.connectorRevision,
       state,
-      capabilityIds: [...CODEBUDDY_CALLABLE_ADAPTER.capabilityIds],
+      capabilityIds: [...CODEBUDDY_CONNECTOR.capabilityIds],
       inputModes: ["text"],
       outputModes: ["text"],
       checkedAt,
       ...(reasonCode ? { reasonCode } : {})
     },
-    adapter,
+    connector,
     evidence: {
       desktopDetected,
       officialCliDetected

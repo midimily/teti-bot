@@ -4,6 +4,8 @@ import {
   canonicalTaskRequestJson,
   selectTaskProtocolVersion,
   TaskTransportContractError,
+  validateTaskAttachmentPayload,
+  validateTaskAttachmentReceiptPayload,
   validateTaskProtocolVersions,
   validateTaskReceiptPayload
 } from "./transport-validation.ts";
@@ -19,7 +21,7 @@ test("Task receipt is strict, identity-bound metadata with advertised versions",
     targetTetiId: "teti_target001",
     status: "received",
     receivedAt,
-    supportedTaskVersions: [1]
+    supportedTaskVersions: [4]
   };
   assert.doesNotThrow(() => validateTaskReceiptPayload(receipt));
   assert.throws(
@@ -27,18 +29,66 @@ test("Task receipt is strict, identity-bound metadata with advertised versions",
     TaskTransportContractError
   );
   assert.throws(
-    () => validateTaskReceiptPayload({ ...receipt, supportedTaskVersions: [1, 1] }),
+    () => validateTaskReceiptPayload({ ...receipt, supportedTaskVersions: [4, 4] }),
     /versions/
   );
 });
 
-test("Task negotiation keeps v1 for unknown peers and selects the highest known common version", () => {
-  assert.equal(selectTaskProtocolVersion(), 1);
-  assert.equal(selectTaskProtocolVersion([2, 1]), 2);
-  assert.equal(selectTaskProtocolVersion([2]), 2);
-  assert.equal(selectTaskProtocolVersion([3]), 3);
-  assert.equal(selectTaskProtocolVersion([4]), null);
-  assert.doesNotThrow(() => validateTaskProtocolVersions([1, 2, 3]));
+test("Beta 0.2 Task negotiation requires an explicit v4 advertisement and never downgrades", () => {
+  assert.equal(selectTaskProtocolVersion(), null);
+  assert.equal(selectTaskProtocolVersion([2, 1]), null);
+  assert.equal(selectTaskProtocolVersion([2]), null);
+  assert.equal(selectTaskProtocolVersion([3]), null);
+  assert.equal(selectTaskProtocolVersion([4]), 4);
+  assert.equal(selectTaskProtocolVersion([5]), null);
+  assert.doesNotThrow(() => validateTaskProtocolVersions([1, 2, 3, 4]));
+});
+
+test("Task v4 attachment receipts are explicit, strict, and bound to one attachment", () => {
+  const part = {
+    kind: "image" as const,
+    attachmentId: "image-001",
+    mimeType: "image/png" as const,
+    byteLength: 1024,
+    width: 640,
+    height: 480,
+    sha256: `sha256:${"a".repeat(64)}`
+  };
+  const attachment = {
+    schemaVersion: 1,
+    taskId: "task-001",
+    requesterTetiId: "teti_sender001",
+    targetTetiId: "teti_target001",
+    purpose: "input",
+    part,
+    createdAt: "2026-07-26T00:00:00.000Z",
+    expiresAt: "2026-07-26T02:00:00.000Z",
+    deliveryReceiptRequested: true
+  };
+  assert.doesNotThrow(() => validateTaskAttachmentPayload(attachment));
+  assert.throws(
+    () => validateTaskAttachmentPayload({ ...attachment, deliveryReceiptRequested: false }),
+    /receipt request/
+  );
+
+  const receipt = {
+    schemaVersion: 1,
+    taskId: attachment.taskId,
+    requesterTetiId: attachment.requesterTetiId,
+    targetTetiId: attachment.targetTetiId,
+    purpose: "input",
+    attachmentId: part.attachmentId,
+    receivedAt
+  };
+  assert.doesNotThrow(() => validateTaskAttachmentReceiptPayload(receipt));
+  assert.throws(
+    () => validateTaskAttachmentReceiptPayload({ ...receipt, artifactId: "artifact-not-allowed" }),
+    /cannot name an Artifact/
+  );
+  assert.throws(
+    () => validateTaskAttachmentReceiptPayload({ ...receipt, localPath: "/private/result.png" }),
+    /unsupported field/
+  );
 });
 
 test("canonical Task comparison ignores JSON property insertion order", () => {

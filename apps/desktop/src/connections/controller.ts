@@ -445,6 +445,7 @@ export class MockPeerConnectionClient implements PeerConnectionClient {
       createdAt: now,
       updatedAt: now,
       lastSeen: null,
+      compatibility: "unknown",
       passport: { state: "unknown", resources: [], agents: [], capabilities: [], bindings: [] }
     }];
     this.publish();

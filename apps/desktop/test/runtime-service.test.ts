@@ -311,7 +311,7 @@ test("Runtime shutdown owns the local Callable Adapter Kernel without exposing r
       async getPeerConnectionService() { return new FakePeerService(); },
       passportSharingStore: new MemoryPassportSharingStore(),
       codexUsageService: new FakeCodexUsageService(),
-      callableAdapterKernel: {
+      hostAgent: {
         getCallableAgents() { return []; },
         async shutdown() { kernelShutdownCalls += 1; }
       }

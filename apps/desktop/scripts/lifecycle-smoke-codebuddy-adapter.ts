@@ -1,18 +1,21 @@
-import type { CallableAdapter } from "../../../core/callability/adapter.ts";
-import { CallableAdapterKernel } from "../lifecycle-sidecar/runtime/callable/kernel.ts";
+import {
+  issueExecutionAuthority,
+  type AgentConnector
+} from "../../../core/callability/agent-core.ts";
+import { TetiHostAgentKernel } from "../lifecycle-sidecar/runtime/callable/kernel.ts";
 import {
   probeCodeBuddyLogin,
-  qualifyCodeBuddyCallableAdapter
+  qualifyCodeBuddyConnector
 } from "../../../integrations/agents/codebuddy/qualification.ts";
 
-const qualification = await qualifyCodeBuddyCallableAdapter();
-if (!qualification.adapter || qualification.readiness.state !== "ready") {
+const qualification = await qualifyCodeBuddyConnector();
+if (!qualification.connector || qualification.readiness.state !== "ready") {
   throw new Error(
-    `CodeBuddy Adapter is not ready: ${qualification.readiness.reasonCode ?? qualification.readiness.state}`
+    `CodeBuddy Connector is not ready: ${qualification.readiness.reasonCode ?? qualification.readiness.state}`
   );
 }
 
-const entrypoint = qualification.adapter.entrypoint;
+const entrypoint = qualification.connector.fixedProcessEntrypoint;
 const concurrentProbe = await Promise.all([
   probeCodeBuddyLogin(entrypoint),
   probeCodeBuddyLogin(entrypoint)
@@ -21,12 +24,13 @@ if (concurrentProbe.some((state) => state !== "ready")) {
   throw new Error("Concurrent CodeBuddy local initialization did not remain ready.");
 }
 
-const cancelKernel = new CallableAdapterKernel({ adapters: [qualification.adapter] });
+const cancelHost = new TetiHostAgentKernel({ connectors: [qualification.connector] });
 try {
   const taskId = `codebuddy-cancel-${Date.now()}`;
-  const completion = cancelKernel.execute(task(taskId));
+  const request = task(taskId);
+  const completion = cancelHost.execute(request, issueExecutionAuthority(request));
   await new Promise((resolve) => setTimeout(resolve, 25));
-  if (!cancelKernel.cancel(taskId)) {
+  if (!cancelHost.cancel(taskId)) {
     throw new Error("CodeBuddy task could not be canceled while active.");
   }
   const canceled = await completion;
@@ -34,27 +38,29 @@ try {
     throw new Error(`Unexpected CodeBuddy cancellation result: ${canceled.state}.`);
   }
 } finally {
-  await cancelKernel.shutdown();
+  await cancelHost.shutdown();
 }
 
-const timeoutAdapter: CallableAdapter = {
+const timeoutConnector: AgentConnector = {
   descriptor: {
-    ...qualification.adapter.descriptor,
+    ...qualification.connector.descriptor,
     timeoutMs: 25
   },
-  entrypoint,
-  createLaunchSpec: (context) => qualification.adapter!.createLaunchSpec(context),
-  decodeArtifact: (stdout) => qualification.adapter!.decodeArtifact(stdout),
-  classifyFailure: (stdout) => qualification.adapter!.classifyFailure(stdout)
+  resourceBinding: qualification.connector.resourceBinding,
+  fixedProcessEntrypoint: entrypoint,
+  createExecutionSpec: (context) => qualification.connector!.createExecutionSpec(context),
+  decodeArtifact: (stdout) => qualification.connector!.decodeArtifact(stdout),
+  classifyFailure: (stdout) => qualification.connector!.classifyFailure(stdout)
 };
-const timeoutKernel = new CallableAdapterKernel({ adapters: [timeoutAdapter] });
+const timeoutHost = new TetiHostAgentKernel({ connectors: [timeoutConnector] });
 try {
-  const timedOut = await timeoutKernel.execute(task(`codebuddy-timeout-${Date.now()}`));
+  const request = task(`codebuddy-timeout-${Date.now()}`);
+  const timedOut = await timeoutHost.execute(request, issueExecutionAuthority(request));
   if (timedOut.state !== "failed" || timedOut.safeErrorCode !== "ADAPTER_TIMEOUT") {
     throw new Error(`Unexpected CodeBuddy timeout result: ${timedOut.state}.`);
   }
 } finally {
-  await timeoutKernel.shutdown();
+  await timeoutHost.shutdown();
 }
 
 console.log(JSON.stringify({

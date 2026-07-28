@@ -9,6 +9,7 @@ import type { CollaborationTaskRequest } from "../task/types.ts";
 import type {
   TetiTaskArtifactPayload,
   TetiTaskAttachmentPayload,
+  TetiTaskAttachmentReceiptPayload,
   TetiTaskCancelPayload,
   TetiTaskReceiptPayload,
   TetiTaskStatusPayload
@@ -56,6 +57,12 @@ export type TetiApplicationHandlerResult =
       messageId: string;
       fromTetiId: string;
       attachment: TetiTaskAttachmentPayload;
+    }
+  | {
+      type: "task.attachment.receipt";
+      messageId: string;
+      fromTetiId: string;
+      receipt: TetiTaskAttachmentReceiptPayload;
     }
   | {
       type: "task.status";
@@ -130,6 +137,13 @@ export function handleApplicationEnvelope(
     messageId: envelope.messageId,
     fromTetiId: envelope.fromTetiId,
     attachment: envelope.payload as TetiTaskAttachmentPayload
+  };
+
+  if (envelope.type === "teti.task.attachment.receipt") return {
+    type: "task.attachment.receipt",
+    messageId: envelope.messageId,
+    fromTetiId: envelope.fromTetiId,
+    receipt: envelope.payload as TetiTaskAttachmentReceiptPayload
   };
 
   if (envelope.type === "teti.task.status") return {

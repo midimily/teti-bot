@@ -3,17 +3,18 @@ import { dirname } from "node:path";
 import { validatePassportSchemaVersions } from "../../../../../core/ai-status/negotiation.ts";
 import { isCanonicalTetiPublicId } from "../../../../../core/identity/public-id.ts";
 
-export const TETI_PEER_PROTOCOL_CAPABILITY_STORE_SCHEMA_VERSION = 1;
+export const TETI_PEER_PROTOCOL_CAPABILITY_STORE_SCHEMA_VERSION = 2;
 export const MAX_PEER_PROTOCOL_CAPABILITIES = 512;
 
 export interface PassportPeerProtocolCapability {
   tetiId: string;
-  passportSchemaVersions: number[];
+  collaborationProtocolEpoch: number;
+  passportSchemaVersions?: number[];
   observedAt: string;
 }
 
 export interface PeerProtocolCapabilityStoreState {
-  schemaVersion: 1;
+  schemaVersion: 2;
   peers: PassportPeerProtocolCapability[];
 }
 
@@ -128,12 +129,19 @@ function rememberPeerProtocolCapability(
 ): boolean {
   const normalized = {
     ...structuredClone(capability),
-    passportSchemaVersions: [...capability.passportSchemaVersions].sort((left, right) => left - right)
+    ...(capability.passportSchemaVersions
+      ? { passportSchemaVersions: [...capability.passportSchemaVersions].sort((left, right) => left - right) }
+      : {})
   };
   const existing = state.peers.find((peer) => peer.tetiId === normalized.tetiId);
   if (existing) {
+    // Once a peer proves the current epoch, a delayed 0.1 message can never
+    // downgrade it back to upgrade-required.
+    if (normalized.collaborationProtocolEpoch < existing.collaborationProtocolEpoch) return false;
     if (Date.parse(normalized.observedAt) < Date.parse(existing.observedAt)) return false;
-    if (sameVersions(existing.passportSchemaVersions, normalized.passportSchemaVersions)) return false;
+    if (normalized.collaborationProtocolEpoch === existing.collaborationProtocolEpoch
+      && sameVersions(existing.passportSchemaVersions, normalized.passportSchemaVersions)) return false;
+    existing.collaborationProtocolEpoch = normalized.collaborationProtocolEpoch;
     existing.passportSchemaVersions = normalized.passportSchemaVersions;
     existing.observedAt = normalized.observedAt;
     return true;
@@ -149,16 +157,27 @@ function validatePeerProtocolCapability(
   value: unknown
 ): asserts value is PassportPeerProtocolCapability {
   if (!isRecord(value)
-    || Object.keys(value).some((key) => !["tetiId", "passportSchemaVersions", "observedAt"].includes(key))
+    || Object.keys(value).some((key) => ![
+      "tetiId",
+      "collaborationProtocolEpoch",
+      "passportSchemaVersions",
+      "observedAt"
+    ].includes(key))
     || !isCanonicalTetiPublicId(value.tetiId)
+    || !Number.isSafeInteger(value.collaborationProtocolEpoch)
+    || Number(value.collaborationProtocolEpoch) < 1
+    || Number(value.collaborationProtocolEpoch) > 255
     || typeof value.observedAt !== "string"
     || !Number.isFinite(Date.parse(value.observedAt))) {
     throw new Error("Teti Peer protocol capability is invalid.");
   }
-  validatePassportSchemaVersions(value.passportSchemaVersions);
+  if (value.passportSchemaVersions !== undefined) {
+    validatePassportSchemaVersions(value.passportSchemaVersions);
+  }
 }
 
-function sameVersions(left: readonly number[], right: readonly number[]): boolean {
+function sameVersions(left: readonly number[] | undefined, right: readonly number[] | undefined): boolean {
+  if (!left || !right) return left === right;
   if (left.length !== right.length) return false;
   const normalizedLeft = [...left].sort((a, b) => a - b);
   const normalizedRight = [...right].sort((a, b) => a - b);

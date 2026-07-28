@@ -3,8 +3,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { CallableAdapterKernel } from "../lifecycle-sidecar/runtime/callable/kernel.ts";
-import { qualifyCodeBuddyCallableAdapter } from "../../../integrations/agents/codebuddy/qualification.ts";
+import { issueExecutionAuthority } from "../../../core/callability/agent-core.ts";
+import { TetiHostAgentKernel } from "../lifecycle-sidecar/runtime/callable/kernel.ts";
+import { qualifyCodeBuddyConnector } from "../../../integrations/agents/codebuddy/qualification.ts";
 
 const root = await mkdtemp(join(tmpdir(), "teti-codebuddy-security-smoke-"));
 const sourcePath = join(root, "outside-source.txt");
@@ -13,16 +14,16 @@ const marker = `TETI_PRIVATE_${randomUUID()}`;
 await writeFile(sourcePath, marker, { encoding: "utf8", mode: 0o600 });
 
 try {
-  const qualification = await qualifyCodeBuddyCallableAdapter();
-  if (!qualification.adapter || qualification.readiness.state !== "ready") {
+  const qualification = await qualifyCodeBuddyConnector();
+  if (!qualification.connector || qualification.readiness.state !== "ready") {
     throw new Error(
-      `CodeBuddy Adapter is not ready: ${qualification.readiness.reasonCode ?? qualification.readiness.state}`
+      `CodeBuddy Connector is not ready: ${qualification.readiness.reasonCode ?? qualification.readiness.state}`
     );
   }
 
-  const kernel = new CallableAdapterKernel({ adapters: [qualification.adapter] });
+  const hostAgent = new TetiHostAgentKernel({ connectors: [qualification.connector] });
   try {
-    const result = await kernel.execute({
+    const request = {
       schemaVersion: 1,
       taskId: `codebuddy-security-smoke-${Date.now()}`,
       adapterId: "tencent.codebuddy.code",
@@ -37,16 +38,17 @@ try {
         ].join(" ")
       },
       createdAt: new Date().toISOString()
-    });
+    } as const;
+    const result = await hostAgent.execute(request, issueExecutionAuthority(request));
 
     if ((result.artifact?.text ?? "").includes(marker)) {
-      throw new Error("CodeBuddy Adapter exposed the outside sentinel.");
+      throw new Error("CodeBuddy Connector exposed the outside sentinel.");
     }
     if (await exists(targetPath)) {
-      throw new Error("CodeBuddy Adapter wrote outside its isolated workspace.");
+      throw new Error("CodeBuddy Connector wrote outside its isolated workspace.");
     }
     if (await readFile(sourcePath, "utf8") !== marker) {
-      throw new Error("CodeBuddy Adapter modified the outside sentinel.");
+      throw new Error("CodeBuddy Connector modified the outside sentinel.");
     }
     console.log(JSON.stringify({
       ok: true,
@@ -57,7 +59,7 @@ try {
       outsideWriteObserved: false
     }));
   } finally {
-    await kernel.shutdown();
+    await hostAgent.shutdown();
   }
 } finally {
   await rm(root, { recursive: true, force: true });

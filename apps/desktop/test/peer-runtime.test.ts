@@ -85,6 +85,24 @@ test("two Teti runtimes confirm a Chatmail handshake and exchange alpha heartbea
   assert.equal(repeated.connections.length, 1);
 });
 
+test("a due heartbeat is sent before polling a peer backlog", async () => {
+  const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
+  const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
+  const registry = new StaticRegistry([toIdentity(accountA), toIdentity(accountB)]);
+  const relay = new MemoryChatmailRelay();
+  let nowMs = Date.now() + 1_000;
+  const now = () => new Date(nowMs);
+  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), registry, undefined, { now });
+  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), registry, undefined, { now });
+  await confirmPeers(runtimeA, runtimeB, "beta00002");
+
+  relay.clearEvents(accountA.address);
+  nowMs += 5_000;
+  await runtimeA.poll();
+
+  assert.deepEqual(relay.eventsFor(accountA.address).slice(0, 2), ["send", "receive"]);
+});
+
 test("reciprocal intent accepts a relayed request and confirms both Teti instances", async () => {
   const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
   const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
@@ -278,7 +296,7 @@ test("AI status is opt-in, sent only to confirmed peers, and revoked independent
   );
 });
 
-test("a delayed legacy Passport cannot downgrade an established schema 3 snapshot", async () => {
+test("a delayed legacy Passport is rejected without downgrading an established schema 3 snapshot", async () => {
   const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
   const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
   const registry = new StaticRegistry([toIdentity(accountA), toIdentity(accountB)]);
@@ -292,7 +310,8 @@ test("a delayed legacy Passport cannot downgrade an established schema 3 snapsho
   await confirmPeers(runtimeA, runtimeB, "beta00002");
   assert.equal((await runtimeB.list()).connections[0]?.remoteAiStatus?.schemaVersion, 3);
 
-  const delayedLegacy = createApplicationEnvelope({
+  const delayedLegacy = {
+    version: 2,
     type: "teti.ai.status.sync",
     messageId: "delayed-legacy-passport",
     fromTetiId: accountA.id,
@@ -304,8 +323,8 @@ test("a delayed legacy Passport cannot downgrade an established schema 3 snapsho
       expiresAt: "2099-01-01T00:30:00.000Z",
       tools: []
     } satisfies AiStatusSyncPayload
-  });
-  relay.pushRaw(accountB.address, accountA.address, serializeApplicationEnvelope(delayedLegacy));
+  };
+  relay.pushRaw(accountB.address, accountA.address, JSON.stringify(delayedLegacy));
 
   const afterLegacy = await runtimeB.poll();
   assert.equal(afterLegacy.connections[0]?.remoteAiStatus?.schemaVersion, 3);
@@ -465,7 +484,7 @@ test("Chatmail keeps a Task offline, receiver stores it once, and returns a rece
   const acknowledged = await runtimeA.listTasks();
   assert.equal(acknowledged.records.length, 1);
   assert.equal(acknowledged.records[0]?.delivery, "acknowledged");
-  assert.deepEqual(acknowledged.peers[0]?.supportedVersions, [1, 2, 3]);
+  assert.deepEqual(acknowledged.peers[0]?.supportedVersions, [4]);
 });
 
 test("Task ID retry is idempotent and conflicting immutable content is rejected", async () => {
@@ -526,11 +545,11 @@ test("known incompatible Task protocol prevents speculative transport", async ()
   const registry = new StaticRegistry([toIdentity(accountA), toIdentity(accountB)]);
   const relay = new MemoryChatmailRelay();
   const taskStore = new MemoryTaskTransportStore({
-    schemaVersion: 1,
+    schemaVersion: 2,
     records: [],
     peers: [{
       tetiId: accountB.id,
-      supportedVersions: [4],
+      supportedVersions: [5],
       observedAt: "2026-07-26T00:00:00.000Z"
     }]
   });
@@ -540,11 +559,11 @@ test("known incompatible Task protocol prevents speculative transport", async ()
   const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), registry);
   const connection = await confirmPeers(runtimeA, runtimeB, "beta00002");
   await taskStore.save({
-    schemaVersion: 1,
+    schemaVersion: 2,
     records: [],
     peers: [{
       tetiId: accountB.id,
-      supportedVersions: [4],
+      supportedVersions: [5],
       observedAt: "2026-07-26T03:00:00.000Z"
     }]
   });
@@ -555,6 +574,40 @@ test("known incompatible Task protocol prevents speculative transport", async ()
     text: "Do not send this.",
     ttlMs: 60_000
   }), /compatible Task version/);
+  assert.equal(relay.peek(accountB.address).filter(isTaskRequestMessage).length, 0);
+});
+
+test("a confirmed 0.1 peer is reachable but explicitly requires upgrade and cannot receive Tasks", async () => {
+  const timestamp = "2026-07-28T08:00:00.000Z";
+  const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
+  const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
+  const registry = new StaticRegistry([toIdentity(accountA), toIdentity(accountB)]);
+  const relay = new MemoryChatmailRelay();
+  const connections = new MemoryTetiConnectionStorage();
+  await connections.saveAll([makeConnectionRecord(accountB, "Confirmed", timestamp)]);
+  const runtimeA = await makeRuntime(
+    accountA,
+    relay.adapter(accountA.address),
+    registry,
+    connections
+  );
+  relay.pushRaw(accountA.address, accountB.address, JSON.stringify({
+    version: 1,
+    type: "teti.presence",
+    messageId: "legacy-heartbeat",
+    fromTetiId: accountB.id,
+    createdAt: timestamp,
+    payload: { status: "alpha-heartbeat", timestamp }
+  }));
+
+  const result = await runtimeA.poll();
+  assert.equal(result.connections[0]?.remoteProtocolCapabilities?.collaborationProtocolEpoch, 1);
+  assert.ok(result.connections[0]?.lastHeartbeatReceivedAt, "legacy traffic still proves reachability");
+  await assert.rejects(() => runtimeA.sendTask({
+    connectionRequestId: result.connections[0]!.requestId,
+    capabilityId: "code-analysis",
+    text: "Do not deliver this to 0.1."
+  }), /must upgrade to Beta 0.2/);
   assert.equal(relay.peek(accountB.address).filter(isTaskRequestMessage).length, 0);
 });
 
@@ -586,7 +639,7 @@ test("two peers deliver a verified image Task, approve once, execute, and return
       text: "Read the attached pixel.",
       attachments: [staged.part]
     });
-    assert.equal(sent.protocolVersion, 3);
+    assert.equal(sent.protocolVersion, 4);
 
     await runtimeB.poll();
     const inbox = await runtimeB.listTasks();
@@ -640,7 +693,7 @@ test("two-image editing returns a verified image Artifact after completed status
       text: "Merge these two reference images and return the edited image.",
       attachments: [first.part, second.part]
     });
-    assert.equal(sent.protocolVersion, 3);
+    assert.equal(sent.protocolVersion, 4);
 
     await runtimeB.poll();
     await runtimeB.approveTask(sent.request.taskId);
@@ -672,6 +725,87 @@ test("two-image editing returns a verified image Artifact after completed status
     assert.ok(image && image.kind === "image");
     const resultPath = await runtimeA.resolveTaskImage(sent.request.taskId, image.attachmentId);
     assert.deepEqual(await readFile(resultPath), sourceBytes);
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 10 });
+  }
+});
+
+test("Task v4 resends only missing images until a four-image request is complete", async () => {
+  const root = await mkdtemp(join(tmpdir(), "teti-task-v4-image-retry-"));
+  try {
+    const source = join(root, "source.png");
+    const sourceBytes = onePixelPng();
+    await writeFile(source, sourceBytes);
+    const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
+    const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
+    const registry = new StaticRegistry([toIdentity(accountA), toIdentity(accountB)]);
+    const relay = new MemoryChatmailRelay();
+    let clock = new Date();
+    const now = () => new Date(clock);
+    const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), registry, undefined, {
+      taskAttachmentStore: new FileTaskAttachmentStore(join(root, "a")),
+      now
+    });
+    const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), registry, undefined, {
+      taskAttachmentStore: new FileTaskAttachmentStore(join(root, "b")),
+      now
+    });
+    const connection = await confirmPeers(runtimeA, runtimeB, "beta00002");
+    const attachments: TaskImagePart[] = [];
+    for (let index = 0; index < 4; index += 1) {
+      attachments.push((await runtimeA.stageTaskImage(source)).part);
+    }
+    const sent = await runtimeA.sendTask({
+      connectionRequestId: connection.requestId,
+      taskId: "task-v4-four-image-retry",
+      capabilityId: "image-editing",
+      text: "Use all four reference images.",
+      attachments
+    });
+    assert.equal(sent.protocolVersion, 4);
+    assert.equal(relay.dropFirstApplicationMessage(accountB.address, "teti.task.attachment"), true);
+    assert.equal(relay.dropFirstApplicationMessage(accountB.address, "teti.task.attachment"), true);
+
+    await runtimeB.poll();
+    const partialReceiver = await runtimeB.getTask(sent.request.taskId);
+    assert.equal(partialReceiver.attachmentsReady, false);
+    assert.equal(
+      partialReceiver.attachmentDiagnostics?.filter((item) =>
+        item.purpose === "input" && item.state === "stored"
+      ).length,
+      2
+    );
+    await assert.rejects(
+      () => runtimeB.approveTask(sent.request.taskId),
+      /not finished downloading/
+    );
+    await runtimeA.poll();
+    const partiallyAcknowledged = await runtimeA.getTask(sent.request.taskId);
+    assert.equal(partiallyAcknowledged.acknowledgedAttachmentIds?.length, 2);
+    assert.equal(
+      partiallyAcknowledged.attachmentDiagnostics?.filter((item) => item.state === "acknowledged").length,
+      2
+    );
+
+    clock = new Date(clock.getTime() + 16_000);
+    await runtimeA.poll();
+    await runtimeB.poll();
+    const received = await runtimeB.getTask(sent.request.taskId);
+    assert.equal(received.attachmentsReady, true);
+    assert.equal(received.attachmentDiagnostics?.every((item) => item.state === "stored"), true);
+    for (const part of attachments) {
+      const storedPath = await runtimeB.resolveTaskImage(sent.request.taskId, part.attachmentId);
+      assert.deepEqual(await readFile(storedPath), sourceBytes);
+    }
+
+    await runtimeA.poll();
+    const fullyAcknowledged = await runtimeA.getTask(sent.request.taskId);
+    assert.equal(fullyAcknowledged.acknowledgedAttachmentIds?.length, 4);
+    assert.equal(fullyAcknowledged.attachmentDiagnostics?.every((item) =>
+      item.state === "acknowledged" && item.attempts >= 1
+    ), true);
+    assert.equal(fullyAcknowledged.attachmentDeliveryAttempts, undefined);
+    assert.equal(relay.pendingAttachmentCount(accountB.address), 0);
   } finally {
     await rm(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 10 });
   }
@@ -1245,7 +1379,7 @@ test("an auth-required Task still expires instead of remaining actionable foreve
   assert.equal(expired.safeErrorCode, "TASK_EXPIRED");
 });
 
-test("a current Teti keeps text Task interoperability with a known v1 peer", async () => {
+test("Beta 0.2 refuses Task delivery to a peer advertising only v1", async () => {
   const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
   const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
   const registry = new StaticRegistry([toIdentity(accountA), toIdentity(accountB)]);
@@ -1259,7 +1393,7 @@ test("a current Teti keeps text Task interoperability with a known v1 peer", asy
   });
   const connection = await confirmPeers(runtimeA, runtimeB, "beta00002");
   await storeA.save({
-    schemaVersion: 1,
+    schemaVersion: 2,
     records: [],
     peers: [{
       tetiId: accountB.id,
@@ -1267,21 +1401,13 @@ test("a current Teti keeps text Task interoperability with a known v1 peer", asy
       observedAt: "2099-01-01T00:00:00.000Z"
     }]
   });
-  const sent = await runtimeA.sendTask({
+  await assert.rejects(() => runtimeA.sendTask({
     connectionRequestId: connection.requestId,
     taskId: "task-v1-peer-001",
     capabilityId: "code-analysis",
-    text: "Text-only compatibility task."
-  });
-  assert.equal(sent.protocolVersion, 1);
-  await runtimeB.poll();
-  await runtimeB.approveTask(sent.request.taskId);
-  await flushBackgroundWork();
-  await flushBackgroundWork();
-  await runtimeA.poll();
-  const completed = await runtimeA.getTask(sent.request.taskId);
-  assert.equal(completed.state, "completed");
-  assert.equal(completed.artifacts?.[0]?.schemaVersion, 1);
+    text: "This must not be downgraded."
+  }), /compatible Task version/);
+  assert.equal(relay.peek(accountB.address).filter(isTaskRequestMessage).length, 0);
 });
 
 test("an oversized malicious envelope is isolated without blocking the next valid peer message", async () => {
@@ -1304,7 +1430,13 @@ test("an oversized malicious envelope is isolated without blocking the next vali
     type: "teti.presence",
     messageId: "valid-after-malicious",
     fromTetiId: accountA.id,
-    payload: { status: "alpha-heartbeat", timestamp: new Date().toISOString() }
+    payload: {
+      status: "alpha-heartbeat",
+      timestamp: new Date().toISOString(),
+      collaborationProtocolEpoch: 2,
+      taskProtocolVersions: [4],
+      passportSchemaVersions: [3]
+    }
   });
   relay.pushRaw(accountB.address, accountA.address, serializeApplicationEnvelope(presence));
 
@@ -1499,6 +1631,7 @@ class FailOnceArtifactStore extends MemoryTaskTransportStore {
 
 class MemoryChatmailRelay {
   private readonly queues = new Map<string, ChatmailReceivedMessage[]>();
+  private readonly events = new Map<string, string[]>();
   private readonly attachmentSources = new Map<number, string>();
   private readonly attachmentCaptions = new Map<number, string>();
   private readonly attachmentDownloadRequests = new Map<number, number>();
@@ -1523,6 +1656,7 @@ class MemoryChatmailRelay {
   }
 
   send(fromAddress: string, input: SendChatmailMessageInput): ChatmailSentMessage {
+    this.recordEvent(fromAddress, "send");
     const messageId = this.nextMessageId++;
     const queue = this.queues.get(input.peerAddress) ?? [];
     if (input.attachment) {
@@ -1549,6 +1683,7 @@ class MemoryChatmailRelay {
   }
 
   receive(address: string, limit?: number): ChatmailReceivedMessage[] {
+    this.recordEvent(address, "receive");
     const queue = this.queues.get(address) ?? [];
     const count = limit ?? queue.length;
     return queue.slice(0, count);
@@ -1607,6 +1742,14 @@ class MemoryChatmailRelay {
 
   peek(address: string): ChatmailReceivedMessage[] {
     return structuredClone(this.queues.get(address) ?? []);
+  }
+
+  clearEvents(address: string): void {
+    this.events.delete(address);
+  }
+
+  eventsFor(address: string): string[] {
+    return [...(this.events.get(address) ?? [])];
   }
 
   copyLatest(sourceAddress: string, targetAddress: string): void {
@@ -1676,6 +1819,12 @@ class MemoryChatmailRelay {
     this.lastReceivedAtMs = Math.max(Date.now(), this.lastReceivedAtMs + 1);
     return new Date(this.lastReceivedAtMs).toISOString();
   }
+
+  private recordEvent(address: string, event: string): void {
+    const events = this.events.get(address) ?? [];
+    events.push(event);
+    this.events.set(address, events);
+  }
 }
 
 class FakeTaskExecutor implements TaskExecutionBridge {
@@ -1684,7 +1833,7 @@ class FakeTaskExecutor implements TaskExecutionBridge {
 
   resolveTarget(capabilityId: string, requiredInputModes: readonly ("text" | "image")[]) {
     if (capabilityId !== "code-analysis" || !requiredInputModes.includes("text")) return null;
-    return { adapterId: "fake.adapter", agentId: "fake-agent", capabilityId };
+    return { connectorId: "fake.adapter", childAgentId: "fake-agent", capabilityId };
   }
 
   async execute(request: CallableAdapterTaskRequest): Promise<CallableAdapterTaskSnapshot> {
@@ -1733,7 +1882,7 @@ class FakeImageTaskExecutor implements TaskExecutionBridge {
 
   resolveTarget(capabilityId: string) {
     return capabilityId === "image-editing"
-      ? { adapterId: "fake.image", agentId: "fake-image", capabilityId }
+      ? { connectorId: "fake.image", childAgentId: "fake-image", capabilityId }
       : null;
   }
 
@@ -1759,7 +1908,7 @@ class FakeImageTaskExecutor implements TaskExecutionBridge {
 class MissingImageTaskExecutor implements TaskExecutionBridge {
   resolveTarget(capabilityId: string) {
     return capabilityId === "image-editing"
-      ? { adapterId: "fake.missing-image", agentId: "fake-image", capabilityId }
+      ? { connectorId: "fake.missing-image", childAgentId: "fake-image", capabilityId }
       : null;
   }
 
@@ -1781,7 +1930,7 @@ class HangingTaskExecutor implements TaskExecutionBridge {
   private readonly tasks = new Map<string, CallableAdapterTaskSnapshot>();
 
   resolveTarget(capabilityId: string) {
-    return { adapterId: "fake.adapter", agentId: "fake-agent", capabilityId };
+    return { connectorId: "fake.adapter", childAgentId: "fake-agent", capabilityId };
   }
 
   execute(request: CallableAdapterTaskRequest): Promise<CallableAdapterTaskSnapshot> {
@@ -1804,7 +1953,7 @@ class RecoveringAuthTaskExecutor implements TaskExecutionBridge {
   authenticated = false;
 
   resolveTarget(capabilityId: string) {
-    return { adapterId: "fake.adapter", agentId: "fake-agent", capabilityId };
+    return { connectorId: "fake.adapter", childAgentId: "fake-agent", capabilityId };
   }
 
   async execute(request: CallableAdapterTaskRequest): Promise<CallableAdapterTaskSnapshot> {

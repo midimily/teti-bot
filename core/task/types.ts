@@ -1,4 +1,4 @@
-export const TETI_COLLABORATION_TASK_SCHEMA_VERSION = 3;
+export const TETI_COLLABORATION_TASK_SCHEMA_VERSION = 4;
 export const TETI_TASK_ARTIFACT_SCHEMA_VERSION = 2;
 export const TETI_EXECUTION_GRANT_SCHEMA_VERSION = 1;
 
@@ -70,7 +70,7 @@ export type CollaborationTaskInput = TaskTextPart | TaskMultipartInput;
  * Capability, never a local executable, Adapter, path, command, or workspace.
  */
 export interface CollaborationTaskRequest {
-  schemaVersion: 1 | 2 | 3;
+  schemaVersion: 1 | 2 | 3 | 4;
   taskId: string;
   requesterTetiId: string;
   targetTetiId: string;

@@ -19,6 +19,7 @@ export interface PassportIdentity {
 }
 
 export type RemotePassportState = "fresh" | "stale" | "disabled" | "unknown";
+export type PeerCompatibility = "compatible" | "upgrade_required" | "unknown";
 
 export interface RemotePassportSnapshot {
   state: RemotePassportState;
@@ -45,6 +46,7 @@ export interface PassportConnectionSnapshot {
   updatedAt: string;
   confirmedAt?: string;
   lastSeen: string | null;
+  compatibility: PeerCompatibility;
   passport: RemotePassportSnapshot;
 }
 

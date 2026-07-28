@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 import type {
   CollaborationTaskSummarySnapshot,
@@ -50,6 +51,63 @@ test("Task headings prefer the peer nickname and include an exact local timestam
     timestamp,
     [{ identity: { tetiId: "teti_air072700", displayName: "Air0727" } }] as never
   ), "发送给 Air0727 的协作请求【2026年07月27日 12:34:56】");
+});
+
+test("Task send eligibility follows the live draft instead of a stale render snapshot", () => {
+  const controller = new TaskController({
+    client: new RecordingTaskClient(),
+    tauri: new RecordingTauriInvoker(),
+    notchWindow: { setMode: async () => undefined } as never,
+    onChange: () => undefined
+  });
+
+  controller.openCompose("connection-1", "code-analysis");
+  assert.equal(controller.canSendDraft(), false);
+  controller.updateDraft({ text: "Describe the task." });
+  assert.equal(controller.canSendDraft(), true);
+  controller.updateDraft({ capabilityId: "" });
+  assert.equal(controller.canSendDraft(), false);
+  controller.dispose();
+});
+
+test("Task result images expose native open, reveal, and save actions", async () => {
+  const tauri = new RecordingTauriInvoker();
+  const controller = new TaskController({
+    client: new RecordingTaskClient(),
+    tauri,
+    notchWindow: { setMode: async () => undefined } as never,
+    onChange: () => undefined
+  });
+  const path = "/Users/test/.teti/task-attachments/artifact/task-1/result.png";
+
+  await controller.openResultImage(path);
+  await controller.revealResultImage(path);
+  await controller.saveResultImage(path);
+
+  assert.deepEqual(tauri.calls, [
+    { command: "open_task_result_image", args: { path } },
+    { command: "reveal_task_result_image", args: { path } },
+    { command: "save_task_result_image", args: { path } }
+  ]);
+  controller.dispose();
+});
+
+test("Task UI keeps send state live and parents native image dialogs to the Teti window", async () => {
+  const [view, native] = await Promise.all([
+    readFile(new URL("../src/tasks/view.ts", import.meta.url), "utf8"),
+    readFile(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8")
+  ]);
+
+  assert.match(view, /prompt\.addEventListener\("input", syncSendState\)/);
+  assert.match(view, /send\.disabled = !controller\.canSendDraft\(\)/);
+  assert.match(view, /artifactImagePreview/);
+  assert.match(view, /打开结果图片/);
+  assert.match(view, /在 Finder 中显示/);
+  assert.match(view, /另存为/);
+  assert.match(native, /async fn pick_task_images\(window: tauri::WebviewWindow\)/);
+  assert.ok(native.match(/\.set_parent\(&window\)/g)?.length === 2);
+  assert.match(native, /open_task_result_image/);
+  assert.match(native, /save_task_result_image/);
 });
 
 test("Task controller coalesces refresh requests into one poll timer", async () => {

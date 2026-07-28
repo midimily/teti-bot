@@ -5,13 +5,16 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import type {
-  CallableAdapter,
-  CallableAdapterLaunchContext,
   CallableAdapterTaskRequest
 } from "../../../core/callability/adapter.ts";
 import {
-  CallableAdapterKernel,
-  CallableAdapterKernelError
+  issueExecutionAuthority,
+  type AgentConnector,
+  type AgentConnectorContext
+} from "../../../core/callability/agent-core.ts";
+import {
+  TetiHostAgentKernel,
+  TetiHostAgentError
 } from "../lifecycle-sidecar/runtime/callable/kernel.ts";
 import { FileTaskAttachmentStore } from "../lifecycle-sidecar/runtime/tasks/attachments.ts";
 import { parseRunnerManifest } from "../../../integrations/agents/codex/image-adapter.ts";
@@ -23,51 +26,61 @@ const fixturePath = join(
 );
 
 test("fake Agent completes a bounded text task through stdin and workspace is removed", async () => {
-  const adapter = fakeAdapter("echo");
-  const kernel = new CallableAdapterKernel({ adapters: [adapter] });
-  const result = await kernel.execute(task("echo-task"));
+  const connector = fakeConnector("echo");
+  const hostAgent = new TetiHostAgentKernel({ connectors: [connector] });
+  const result = await authorizedExecute(hostAgent, task("echo-task"));
 
   assert.equal(result.state, "completed");
   assert.equal(result.artifact?.text, "fake:hello agent");
-  assert.equal(kernel.snapshot.activeTaskCount, 0);
-  assert.ok(adapter.lastContext);
-  await assert.rejects(() => stat(adapter.lastContext!.workspacePath));
-  await kernel.shutdown();
+  assert.equal(hostAgent.snapshot.activeTaskCount, 0);
+  assert.ok(connector.lastContext);
+  await assert.rejects(() => stat(connector.lastContext!.workspacePath));
+  await hostAgent.shutdown();
 });
 
-test("Adapter launch context never receives task text", async () => {
-  const adapter = fakeAdapter("echo");
-  const kernel = new CallableAdapterKernel({ adapters: [adapter] });
-  await kernel.execute(task("no-text-in-launch"));
-  assert.deepEqual(Object.keys(adapter.lastContext!).sort(), [
+test("Connector context never receives task text or execution authority", async () => {
+  const connector = fakeConnector("echo");
+  const hostAgent = new TetiHostAgentKernel({ connectors: [connector] });
+  await authorizedExecute(hostAgent, task("no-text-in-launch"));
+  assert.deepEqual(Object.keys(connector.lastContext!).sort(), [
     "capabilityId",
     "images",
     "taskId",
     "workspacePath"
   ]);
-  assert.equal("input" in (adapter.lastContext as unknown as Record<string, unknown>), false);
-  await kernel.shutdown();
+  assert.equal("input" in (connector.lastContext as unknown as Record<string, unknown>), false);
+  assert.equal("authority" in (connector.lastContext as unknown as Record<string, unknown>), false);
+  await hostAgent.shutdown();
 });
 
 test("Kernel persists a real image file before deleting the Adapter workspace", async () => {
   const root = await mkdtemp(join(tmpdir(), "teti-callable-image-"));
   try {
-    const adapter: CallableAdapter = {
+    const connector: AgentConnector = {
       descriptor: {
-        contractVersion: 2,
-        adapterId: "test.image-agent",
-        adapterRevision: 1,
-        agentId: "fake-image",
+        contractVersion: 1,
+        connectorId: "test.image-agent",
+        connectorRevision: 1,
+        childAgentId: "fake-image",
         capabilityIds: ["image-editing"],
         inputModes: ["text", "image"],
         outputModes: ["text", "image"],
+        transportKind: "process",
         timeoutMs: 2_000,
         cancelGraceMs: 20,
         maxOutputBytes: 64 * 1024
       },
-      entrypoint: process.execPath,
-      createLaunchSpec() {
-        return { executable: process.execPath, args: [fixturePath, "image"] };
+      resourceBinding: {
+        schemaVersion: 1,
+        bindingId: "fake-image.process.image-editing",
+        childAgentId: "fake-image",
+        connectorId: "test.image-agent",
+        transportKind: "process",
+        capabilityIds: ["image-editing"]
+      },
+      fixedProcessEntrypoint: process.execPath,
+      createExecutionSpec() {
+        return { kind: "process", executable: process.execPath, args: [fixturePath, "image"] };
       },
       decodeArtifact(stdout) {
         const manifest = parseRunnerManifest(stdout);
@@ -75,8 +88,8 @@ test("Kernel persists a real image file before deleting the Adapter workspace", 
       }
     };
     const store = new FileTaskAttachmentStore(join(root, "artifacts"));
-    const kernel = new CallableAdapterKernel({ adapters: [adapter], artifactImageStore: store });
-    const result = await kernel.execute({
+    const hostAgent = new TetiHostAgentKernel({ connectors: [connector], artifactImageStore: store });
+    const request: CallableAdapterTaskRequest = {
       schemaVersion: 2,
       taskId: "image-output-task",
       adapterId: "test.image-agent",
@@ -84,23 +97,24 @@ test("Kernel persists a real image file before deleting the Adapter workspace", 
       capabilityId: "image-editing",
       input: { kind: "parts", text: "edit this image", images: [] },
       createdAt: new Date().toISOString()
-    });
+    };
+    const result = await authorizedExecute(hostAgent, request);
 
     assert.equal(result.state, "completed");
     assert.equal(result.artifact?.kind, "parts");
     const image = result.artifact?.kind === "parts" ? result.artifact.images[0] : undefined;
     assert.ok(image);
     assert.ok(await store.resolveImage({ taskId: result.taskId, purpose: "artifact", part: image }));
-    await kernel.shutdown();
+    await hostAgent.shutdown();
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
 
 test("timeout escalates process termination and returns only a safe error", async () => {
-  const adapter = fakeAdapter("hang", { timeoutMs: 50, cancelGraceMs: 10 });
-  const kernel = new CallableAdapterKernel({ adapters: [adapter] });
-  const result = await kernel.execute(task("timeout-task"));
+  const adapter = fakeConnector("hang", { timeoutMs: 50, cancelGraceMs: 10 });
+  const kernel = new TetiHostAgentKernel({ connectors: [adapter] });
+  const result = await authorizedExecute(kernel, task("timeout-task"));
 
   assert.equal(result.state, "failed");
   assert.equal(result.safeErrorCode, "ADAPTER_TIMEOUT");
@@ -110,9 +124,10 @@ test("timeout escalates process termination and returns only a safe error", asyn
 });
 
 test("explicit cancellation kills the complete fake Agent process group", async () => {
-  const adapter = fakeAdapter("child-tree", { timeoutMs: 5_000, cancelGraceMs: 10 });
-  const kernel = new CallableAdapterKernel({ adapters: [adapter] });
-  const completion = kernel.execute(task("cancel-tree-task"));
+  const adapter = fakeConnector("child-tree", { timeoutMs: 5_000, cancelGraceMs: 10 });
+  const kernel = new TetiHostAgentKernel({ connectors: [adapter] });
+  const request = task("cancel-tree-task");
+  const completion = authorizedExecute(kernel, request);
   const context = await waitFor(() => adapter.lastContext);
   const pidFile = join(context.workspacePath, "fake-process-tree.json");
   const pids = JSON.parse(await waitForFile(pidFile)) as { parentPid: number; childPid: number };
@@ -128,9 +143,9 @@ test("explicit cancellation kills the complete fake Agent process group", async 
 });
 
 test("combined stdout and stderr are bounded and partial output is discarded", async () => {
-  const adapter = fakeAdapter("overflow", { timeoutMs: 2_000, maxOutputBytes: 1_024 });
-  const kernel = new CallableAdapterKernel({ adapters: [adapter] });
-  const result = await kernel.execute(task("overflow-task"));
+  const adapter = fakeConnector("overflow", { timeoutMs: 2_000, maxOutputBytes: 1_024 });
+  const kernel = new TetiHostAgentKernel({ connectors: [adapter] });
+  const result = await authorizedExecute(kernel, task("overflow-task"));
 
   assert.equal(result.state, "failed");
   assert.equal(result.safeErrorCode, "ADAPTER_OUTPUT_LIMIT");
@@ -139,12 +154,12 @@ test("combined stdout and stderr are bounded and partial output is discarded", a
 });
 
 test("one failing Adapter execution is isolated from another task", async () => {
-  const failing = fakeAdapter("fail", { adapterId: "test.failing-agent" });
-  const healthy = fakeAdapter("echo", { adapterId: "test.healthy-agent" });
-  const kernel = new CallableAdapterKernel({ adapters: [failing, healthy] });
+  const failing = fakeConnector("fail", { connectorId: "test.failing-agent" });
+  const healthy = fakeConnector("echo", { connectorId: "test.healthy-agent" });
+  const kernel = new TetiHostAgentKernel({ connectors: [failing, healthy] });
   const [failed, completed] = await Promise.all([
-    kernel.execute(task("failed-task", "test.failing-agent")),
-    kernel.execute(task("healthy-task", "test.healthy-agent"))
+    authorizedExecute(kernel, task("failed-task", "test.failing-agent")),
+    authorizedExecute(kernel, task("healthy-task", "test.healthy-agent"))
   ]);
 
   assert.equal(failed.state, "failed");
@@ -156,9 +171,9 @@ test("one failing Adapter execution is isolated from another task", async () => 
 });
 
 test("an Agent that exits unexpectedly is failed safely and its workspace is recovered", async () => {
-  const adapter = fakeAdapter("exit-signal");
-  const kernel = new CallableAdapterKernel({ adapters: [adapter] });
-  const result = await kernel.execute(task("agent-exit-task"));
+  const adapter = fakeConnector("exit-signal");
+  const kernel = new TetiHostAgentKernel({ connectors: [adapter] });
+  const result = await authorizedExecute(kernel, task("agent-exit-task"));
 
   assert.equal(result.state, "failed");
   assert.equal(result.safeErrorCode, "ADAPTER_EXIT_NONZERO");
@@ -169,42 +184,42 @@ test("an Agent that exits unexpectedly is failed safely and its workspace is rec
   await kernel.shutdown();
 });
 
-test("Kernel rejects duplicate IDs, unknown Adapters, and new work after shutdown", async () => {
-  const adapter = fakeAdapter("echo");
-  const kernel = new CallableAdapterKernel({ adapters: [adapter] });
-  await kernel.execute(task("retained-task"));
+test("Host rejects duplicate IDs, unknown Connectors, and new work after shutdown", async () => {
+  const adapter = fakeConnector("echo");
+  const kernel = new TetiHostAgentKernel({ connectors: [adapter] });
+  await authorizedExecute(kernel, task("retained-task"));
   await assert.rejects(
-    () => kernel.execute(task("retained-task")),
-    (error: unknown) => error instanceof CallableAdapterKernelError
-      && error.code === "ADAPTER_TASK_DUPLICATE"
+    () => authorizedExecute(kernel, task("retained-task")),
+    (error: unknown) => error instanceof TetiHostAgentError
+      && error.code === "HOST_TASK_DUPLICATE"
   );
   await assert.rejects(
-    () => kernel.execute(task("unknown-task", "test.unknown")),
-    (error: unknown) => error instanceof CallableAdapterKernelError
-      && error.code === "ADAPTER_NOT_FOUND"
+    () => authorizedExecute(kernel, task("unknown-task", "test.unknown")),
+    (error: unknown) => error instanceof TetiHostAgentError
+      && error.code === "CONNECTOR_NOT_FOUND"
   );
   await kernel.shutdown();
   await assert.rejects(
-    () => kernel.execute(task("after-stop")),
-    (error: unknown) => error instanceof CallableAdapterKernelError
-      && error.code === "ADAPTER_KERNEL_STOPPED"
+    () => authorizedExecute(kernel, task("after-stop")),
+    (error: unknown) => error instanceof TetiHostAgentError
+      && error.code === "HOST_AGENT_STOPPED"
   );
 });
 
-test("Kernel safely registers a qualified Adapter after Runtime bootstrap", async () => {
-  const adapter = fakeAdapter("echo");
-  const kernel = new CallableAdapterKernel();
+test("Host safely registers a qualified Connector after Runtime bootstrap", async () => {
+  const adapter = fakeConnector("echo");
+  const kernel = new TetiHostAgentKernel();
 
   await assert.rejects(
-    () => kernel.execute(task("before-qualification")),
-    (error: unknown) => error instanceof CallableAdapterKernelError
-      && error.code === "ADAPTER_NOT_FOUND"
+    () => authorizedExecute(kernel, task("before-qualification")),
+    (error: unknown) => error instanceof TetiHostAgentError
+      && error.code === "CONNECTOR_NOT_FOUND"
   );
 
-  const descriptor = kernel.registerAdapter(adapter, "2026-07-26T00:00:00.000Z");
-  assert.equal(descriptor.adapterId, adapter.descriptor.adapterId);
-  assert.deepEqual(kernel.snapshot.adapters.map((item) => item.adapterId), [
-    adapter.descriptor.adapterId
+  const descriptor = kernel.registerConnector(adapter, "2026-07-26T00:00:00.000Z");
+  assert.equal(descriptor.connectorId, adapter.descriptor.connectorId);
+  assert.deepEqual(kernel.snapshot.connectors.map((item) => item.connectorId), [
+    adapter.descriptor.connectorId
   ]);
   assert.deepEqual(kernel.getCallableAgents(), [{
     schemaVersion: 1,
@@ -216,26 +231,35 @@ test("Kernel safely registers a qualified Adapter after Runtime bootstrap", asyn
     outputModes: ["text"],
     readyAt: "2026-07-26T00:00:00.000Z"
   }]);
+  assert.deepEqual(kernel.getLocalChildAgents(), [{
+    schemaVersion: 1,
+    childAgentId: "fake-agent",
+    connectorIds: ["test.fake-agent"],
+    resourceBindingIds: ["fake.process.test.fake-agent"],
+    capabilityIds: ["code-analysis"],
+    inputModes: ["text"],
+    outputModes: ["text"]
+  }]);
   assert.throws(
-    () => kernel.registerAdapter(adapter),
-    (error: unknown) => error instanceof CallableAdapterKernelError
-      && error.code === "ADAPTER_DUPLICATE"
+    () => kernel.registerConnector(adapter),
+    (error: unknown) => error instanceof TetiHostAgentError
+      && error.code === "CONNECTOR_DUPLICATE"
   );
 
-  const result = await kernel.execute(task("after-qualification"));
+  const result = await authorizedExecute(kernel, task("after-qualification"));
   assert.equal(result.state, "completed");
   await kernel.shutdown();
   assert.throws(
-    () => kernel.registerAdapter(fakeAdapter("echo", { adapterId: "test.after-stop" })),
-    (error: unknown) => error instanceof CallableAdapterKernelError
-      && error.code === "ADAPTER_KERNEL_STOPPED"
+    () => kernel.registerConnector(fakeConnector("echo", { connectorId: "test.after-stop" })),
+    (error: unknown) => error instanceof TetiHostAgentError
+      && error.code === "HOST_AGENT_STOPPED"
   );
 });
 
 test("Runtime shutdown cancels active local tasks and reaps their process", async () => {
-  const adapter = fakeAdapter("hang", { timeoutMs: 5_000, cancelGraceMs: 10 });
-  const kernel = new CallableAdapterKernel({ adapters: [adapter] });
-  const completion = kernel.execute(task("shutdown-task"));
+  const adapter = fakeConnector("hang", { timeoutMs: 5_000, cancelGraceMs: 10 });
+  const kernel = new TetiHostAgentKernel({ connectors: [adapter] });
+  const completion = authorizedExecute(kernel, task("shutdown-task"));
   await waitFor(() => adapter.lastContext);
   await kernel.shutdown();
   const result = await completion;
@@ -246,9 +270,9 @@ test("Runtime shutdown cancels active local tasks and reaps their process", asyn
 });
 
 test("Runtime shutdown bypasses a long Adapter grace period", async () => {
-  const adapter = fakeAdapter("hang", { timeoutMs: 5_000, cancelGraceMs: 5_000 });
-  const kernel = new CallableAdapterKernel({ adapters: [adapter] });
-  const completion = kernel.execute(task("bounded-shutdown-task"));
+  const adapter = fakeConnector("hang", { timeoutMs: 5_000, cancelGraceMs: 5_000 });
+  const kernel = new TetiHostAgentKernel({ connectors: [adapter] });
+  const completion = authorizedExecute(kernel, task("bounded-shutdown-task"));
   await waitFor(() => adapter.lastContext);
   const startedAt = Date.now();
   await kernel.shutdown();
@@ -259,36 +283,46 @@ test("Runtime shutdown bypasses a long Adapter grace period", async () => {
   assert.ok(Date.now() - startedAt < 1_000, "shutdown must not wait for a five-second Adapter grace");
 });
 
-interface FakeAdapterOverrides {
-  adapterId?: string;
+interface FakeConnectorOverrides {
+  connectorId?: string;
   timeoutMs?: number;
   cancelGraceMs?: number;
   maxOutputBytes?: number;
 }
 
-interface CapturingFakeAdapter extends CallableAdapter {
-  lastContext: CallableAdapterLaunchContext | null;
+interface CapturingFakeConnector extends AgentConnector {
+  lastContext: AgentConnectorContext | null;
 }
 
-function fakeAdapter(mode: string, overrides: FakeAdapterOverrides = {}): CapturingFakeAdapter {
+function fakeConnector(mode: string, overrides: FakeConnectorOverrides = {}): CapturingFakeConnector {
   return {
     descriptor: {
       contractVersion: 1,
-      adapterId: overrides.adapterId ?? "test.fake-agent",
-      adapterRevision: 1,
-      agentId: "fake-agent",
+      connectorId: overrides.connectorId ?? "test.fake-agent",
+      connectorRevision: 1,
+      childAgentId: "fake-agent",
       capabilityIds: ["code-analysis"],
-      inputMode: "text",
-      outputMode: "text",
+      inputModes: ["text"],
+      outputModes: ["text"],
+      transportKind: "process",
       timeoutMs: overrides.timeoutMs ?? 2_000,
       cancelGraceMs: overrides.cancelGraceMs ?? 20,
       maxOutputBytes: overrides.maxOutputBytes ?? 4 * 1_024
     },
-    entrypoint: process.execPath,
+    resourceBinding: {
+      schemaVersion: 1,
+      bindingId: `fake.process.${overrides.connectorId ?? "test.fake-agent"}`,
+      childAgentId: "fake-agent",
+      connectorId: overrides.connectorId ?? "test.fake-agent",
+      transportKind: "process",
+      capabilityIds: ["code-analysis"]
+    },
+    fixedProcessEntrypoint: process.execPath,
     lastContext: null,
-    createLaunchSpec(context) {
+    createExecutionSpec(context) {
       this.lastContext = structuredClone(context);
       return {
+        kind: "process",
         executable: process.execPath,
         args: [fixturePath, mode],
         environment: { TETI_FAKE_AGENT: "1" }
@@ -307,6 +341,13 @@ function task(taskId: string, adapterId = "test.fake-agent"): CallableAdapterTas
     input: { kind: "text", text: "hello agent" },
     createdAt: new Date().toISOString()
   };
+}
+
+function authorizedExecute(
+  hostAgent: TetiHostAgentKernel,
+  request: CallableAdapterTaskRequest
+) {
+  return hostAgent.execute(request, issueExecutionAuthority(request));
 }
 
 async function waitFor<T>(read: () => T | null, timeoutMs = 1_000): Promise<T> {

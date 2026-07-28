@@ -76,6 +76,11 @@ export function mapPeerConnection(
     updatedAt: connection.updatedAt,
     ...(connection.confirmedAt ? { confirmedAt: connection.confirmedAt } : {}),
     lastSeen: connection.lastHeartbeatReceivedAt ?? null,
+    compatibility: connection.remoteProtocolCapabilities?.collaborationProtocolEpoch === 2
+      ? "compatible"
+      : connection.remoteProtocolCapabilities
+        ? "upgrade_required"
+        : "unknown",
     passport: mapRemoteAiStatus(connection.remoteAiStatus, now)
   };
 }

@@ -36,7 +36,7 @@ export function resolveChatmailRuntimeConfig(
     accountsPath:
       input.accountsPath ??
       env[TETI_CHATMAIL_ACCOUNTS_PATH] ??
-      join(homedir(), ".teti", "chatmail-accounts"),
+      join(homedir(), ".teti", "store-v2", "credentials", "chatmail-accounts"),
     workingDirectory: input.workingDirectory,
     env: input.env
   };

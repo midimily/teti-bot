@@ -225,6 +225,7 @@ test("confirmed peer cards present shared Agent Passport rows", () => {
     createdAt: "2026-07-25T00:00:00.000Z",
     updatedAt: "2026-07-25T00:00:00.000Z",
     lastSeen: "2026-07-25T00:00:09.000Z",
+    compatibility: "compatible",
     passport: {
       state: "fresh",
       resources: [],
@@ -253,4 +254,26 @@ test("confirmed peer cards present shared Agent Passport rows", () => {
   assert.equal(viewModel.connections[0]?.passport.agents[0]?.name, "Claude Code");
   assert.equal(viewModel.connections[0]?.passport.agents[0]?.providerName, "Anthropic");
   assert.equal(viewModel.connections[0]?.passport.agents[0]?.statusLabel, "运行中");
+});
+
+test("legacy peer compatibility is separate from reachability", () => {
+  const passport = emptyPassportSnapshot();
+  passport.connections = [{
+    requestId: "legacy-peer",
+    connectionState: "Confirmed",
+    direction: "incoming",
+    identity: { tetiId: "teti_remote001", address: "remote001@mail.seep.im" },
+    createdAt: "2026-07-25T00:00:00.000Z",
+    updatedAt: "2026-07-25T00:00:00.000Z",
+    lastSeen: "2026-07-25T00:00:09.000Z",
+    compatibility: "upgrade_required",
+    passport: { state: "unknown", resources: [], agents: [], capabilities: [], bindings: [] }
+  }];
+  const viewModel = toPassportViewModel(
+    { passport, sharingBusy: false, openPanel: null },
+    new Date("2026-07-25T00:00:10.000Z")
+  );
+  assert.equal(viewModel.connections[0]?.reachability, "reachable");
+  assert.equal(viewModel.connections[0]?.compatibility, "upgrade_required");
+  assert.equal(viewModel.connections[0]?.compatibilityLabel, "需要升级");
 });

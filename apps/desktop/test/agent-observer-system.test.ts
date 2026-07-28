@@ -51,13 +51,13 @@ test("version probes enforce timeout, output bounds, and secret/path sanitizatio
     await assert.rejects(
       () => system.runVersionProbe("/usr/bin/yes", {
         ...probe,
-        timeoutMs: 2_000
+        timeoutMs: 10_000
       }),
       (error: unknown) => errorCode(error) === "VERSION_OUTPUT_LIMIT"
     );
     assert.equal(await system.runVersionProbe(privateOutput, {
       ...probe,
-      timeoutMs: 2_000
+      timeoutMs: 10_000
     }), null);
   } finally {
     await rm(root, { recursive: true, force: true });

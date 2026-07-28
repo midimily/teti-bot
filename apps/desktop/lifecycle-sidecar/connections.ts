@@ -22,8 +22,14 @@ import {
   type TetiConnectionReject,
   type TetiConnectionRequest
 } from "../../../core/connection/types.ts";
-import { parseApplicationEnvelope } from "../../../core/protocol/envelope.ts";
-import type { TetiPresencePayload } from "../../../core/protocol/types.ts";
+import {
+  inspectApplicationEnvelopeHeader,
+  parseApplicationEnvelope
+} from "../../../core/protocol/envelope.ts";
+import {
+  TETI_COLLABORATION_PROTOCOL_EPOCH,
+  type TetiPresencePayload
+} from "../../../core/protocol/types.ts";
 import type { TetiApplicationEnvelope } from "../../../core/protocol/types.ts";
 import {
   MAX_TASK_IMAGE_BYTES,
@@ -37,6 +43,7 @@ import {
   type SendCollaborationTaskInput,
   type TetiTaskArtifactPayload,
   type TetiTaskAttachmentPayload,
+  type TetiTaskAttachmentReceiptPayload,
   type TetiTaskCancelPayload,
   type TetiTaskReceiptPayload,
   type TetiTaskStatusPayload
@@ -248,6 +255,10 @@ export class PeerConnectionRuntime implements PeerConnectionService {
     return this.serial(async () => {
       await this.ensureReady();
       const account = await this.requireAccount();
+      // Presence is control-plane traffic. Send it before receiving a backlog
+      // or flushing Task attachments so bulk collaboration work cannot make a
+      // healthy peer appear offline.
+      let heartbeatCount = await this.sendDueHeartbeats();
       const messages = await this.chatmailAdapter.receiveMessages({
         accountId: account.chatmailAccountId,
         limit: 100,
@@ -309,8 +320,10 @@ export class PeerConnectionRuntime implements PeerConnectionService {
         }
       }
 
+      // A connection may have become Confirmed while processing this batch.
+      // Give that peer its first presence message before Task outbox traffic.
+      heartbeatCount += await this.sendDueHeartbeats();
       await this.taskTransport.flushOutbox();
-      const heartbeatCount = await this.sendDueHeartbeats();
       const aiStatusCount = await this.sendDueAiStatus();
       return this.snapshot(receivedCount, heartbeatCount, undefined, aiStatusCount);
     });
@@ -382,6 +395,22 @@ export class PeerConnectionRuntime implements PeerConnectionService {
   sendTask(input: SendCollaborationTaskInput): Promise<CollaborationTaskTransportRecord> {
     return this.serial(async () => {
       await this.ensureReady();
+      const connection = (await this.connectionStorage.loadAll()).find(
+        (item) => item.requestId === input.connectionRequestId
+      );
+      const compatibility = connection
+        ? await this.peerProtocolCapabilities.get(connection.remoteTetiId).catch(() => undefined)
+        : undefined;
+      if (compatibility?.collaborationProtocolEpoch !== TETI_COLLABORATION_PROTOCOL_EPOCH) {
+        throw new TaskTransportRuntimeError(
+          compatibility
+            ? "TASK_PEER_UPGRADE_REQUIRED"
+            : "TASK_PEER_COMPATIBILITY_UNKNOWN",
+          compatibility
+            ? "The confirmed Teti must upgrade to Beta 0.2 before receiving tasks."
+            : "Wait until the confirmed Teti proves Beta 0.2 compatibility."
+        );
+      }
       return this.taskTransport.send(input);
     });
   }
@@ -506,7 +535,9 @@ export class PeerConnectionRuntime implements PeerConnectionService {
     try {
       envelope = parseApplicationEnvelope(text);
     } catch (error) {
-      if (error instanceof TetiApplicationProtocolError) return false;
+      if (error instanceof TetiApplicationProtocolError) {
+        return this.observeIncompatibleApplicationEnvelope(text, fromAddress, receivedAt);
+      }
       throw error;
     }
     const connection = (await this.connectionStorage.loadAll()).find(
@@ -519,7 +550,14 @@ export class PeerConnectionRuntime implements PeerConnectionService {
 
     if (envelope.type === "teti.presence") {
       const payload = envelope.payload as TetiPresencePayload;
-      this.heartbeatReceived.set(connection.requestId, payload.timestamp || envelope.createdAt);
+      // Reachability is based on the relay's receive timestamp, not the peer's
+      // wall clock. Delayed or skewed peer clocks must not create false online
+      // cards, and an older queued heartbeat must not replace a newer one.
+      const observedAt = validReceivedHeartbeatTimestamp(receivedAt, this.now());
+      const previous = this.heartbeatReceived.get(connection.requestId);
+      if (!previous || Date.parse(observedAt) > Date.parse(previous)) {
+        this.heartbeatReceived.set(connection.requestId, observedAt);
+      }
       if (payload.taskProtocolVersions) {
         await this.taskTransport.observePeerVersions(
           connection.remoteTetiId,
@@ -530,8 +568,9 @@ export class PeerConnectionRuntime implements PeerConnectionService {
       if (payload.passportSchemaVersions) {
         const changed = await this.peerProtocolCapabilities.observe({
           tetiId: connection.remoteTetiId,
+          collaborationProtocolEpoch: payload.collaborationProtocolEpoch,
           passportSchemaVersions: payload.passportSchemaVersions,
-          observedAt: payload.timestamp || envelope.createdAt
+          observedAt
         });
         if (changed) this.aiStatusSent.delete(connection.requestId);
       }
@@ -601,10 +640,25 @@ export class PeerConnectionRuntime implements PeerConnectionService {
         }
         throw new Error("Chatmail Task attachment has no local file.");
       }
-      await this.taskTransport.receiveAttachment({
+      const receipt = await this.taskTransport.receiveAttachment({
         envelope: typedEnvelope,
         connection,
         filePath: attachmentMessage.filePath,
+        receivedAt
+      });
+      if (receipt) {
+        // The Chatmail message is acknowledged only after the durable Task
+        // copy and its v4 peer receipt have both succeeded. A retry is safe:
+        // attachment ingestion and receipts are idempotent by attachmentId.
+        await this.applicationManager.sendTaskAttachmentReceipt(connection.requestId, receipt);
+      }
+      return true;
+    }
+
+    if (envelope.type === "teti.task.attachment.receipt") {
+      await this.taskTransport.receiveAttachmentReceipt({
+        envelope: envelope as TetiApplicationEnvelope<TetiTaskAttachmentReceiptPayload>,
+        connection,
         receivedAt
       });
       return true;
@@ -647,6 +701,32 @@ export class PeerConnectionRuntime implements PeerConnectionService {
     return true;
   }
 
+  private async observeIncompatibleApplicationEnvelope(
+    text: string,
+    fromAddress?: string,
+    receivedAt?: string
+  ): Promise<boolean> {
+    const header = inspectApplicationEnvelopeHeader(text);
+    if (!header || header.version >= TETI_COLLABORATION_PROTOCOL_EPOCH) return false;
+    const connection = (await this.connectionStorage.loadAll()).find((item) =>
+      item.state === TetiConnectionState.Confirmed
+      && item.remoteTetiId === header.fromTetiId
+      && (!fromAddress || item.remoteAddress.toLowerCase() === fromAddress.toLowerCase())
+    );
+    if (!connection) return false;
+    const observedAt = validReceivedHeartbeatTimestamp(receivedAt, this.now());
+    const previous = this.heartbeatReceived.get(connection.requestId);
+    if (!previous || Date.parse(observedAt) > Date.parse(previous)) {
+      this.heartbeatReceived.set(connection.requestId, observedAt);
+    }
+    await this.peerProtocolCapabilities.observe({
+      tetiId: connection.remoteTetiId,
+      collaborationProtocolEpoch: header.version,
+      observedAt
+    });
+    return true;
+  }
+
   private async sendDueHeartbeats(): Promise<number> {
     let sent = 0;
     const now = this.now();
@@ -655,14 +735,20 @@ export class PeerConnectionRuntime implements PeerConnectionService {
       const previous = this.heartbeatSent.get(connection.requestId);
       if (previous && now.getTime() - Date.parse(previous) < HEARTBEAT_INTERVAL_MS) continue;
       const timestamp = now.toISOString();
-      await this.applicationManager.sendPresence(connection.requestId, {
-        status: "alpha-heartbeat",
-        timestamp,
-        taskProtocolVersions: [...TETI_SUPPORTED_TASK_PROTOCOL_VERSIONS],
-        passportSchemaVersions: [...TETI_SUPPORTED_PASSPORT_SCHEMA_VERSIONS]
-      });
-      this.heartbeatSent.set(connection.requestId, timestamp);
-      sent += 1;
+      try {
+        await this.applicationManager.sendPresence(connection.requestId, {
+          status: "alpha-heartbeat",
+          timestamp,
+          collaborationProtocolEpoch: TETI_COLLABORATION_PROTOCOL_EPOCH,
+          taskProtocolVersions: [...TETI_SUPPORTED_TASK_PROTOCOL_VERSIONS],
+          passportSchemaVersions: [...TETI_SUPPORTED_PASSPORT_SCHEMA_VERSIONS]
+        });
+        this.heartbeatSent.set(connection.requestId, timestamp);
+        sent += 1;
+      } catch {
+        // One unavailable peer must not delay heartbeats for the remaining
+        // confirmed connections. The next Runtime poll retries this peer.
+      }
     }
     return sent;
   }
@@ -705,7 +791,8 @@ export class PeerConnectionRuntime implements PeerConnectionService {
       const schemaVersion = selectAiStatusSchemaForPeer(
         peerCapability?.passportSchemaVersions
       );
-      if (!schemaVersion) continue;
+      if (peerCapability?.collaborationProtocolEpoch !== TETI_COLLABORATION_PROTOCOL_EPOCH
+        || !schemaVersion) continue;
       const signature = JSON.stringify({ schemaVersion, snapshot: snapshotSignature });
       const previous = this.aiStatusSent.get(connection.requestId);
       if (!force
@@ -785,7 +872,10 @@ export class PeerConnectionRuntime implements PeerConnectionService {
       lastHeartbeatReceivedAt: this.heartbeatReceived.get(connection.requestId),
       remoteProtocolCapabilities: protocolCapability
         ? {
-            passportSchemaVersions: structuredClone(protocolCapability.passportSchemaVersions),
+            collaborationProtocolEpoch: protocolCapability.collaborationProtocolEpoch,
+            ...(protocolCapability.passportSchemaVersions
+              ? { passportSchemaVersions: structuredClone(protocolCapability.passportSchemaVersions) }
+              : {}),
             observedAt: protocolCapability.observedAt
           }
         : undefined,
@@ -828,6 +918,15 @@ export class PeerConnectionRuntime implements PeerConnectionService {
   }
 }
 
+function validReceivedHeartbeatTimestamp(receivedAt: string | undefined, now: Date): string {
+  if (!receivedAt) return now.toISOString();
+  const timestamp = Date.parse(receivedAt);
+  if (!Number.isFinite(timestamp) || timestamp > now.getTime()) {
+    return now.toISOString();
+  }
+  return new Date(timestamp).toISOString();
+}
+
 let defaultServicePromise: Promise<PeerConnectionService> | undefined;
 let defaultRpcClient: RuntimeChatmailRpcClient | undefined;
 let defaultPassportSharingStorePromise: Promise<FilePassportSharingStore> | undefined;
@@ -847,7 +946,7 @@ export function getDefaultPeerConnectionService(
 
 export function getDefaultPassportSharingStore(): Promise<FilePassportSharingStore> {
   defaultPassportSharingStorePromise ??= resolveTetiProfile().then(
-    (profile) => new FilePassportSharingStore(join(profile.root, "settings.json"))
+    (profile) => new FilePassportSharingStore(join(profile.storeDir, "settings.json"))
   );
   return defaultPassportSharingStorePromise;
 }
@@ -871,7 +970,7 @@ async function createDefaultPeerConnectionService(
     transport: { requestTimeoutMs: 15_000 }
   });
   const accountStorage = new FileTetiAccountStorage(profile.accountPath);
-  const connectionStorage = new FileTetiConnectionStorage(join(profile.root, "connections.json"));
+  const connectionStorage = new FileTetiConnectionStorage(join(profile.storeDir, "connections.json"));
   const chatmailAdapter = new RealChatmailAdapter(defaultRpcClient);
   return new PeerConnectionRuntime({
     accountStorage,
@@ -882,12 +981,12 @@ async function createDefaultPeerConnectionService(
     passportSharing: await getDefaultPassportSharingStore(),
     getLocalAiTools: () => [createShareableCodexStatus(getDefaultCodexUsageService().getCurrentState())],
     getLocalCallableAgents: options.getLocalCallableAgents,
-    taskTransportStore: new FileTaskTransportStore(join(profile.root, "tasks.json")),
+    taskTransportStore: new FileTaskTransportStore(join(profile.storeDir, "tasks.json")),
     peerProtocolCapabilities: new FilePeerProtocolCapabilityStore(
-      join(profile.root, "peer-protocol-capabilities.json")
+      join(profile.storeDir, "peer-protocol-capabilities.json")
     ),
     taskAttachmentStore: options.taskAttachmentStore
-      ?? new FileTaskAttachmentStore(join(profile.root, "task-attachments")),
+      ?? new FileTaskAttachmentStore(join(profile.storeDir, "task-attachments")),
     taskExecutor: options.taskExecutor
   });
 }

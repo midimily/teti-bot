@@ -9,6 +9,7 @@ import {
   TetiApplicationProtocolError,
   validateApplicationEnvelope
 } from "./validator.ts";
+import { isCanonicalTetiPublicId } from "../identity/public-id.ts";
 
 export interface CreateApplicationEnvelopeInput<TPayload> {
   type: TetiApplicationMessageType;
@@ -52,4 +53,34 @@ export function parseApplicationEnvelope(raw: string): TetiApplicationEnvelope {
 
   validateApplicationEnvelope(value);
   return value;
+}
+
+/**
+ * Reads only the bounded outer identity/version header of an incompatible
+ * Application Envelope. The payload is intentionally neither inspected nor
+ * validated, so 0.1 messages can be classified as upgrade-required without
+ * entering any 0.2 message handler.
+ */
+export function inspectApplicationEnvelopeHeader(raw: string): {
+  version: number;
+  fromTetiId: string;
+  messageId?: string;
+} | null {
+  if (new TextEncoder().encode(raw).byteLength > MAX_TETI_APPLICATION_ENVELOPE_BYTES) return null;
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const header = value as Record<string, unknown>;
+  if (!Number.isSafeInteger(header.version) || !isCanonicalTetiPublicId(header.fromTetiId)) return null;
+  return {
+    version: Number(header.version),
+    fromTetiId: header.fromTetiId,
+    ...(typeof header.messageId === "string" && header.messageId.trim()
+      ? { messageId: header.messageId }
+      : {})
+  };
 }
