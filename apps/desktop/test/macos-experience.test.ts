@@ -121,7 +121,9 @@ test("desktop shell exposes AI Passport and explicit Passport sharing consent", 
   assert.match(app, /target\.closest\("\.teti-header-panel"\)/);
   assert.match(app, /target\.closest\("\.teti-header-icon\[aria-expanded\]"\)/);
   assert.match(app, /options\.tauri\.onDockActivate/);
-  assert.match(app, /controls\.append\(taskButton, statusButton, sharingButton, statusPanel, sharingPanel\)/);
+  assert.match(app, /createHeaderPanelAnchor\(statusButton, statusPanel\)/);
+  assert.match(app, /createHeaderPanelAnchor\(sharingButton, sharingPanel\)/);
+  assert.match(styles, /\.teti-header-panel\s*\{[\s\S]*top:\s*calc\(100% \+ 8px\);[\s\S]*right:\s*50%;/);
   assert.match(app, /connections\.open\("task-back-to-island"\)/);
   assert.doesNotMatch(passportView, /toggle\.disabled/);
   assert.doesNotMatch(app, /iconButton\(X, "收起"/);

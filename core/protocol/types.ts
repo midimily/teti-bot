@@ -51,9 +51,9 @@ export interface TetiPresencePayload {
   status: string;
   timestamp: string;
   collaborationProtocolEpoch: 2;
-  taskProtocolVersions: [4];
+  taskProtocolVersions: [5];
   /** Explicit Passport capability; independent from the latest shared snapshot. */
-  passportSchemaVersions: [3];
+  passportSchemaVersions: [4];
 }
 
 export type TetiKnownApplicationEnvelope =

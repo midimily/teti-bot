@@ -5,6 +5,7 @@ import type {
   AiResource,
   CallablePassportAgent,
   CapabilityBinding,
+  ComputeOffer,
   PassportSharingPolicy,
   TetiCapability,
   TetiCapabilityPassport
@@ -27,6 +28,7 @@ export interface RemotePassportSnapshot {
   agents: Array<AiAgent | CallablePassportAgent>;
   capabilities: TetiCapability[];
   bindings: CapabilityBinding[];
+  computeOffers: ComputeOffer[];
   generatedAt?: string;
   expiresAt?: string;
   receivedAt?: string;

@@ -19,6 +19,8 @@ import type {
   CollaborationTaskTransportRecord,
   SendCollaborationTaskInput
 } from "../../../core/task/transport.ts";
+import type { ExecutionHandle } from "../../../core/callability/execution.ts";
+import { emptyChildMemorySnapshot } from "../../../core/memory/types.ts";
 
 test("sidecar returns health response", async () => {
   const response = await handleLifecycleRequest(request("lifecycle.health"), fakeDependencies());
@@ -233,6 +235,19 @@ test("sidecar keeps Task send/list bounded and rejects remote execution fields",
     text: "Review this.",
     command: "unsafe"
   }), deps);
+  const unsafeWorkspace = await handleLifecycleRequest(request("task.send", {
+    connectionRequestId: "connection-001",
+    taskId: "task-003",
+    capabilityId: "code-analysis",
+    text: "Review this.",
+    workspace: {
+      kind: "reference",
+      workspaceId: "workspace-001",
+      workspaceRevision: 1,
+      access: ["read"],
+      path: "/Users/receiver/private"
+    }
+  }), deps);
 
   assert.equal(sent.ok, true);
   assert.equal(sent.ok && "request" in sent.result && sent.result.request.taskId, "task-001");
@@ -240,7 +255,106 @@ test("sidecar keeps Task send/list bounded and rejects remote execution fields",
   assert.equal(listed.ok && "records" in listed.result && listed.result.records.length, 1);
   assert.equal(unsafe.ok, false);
   assert.equal(!unsafe.ok && unsafe.error.code, "TASK_TRANSPORT_FAILED");
+  assert.equal(unsafeWorkspace.ok, false);
+  assert.equal(!unsafeWorkspace.ok && unsafeWorkspace.error.code, "TASK_TRANSPORT_FAILED");
   assert.equal(LIFECYCLE_PROTOCOL_VERSION, 1, "Task transport does not create a second lifecycle protocol");
+});
+
+test("sidecar exposes durable execution query and explicit resume only through local lifecycle methods", async () => {
+  const deps = fakeDependencies({ account: createAccount("Milo") });
+  const service = await deps.getPeerConnectionService();
+  let resumedTaskId = "";
+  const handle: ExecutionHandle = {
+    schemaVersion: 1,
+    taskId: "task-durable-001",
+    workspaceId: "workspace:task-durable-001",
+    childAgentId: "test-child",
+    connectorId: "test.connector",
+    executionEpoch: 2,
+    providerExecutionId: "pid:1234",
+    leaseExpiresAt: "2026-07-26T00:01:00.000Z",
+    progress: {
+      state: "interrupted",
+      completedUnits: null,
+      totalUnits: null,
+      message: "执行已中断，可从显式检查点重新开始",
+      updatedAt: "2026-07-26T00:00:00.000Z"
+    },
+    checkpointRef: "/receiver-private/checkpoints/task-durable-001/state.json",
+    resumeCapability: "checkpoint_restart"
+  };
+  const resumedRecord = taskRecord("task-durable-001", "working");
+  deps.getPeerConnectionService = async () => ({
+    ...service,
+    async getTaskExecution(taskId: string) {
+      return taskId === handle.taskId ? clone(handle) : null;
+    },
+    async resumeTask(taskId: string) {
+      resumedTaskId = taskId;
+      return clone(resumedRecord);
+    }
+  });
+
+  const queried = await handleLifecycleRequest(request("task.execution.get", {
+    taskId: handle.taskId
+  }), deps);
+  const resumed = await handleLifecycleRequest(request("task.execution.resume", {
+    taskId: handle.taskId
+  }), deps);
+  const invalid = await handleLifecycleRequest(request("task.execution.get", {
+    taskId: "../../private"
+  }), deps);
+
+  assert.equal(queried.ok && "executionEpoch" in queried.result && queried.result.executionEpoch, 2);
+  assert.equal(resumed.ok && "request" in resumed.result && resumed.result.state, "working");
+  assert.equal(resumedTaskId, handle.taskId);
+  assert.equal(invalid.ok, false);
+});
+
+test("sidecar exposes Child Memory only through validated local explicit-authority methods", async () => {
+  const deps = fakeDependencies({ account: createAccount("Milo") });
+  let authorization: unknown;
+  let saveConfirmation: unknown;
+  deps.getChildMemory = async () => emptyChildMemorySnapshot(new Date("2026-07-29T00:00:00.000Z"));
+  deps.setChildMemoryAuthorization = async (input) => {
+    authorization = clone(input);
+    return emptyChildMemorySnapshot(new Date("2026-07-29T00:00:00.000Z"));
+  };
+  deps.saveTaskMemory = async (_taskId, _scope, confirmed) => {
+    saveConfirmation = confirmed;
+    throw new Error("test stop after validation");
+  };
+
+  const listed = await handleLifecycleRequest(request("memory.get"), deps);
+  const authorized = await handleLifecycleRequest(request("memory.authorization.set", {
+    scope: "workspace",
+    workspaceId: "workspace-safe",
+    childAgentId: "codex",
+    enabled: true
+  }), deps);
+  const remoteLikeSave = await handleLifecycleRequest(request("memory.task.save", {
+    taskId: "task-safe",
+    scope: "child_agent",
+    confirmed: false
+  }), deps);
+  const invalidWorkspace = await handleLifecycleRequest(request("memory.authorization.set", {
+    scope: "workspace",
+    workspaceId: "/Users/private",
+    childAgentId: "codex",
+    enabled: true
+  }), deps);
+
+  assert.equal(listed.ok, true);
+  assert.equal(authorized.ok, true);
+  assert.deepEqual(authorization, {
+    scope: "workspace",
+    workspaceId: "workspace-safe",
+    childAgentId: "codex",
+    enabled: true
+  });
+  assert.equal(remoteLikeSave.ok, false);
+  assert.equal(saveConfirmation, undefined, "confirmation must be rejected before the Memory service is called");
+  assert.equal(invalidWorkspace.ok, false);
 });
 
 function request(method: LifecycleRequest["method"], params: Record<string, unknown> = {}): LifecycleRequest {
@@ -402,6 +516,41 @@ function createPassportSnapshot(): RuntimePassportSnapshot {
     },
     connections: [],
     sharing: resourceSharingPolicy(false)
+  };
+}
+
+function taskRecord(
+  taskId: string,
+  state: CollaborationTaskTransportRecord["state"]
+): CollaborationTaskTransportRecord {
+  const now = "2026-07-26T00:00:00.000Z";
+  return {
+    schemaVersion: 1,
+    direction: "incoming",
+    peerTetiId: "teti_peer00001",
+    protocolVersion: 5,
+    envelopeMessageId: "task-envelope-durable-001",
+    request: {
+      schemaVersion: 5,
+      taskId,
+      requesterTetiId: "teti_peer00001",
+      targetTetiId: "teti_milo00000",
+      offerId: "capability:code-analysis",
+      capabilityId: "code-analysis",
+      input: { kind: "text", text: "Continue from the explicit checkpoint." },
+      workspace: {
+        kind: "temporary",
+        access: ["read", "write", "create_artifact"]
+      },
+      createdAt: now,
+      expiresAt: "2026-07-26T01:00:00.000Z"
+    },
+    state,
+    approval: "approved",
+    delivery: "delivered",
+    attachmentsReady: true,
+    createdAt: now,
+    updatedAt: now
   };
 }
 

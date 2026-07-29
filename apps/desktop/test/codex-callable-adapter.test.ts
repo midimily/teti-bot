@@ -35,7 +35,9 @@ test("Codex Connector uses a fixed non-interactive, ephemeral, read-only JSONL e
     taskId: "task-001",
     capabilityId: "code-analysis",
     workspacePath: "/private/tmp/isolated",
-    images: []
+    images: [],
+    executionEpoch: 1,
+    checkpointRef: null
   });
 
   assert.deepEqual(launch.args, [...CODEX_CONTROLLED_EXEC_ARGS, "--", "-"]);
@@ -61,7 +63,9 @@ test("Codex Connector uses a fixed non-interactive, ephemeral, read-only JSONL e
       attachmentId: "image-1",
       mimeType: "image/png",
       path: "/private/tmp/isolated/input-image-1.png"
-    }]
+    }],
+    executionEpoch: 1,
+    checkpointRef: null
   });
   assert.deepEqual(imageLaunch.args.slice(-4), [
     "--image",
@@ -86,7 +90,9 @@ test("Codex image Connector fixes the app-server runner and accepts only image m
       attachmentId: "image-1",
       mimeType: "image/png",
       path: "/private/tmp/teti-image-task/input-image-1.png"
-    }]
+    }],
+    executionEpoch: 1,
+    checkpointRef: null
   });
 
   assert.deepEqual(launch.args, [
@@ -183,7 +189,9 @@ test("Codex qualification registers a ready Connector without reading auth mater
       taskId: "task",
       capabilityId: "code-analysis",
       workspacePath: "/tmp/task",
-      images: []
+      images: [],
+      executionEpoch: 1,
+      checkpointRef: null
     }).environment,
     { NO_COLOR: "1", TERM: "dumb", CODEX_HOME: "/custom/codex-home" }
   );

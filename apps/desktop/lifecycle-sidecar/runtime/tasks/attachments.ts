@@ -45,6 +45,7 @@ export interface TaskAttachmentStore {
     sourcePath: string;
   }): Promise<string>;
   ingestGeneratedImage(taskId: string, sourcePath: string): Promise<StagedTaskImage>;
+  removeGeneratedImage(taskId: string, part: TaskImagePart): Promise<void>;
   resolveImage(input: {
     taskId: string;
     purpose: StoredTaskAttachmentPurpose;
@@ -114,6 +115,12 @@ export class FileTaskAttachmentStore implements TaskAttachmentStore {
     await atomicPrivateWrite(destination, sanitized.bytes);
     await verifyStoredImage(destination, part);
     return { part, path: destination, safeFileName: safeFileName(part) };
+  }
+
+  async removeGeneratedImage(taskId: string, part: TaskImagePart): Promise<void> {
+    requireSafeTaskId(taskId);
+    validateTaskImagePart(part);
+    await rm(this.taskPath(taskId, "artifact", part), { force: true });
   }
 
   async resolveImage(input: {

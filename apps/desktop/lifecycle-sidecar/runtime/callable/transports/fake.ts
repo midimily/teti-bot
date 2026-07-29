@@ -1,7 +1,7 @@
 import { PassThrough } from "node:stream";
 import type {
   ExecutionExit,
-  ExecutionHandle,
+  ExecutionTransportHandle,
   ExecutionSpec,
   ExecutionTransport
 } from "../../../../../../core/callability/agent-core.ts";
@@ -26,17 +26,18 @@ export class FakeTransport implements ExecutionTransport {
     this.scenarios = scenarios;
   }
 
-  start(input: { spec: ExecutionSpec; workspacePath: string }): ExecutionHandle {
+  start(input: { spec: ExecutionSpec; workspacePath: string | null }): ExecutionTransportHandle {
     if (input.spec.kind !== this.kind) {
       throw new Error("FakeTransport received a non-fake execution specification.");
     }
     const scenario = this.scenarios.get(input.spec.scenarioId);
     if (!scenario) throw new Error("FakeTransport scenario is not registered.");
+    if (!input.workspacePath) throw new Error("FakeTransport requires a Host Workspace Snapshot.");
     return new FakeExecutionHandle(scenario, input.workspacePath);
   }
 }
 
-class FakeExecutionHandle implements ExecutionHandle {
+class FakeExecutionHandle implements ExecutionTransportHandle {
   readonly pid = undefined;
   readonly stdout = new PassThrough();
   readonly stderr = new PassThrough();

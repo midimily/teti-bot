@@ -1,7 +1,9 @@
+import type { AgentComputeOffer } from "../callability/agent-core.ts";
 import type { CallableAgent } from "../callability/types.ts";
 import type {
   CallablePassportAgent,
   CapabilityBinding,
+  ComputeOffer,
   TetiCapability
 } from "./types.ts";
 
@@ -9,11 +11,14 @@ export interface CallablePassportProjection {
   agents: CallablePassportAgent[];
   capabilities: TetiCapability[];
   bindings: CapabilityBinding[];
+  computeOffers: ComputeOffer[];
 }
 
 const AGENT_CATALOG: Readonly<Record<string, { name: string; provider: string }>> = Object.freeze({
   codex: { name: "Codex", provider: "OpenAI" },
-  codebuddy: { name: "CodeBuddy Code CN", provider: "Tencent" }
+  codebuddy: { name: "CodeBuddy Code CN", provider: "Tencent" },
+  "osaurus-runtime": { name: "Osaurus Runtime (Bonsai)", provider: "Osaurus" },
+  "osaurus-native-teti": { name: "Osaurus Native Agent (Teti)", provider: "Osaurus" }
 });
 
 const CAPABILITY_CATALOG: Readonly<Record<string, {
@@ -30,6 +35,11 @@ const CAPABILITY_CATALOG: Readonly<Record<string, {
     name: "Image editing",
     category: "image",
     description: "Edit or generate images through a locally qualified AI Agent and return an image Artifact."
+  },
+  "general-text-assistance": {
+    name: "General text assistance",
+    category: "language",
+    description: "Use receiver-local compute for tool-free general text assistance."
   }
 });
 
@@ -39,7 +49,8 @@ const CAPABILITY_CATALOG: Readonly<Record<string, {
  * Passport claim.
  */
 export function projectCallablePassport(
-  callableAgents: readonly CallableAgent[]
+  callableAgents: readonly CallableAgent[],
+  localComputeOffers: readonly AgentComputeOffer[] = []
 ): CallablePassportProjection {
   const agents = [...coalesceAgents(callableAgents).values()]
     .sort((left, right) => left.id.localeCompare(right.id));
@@ -66,7 +77,23 @@ export function projectCallablePassport(
     agentIds: [...(capabilityAgentIds.get(capability.id) ?? [])].sort(),
     resourceIds: []
   }));
-  return { agents, capabilities, bindings };
+  const computeOffers = projectComputeOffers(agents, localComputeOffers);
+  return { agents, capabilities, bindings, computeOffers };
+}
+
+function projectComputeOffers(
+  agents: readonly CallablePassportAgent[],
+  localComputeOffers: readonly AgentComputeOffer[]
+): ComputeOffer[] {
+  return localComputeOffers.flatMap((offer) => {
+    const agent = agents
+      .filter((candidate) =>
+        candidate.capabilityIds.includes(offer.capability)
+        && offer.inputModes.every((mode) => candidate.inputModes.includes(mode))
+        && offer.outputModes.every((mode) => candidate.outputModes.includes(mode)))
+      .sort((left, right) => Date.parse(right.observedAt) - Date.parse(left.observedAt))[0];
+    return agent ? [{ ...structuredClone(offer), observedAt: agent.observedAt }] : [];
+  }).sort((left, right) => left.offerId.localeCompare(right.offerId));
 }
 
 function coalesceAgents(

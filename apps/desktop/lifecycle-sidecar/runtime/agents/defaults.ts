@@ -53,6 +53,34 @@ export const BUILTIN_AGENT_DETECTORS: readonly AgentDetectorDefinition[] = Objec
   } satisfies AgentDetectorDefinition),
   Object.freeze({
     schemaVersion: 1,
+    id: "osaurus",
+    provider: "osaurus",
+    displayName: "Osaurus",
+    enabled: true,
+    surfaces: ["desktop", "local_service"],
+    installDetectors: [
+      { type: "executable", names: ["osaurus"] },
+      {
+        type: "app_bundle",
+        paths: ["/Applications/Osaurus.app", "~/Applications/Osaurus.app"],
+        bundleIdentifiers: ["com.dinoki.osaurus"],
+        readVersion: true
+      }
+    ],
+    processDetectors: [{ type: "exact_name", names: ["osaurus"] }],
+    versionProbe: {
+      type: "fixed_args",
+      args: ["--version"],
+      timeoutMs: 1_500,
+      maxOutputBytes: 32 * 1024
+    },
+    capabilities: LEVEL_1_2_CAPABILITIES,
+    privacy: SAFE_PRIVACY,
+    source: "builtin",
+    revision: 1
+  } satisfies AgentDetectorDefinition),
+  Object.freeze({
+    schemaVersion: 1,
     id: "claude-code",
     provider: "anthropic",
     displayName: "Claude Code",

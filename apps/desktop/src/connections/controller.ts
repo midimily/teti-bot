@@ -22,6 +22,7 @@ const AUTO_COLLAPSE_MS = 20_000;
 export const CONNECT_PANEL_OPEN_MS = 220;
 export const CONNECT_PANEL_CLOSE_MS = 190;
 export const CONNECT_PANEL_SUCCESS_MS = 1_500;
+export const CONNECTION_DETAILS_TRANSITION_MS = 180;
 
 export interface PeerConnectionClient {
   resolve(query: string): Promise<PublicTetiIdentity>;
@@ -39,6 +40,7 @@ export interface PeerConnectionSnapshot {
   input: string;
   busy: boolean;
   connectPanel: ConnectPanelSnapshot;
+  expandedRequestId?: string;
   highlightedRequestId?: string;
   resolved?: PublicTetiIdentity;
   connections: PassportConnectionSnapshot[];
@@ -60,6 +62,7 @@ export class PeerConnectionController {
     connections: []
   };
   private collapseToken = 0;
+  private detailModeToken = 0;
   private interactionActive = false;
   private disposed = false;
   private panelTimer: unknown;
@@ -95,6 +98,13 @@ export class PeerConnectionController {
     if (this.disposed) return;
     const hadPending = this.hasPendingApproval();
     this.snapshotValue.connections = connections.map((connection) => structuredClone(connection));
+    if (this.snapshotValue.expandedRequestId
+      && !this.snapshotValue.connections.some((connection) =>
+        connection.requestId === this.snapshotValue.expandedRequestId
+        && connection.connectionState === "Confirmed"
+      )) {
+      this.closeDetails({ notify: false });
+    }
     this.snapshotValue.lastSnapshotAt = new Date().toISOString();
     if (!hadPending && this.hasPendingApproval() && !this.snapshotValue.open) {
       this.snapshotValue.open = true;
@@ -109,7 +119,10 @@ export class PeerConnectionController {
     if (this.snapshotValue.open) {
       this.touch();
       this.onChange();
-      void this.notchWindow.setMode("onboarding", reason).catch(() => undefined);
+      void this.notchWindow.setMode(
+        this.snapshotValue.expandedRequestId ? "connection_detail" : "onboarding",
+        reason
+      ).catch(() => undefined);
       return;
     }
     this.snapshotValue.open = true;
@@ -122,7 +135,9 @@ export class PeerConnectionController {
   close(reason = "close-peer-connections"): void {
     if (this.snapshotValue.connectPanel.state === "connecting") return;
     this.collapseToken += 1;
+    this.detailModeToken += 1;
     this.snapshotValue.open = false;
+    this.snapshotValue.expandedRequestId = undefined;
     this.resetConnectPanel();
     this.snapshotValue.highlightedRequestId = undefined;
     this.onChange();
@@ -167,6 +182,10 @@ export class PeerConnectionController {
   }
 
   handleEscape(): boolean {
+    if (this.snapshotValue.expandedRequestId) {
+      this.closeDetails();
+      return true;
+    }
     const state = this.snapshotValue.connectPanel.state;
     if (state === "idle") return false;
     if (state === "editing" || state === "error" || state === "success") {
@@ -179,6 +198,36 @@ export class PeerConnectionController {
     if (["editing", "error", "success"].includes(this.snapshotValue.connectPanel.state)) {
       this.beginPanelClose({ type: "CLOSE_REQUESTED" });
     }
+  }
+
+  openDetails(requestId: string, options: { notify?: boolean } = {}): void {
+    if (this.disposed) return;
+    const connection = this.snapshotValue.connections.find((item) => item.requestId === requestId);
+    if (!connection || connection.connectionState !== "Confirmed") return;
+    this.snapshotValue.expandedRequestId = requestId;
+    this.detailModeToken += 1;
+    this.touch();
+    if (options.notify !== false) this.onChange();
+    void this.notchWindow.setMode("connection_detail", "peer-details-open").catch(() => undefined);
+  }
+
+  async resizeDetails(height: number): Promise<void> {
+    if (this.disposed || !this.snapshotValue.expandedRequestId) return;
+    await this.notchWindow
+      .setConnectionDetailHeight(height, "peer-details-measured")
+      .catch(() => undefined);
+  }
+
+  closeDetails(options: { notify?: boolean } = {}): void {
+    if (!this.snapshotValue.expandedRequestId) return;
+    this.snapshotValue.expandedRequestId = undefined;
+    const token = ++this.detailModeToken;
+    this.touch();
+    if (options.notify !== false) this.onChange();
+    this.scheduleTask(() => {
+      if (token !== this.detailModeToken || !this.snapshotValue.open || this.snapshotValue.expandedRequestId) return;
+      void this.notchWindow.setMode("onboarding", "peer-details-close").catch(() => undefined);
+    }, CONNECTION_DETAILS_TRANSITION_MS);
   }
 
   beginInteraction(): void {
@@ -446,7 +495,7 @@ export class MockPeerConnectionClient implements PeerConnectionClient {
       updatedAt: now,
       lastSeen: null,
       compatibility: "unknown",
-      passport: { state: "unknown", resources: [], agents: [], capabilities: [], bindings: [] }
+      passport: { state: "unknown", resources: [], agents: [], capabilities: [], bindings: [], computeOffers: [] }
     }];
     this.publish();
     return { requestOutcome: {

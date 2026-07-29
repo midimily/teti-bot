@@ -1,10 +1,12 @@
 import type { RuntimePassportSnapshot } from "../../../../core/passport/snapshot.ts";
 import type { PassportSharingPolicy } from "../../../../core/passport/types.ts";
 import type { LifecycleBridgeClient } from "../provisioning/bridge-lifecycle.ts";
+import type { OsaurusNativeChildSettingsDto } from "../lifecycle-bridge/protocol.ts";
 import {
   emptyAgentManagementSnapshot,
   type AgentManagementSnapshot
 } from "../../../../core/observation/management.ts";
+import { toPassportViewModel } from "./view-model.ts";
 
 const PASSPORT_READ_INTERVAL_MS = 3_000;
 
@@ -14,6 +16,8 @@ export interface PassportClient {
   getAgentManagement(): Promise<AgentManagementSnapshot>;
   rescanAgents(): Promise<AgentManagementSnapshot>;
   setAgentPathOverride(agentId: string, path: string | null): Promise<AgentManagementSnapshot>;
+  getOsaurusNativeChildSettings?(): Promise<OsaurusNativeChildSettingsDto>;
+  setOsaurusNativeChildAgentId?(agentId: string | null): Promise<OsaurusNativeChildSettingsDto>;
 }
 
 export interface PassportControllerSnapshot {
@@ -21,10 +25,13 @@ export interface PassportControllerSnapshot {
   agentManagement: AgentManagementSnapshot;
   sharingBusy: boolean;
   agentBusy: boolean;
+  osaurusNative?: OsaurusNativeChildSettingsDto;
+  osaurusNativeBusy?: boolean;
   agentBusyId?: string;
   openPanel: "passport" | "sharing" | null;
   sharingError?: string;
   agentError?: string;
+  osaurusNativeError?: string;
 }
 
 export class PassportController {
@@ -39,6 +46,7 @@ export class PassportController {
   private persistedSharing: PassportSharingPolicy;
   private sharingWrite?: Promise<void>;
   private snapshotValue: PassportControllerSnapshot;
+  private lastPresentationKey = "";
 
   constructor(options: {
     client: PassportClient;
@@ -58,8 +66,11 @@ export class PassportController {
       agentManagement: emptyAgentManagementSnapshot(),
       sharingBusy: false,
       agentBusy: false,
+      osaurusNative: { schemaVersion: 1, agentId: null, readiness: "unconfigured" },
+      osaurusNativeBusy: false,
       openPanel: null
     };
+    this.lastPresentationKey = this.presentationKey();
   }
 
   get snapshot(): PassportControllerSnapshot {
@@ -96,13 +107,13 @@ export class PassportController {
 
   togglePanel(panel: "passport" | "sharing"): void {
     this.snapshotValue.openPanel = this.snapshotValue.openPanel === panel ? null : panel;
-    this.onChange();
+    this.notifyChange();
   }
 
   closePanel(notify = true): void {
     if (this.snapshotValue.openPanel === null) return;
     this.snapshotValue.openPanel = null;
-    if (notify) this.onChange();
+    if (notify) this.notifyChange();
   }
 
   setResourceSharing(enabled: boolean): Promise<void> {
@@ -125,7 +136,7 @@ export class PassportController {
     this.sharingRevision += 1;
     this.snapshotValue.sharingBusy = true;
     this.snapshotValue.sharingError = undefined;
-    this.onChange();
+    this.notifyChange();
     this.sharingWrite ??= this.flushSharingWrites();
     return this.sharingWrite;
   }
@@ -135,14 +146,14 @@ export class PassportController {
     this.snapshotValue.agentBusy = true;
     this.snapshotValue.agentBusyId = undefined;
     this.snapshotValue.agentError = undefined;
-    this.onChange();
+    this.notifyChange();
     try {
       this.snapshotValue.agentManagement = await this.client.rescanAgents();
     } catch {
       this.snapshotValue.agentError = "Agent 重新扫描暂时失败。";
     } finally {
       this.snapshotValue.agentBusy = false;
-      this.onChange();
+      this.notifyChange();
     }
   }
 
@@ -151,7 +162,7 @@ export class PassportController {
     this.snapshotValue.agentBusy = true;
     this.snapshotValue.agentBusyId = agentId;
     this.snapshotValue.agentError = undefined;
-    this.onChange();
+    this.notifyChange();
     try {
       this.snapshotValue.agentManagement = await this.client.setAgentPathOverride(
         agentId,
@@ -162,27 +173,60 @@ export class PassportController {
     } finally {
       this.snapshotValue.agentBusy = false;
       this.snapshotValue.agentBusyId = undefined;
-      this.onChange();
+      this.notifyChange();
+    }
+  }
+
+  async setOsaurusNativeChildAgentId(agentId: string | null): Promise<void> {
+    if (this.snapshotValue.osaurusNativeBusy) return;
+    this.snapshotValue.osaurusNativeBusy = true;
+    this.snapshotValue.osaurusNativeError = undefined;
+    this.notifyChange();
+    try {
+      if (!this.client.setOsaurusNativeChildAgentId) throw new Error("unavailable");
+      this.snapshotValue.osaurusNative = await this.client.setOsaurusNativeChildAgentId(
+        agentId?.trim() || null
+      );
+      await this.refreshAfterMutation();
+    } catch {
+      this.snapshotValue.osaurusNativeError = "固定 Agent ID 无效，或本机配置暂时无法保存。";
+    } finally {
+      this.snapshotValue.osaurusNativeBusy = false;
+      this.notifyChange();
     }
   }
 
   private async readSnapshot(): Promise<void> {
     try {
-      const [passport, agentManagement] = await Promise.all([
+      const [passport, agentManagement, osaurusNative] = await Promise.all([
         this.client.getSnapshot(),
-        this.client.getAgentManagement()
+        this.client.getAgentManagement(),
+        this.client.getOsaurusNativeChildSettings?.()
+          ?? Promise.resolve(this.snapshotValue.osaurusNative ?? {
+            schemaVersion: 1 as const,
+            agentId: null,
+            readiness: "unconfigured" as const
+          })
       ]);
       if (!this.active) return;
       const desiredSharing = this.snapshotValue.passport.sharing;
       this.snapshotValue.passport = passport;
       this.snapshotValue.agentManagement = agentManagement;
+      if (!this.snapshotValue.osaurusNativeBusy) {
+        this.snapshotValue.osaurusNative = osaurusNative;
+        this.snapshotValue.osaurusNativeError = undefined;
+      }
       if (this.snapshotValue.sharingBusy) {
         this.snapshotValue.passport.sharing = desiredSharing;
       } else {
         this.persistedSharing = { ...passport.sharing };
         this.snapshotValue.sharingError = undefined;
       }
-      this.onChange();
+      const presentationKey = this.presentationKey();
+      if (presentationKey !== this.lastPresentationKey) {
+        this.lastPresentationKey = presentationKey;
+        this.onChange();
+      }
     } catch {
       // A later local-only read retries; transport details are never shown.
     }
@@ -212,7 +256,7 @@ export class PassportController {
     } finally {
       this.snapshotValue.sharingBusy = false;
       this.sharingWrite = undefined;
-      this.onChange();
+      this.notifyChange();
     }
   }
 
@@ -222,6 +266,15 @@ export class PassportController {
       this.timer = undefined;
       void this.refreshNow();
     }, PASSPORT_READ_INTERVAL_MS);
+  }
+
+  private notifyChange(): void {
+    this.lastPresentationKey = this.presentationKey();
+    this.onChange();
+  }
+
+  private presentationKey(): string {
+    return JSON.stringify(toPassportViewModel(this.snapshotValue, new Date()));
   }
 }
 
@@ -251,6 +304,14 @@ export class BridgePassportClient implements PassportClient {
   setAgentPathOverride(agentId: string, path: string | null): Promise<AgentManagementSnapshot> {
     return this.bridge.request("agent.observation.override.set", { agentId, path }) as Promise<AgentManagementSnapshot>;
   }
+
+  getOsaurusNativeChildSettings(): Promise<OsaurusNativeChildSettingsDto> {
+    return this.bridge.request("osaurus.native.get") as Promise<OsaurusNativeChildSettingsDto>;
+  }
+
+  setOsaurusNativeChildAgentId(agentId: string | null): Promise<OsaurusNativeChildSettingsDto> {
+    return this.bridge.request("osaurus.native.set", { agentId }) as Promise<OsaurusNativeChildSettingsDto>;
+  }
 }
 
 export class MockPassportClient implements PassportClient {
@@ -261,6 +322,11 @@ export class MockPassportClient implements PassportClient {
     state: "ready",
     generatedAt: new Date().toISOString(),
     completedAt: new Date().toISOString()
+  };
+  private osaurusNative: OsaurusNativeChildSettingsDto = {
+    schemaVersion: 1,
+    agentId: null,
+    readiness: "unconfigured"
   };
 
   async getSnapshot(): Promise<RuntimePassportSnapshot> {
@@ -291,6 +357,19 @@ export class MockPassportClient implements PassportClient {
     return this.rescanAgents();
   }
 
+  async getOsaurusNativeChildSettings(): Promise<OsaurusNativeChildSettingsDto> {
+    return structuredClone(this.osaurusNative);
+  }
+
+  async setOsaurusNativeChildAgentId(agentId: string | null): Promise<OsaurusNativeChildSettingsDto> {
+    this.osaurusNative = {
+      schemaVersion: 1,
+      agentId,
+      readiness: agentId ? "checking" : "unconfigured"
+    };
+    return structuredClone(this.osaurusNative);
+  }
+
   setConnections(connections: RuntimePassportSnapshot["connections"]): void {
     this.passport.connections = structuredClone(connections);
     this.passport.revision += 1;
@@ -307,7 +386,7 @@ export function emptyPassportSnapshot(now = new Date(0)): RuntimePassportSnapsho
     identity: null,
     registry: { state: "unknown" },
     localPassport: {
-      schemaVersion: 2,
+      schemaVersion: 3,
       generatedAt,
       resources: [{
         id: "openai.codex",
@@ -321,7 +400,8 @@ export function emptyPassportSnapshot(now = new Date(0)): RuntimePassportSnapsho
       }],
       agents: [],
       capabilities: [],
-      bindings: []
+      bindings: [],
+      computeOffers: []
     },
     connections: [],
     sharing: {

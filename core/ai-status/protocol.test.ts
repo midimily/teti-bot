@@ -76,6 +76,47 @@ function callablePassportPayload(): Record<string, unknown> {
   };
 }
 
+function computePassportPayload(): Record<string, unknown> {
+  return {
+    ...callablePassportPayload(),
+    schemaVersion: 4,
+    agents: [{
+      id: "osaurus-runtime",
+      name: "Osaurus Runtime (Bonsai)",
+      provider: "Osaurus",
+      capabilityIds: ["general-text-assistance"],
+      inputModes: ["text"],
+      outputModes: ["text"],
+      availability: "available",
+      observedAt: "2026-07-18T00:59:00.000Z"
+    }],
+    capabilities: [{
+      id: "general-text-assistance",
+      name: "General text assistance",
+      category: "language",
+      description: "Use receiver-local compute for tool-free general text assistance.",
+      availability: "available",
+      observedAt: "2026-07-18T00:59:00.000Z"
+    }],
+    bindings: [{
+      capabilityId: "general-text-assistance",
+      agentIds: ["osaurus-runtime"],
+      resourceIds: []
+    }],
+    computeOffers: [{
+      offerId: "local.compute.general-text-assistance.v1",
+      capability: "general-text-assistance",
+      resourceClass: "local_model",
+      executionLocation: "receiver_local",
+      inputModes: ["text"],
+      outputModes: ["text"],
+      concurrency: 1,
+      approval: "allow_once",
+      observedAt: "2026-07-18T00:59:00.000Z"
+    }]
+  };
+}
+
 test("accepts legacy resource payloads and current privacy-minimized Passport payloads", () => {
   assert.doesNotThrow(() => validateAiStatusSyncPayload(enabledPayload()));
   assert.doesNotThrow(() => validateAiStatusSyncPayload(passportPayload()));
@@ -96,6 +137,7 @@ test("accepts legacy resource payloads and current privacy-minimized Passport pa
 
 test("accepts Callable Passport and rejects observation or execution fields", () => {
   assert.doesNotThrow(() => validateAiStatusSyncPayload(callablePassportPayload()));
+  assert.doesNotThrow(() => validateAiStatusSyncPayload(computePassportPayload()));
 
   const withProcess = callablePassportPayload();
   (withProcess.agents as Array<Record<string, unknown>>)[0].runtimeStatus = "running";
@@ -108,6 +150,28 @@ test("accepts Callable Passport and rejects observation or execution fields", ()
   const brokenBinding = callablePassportPayload();
   (brokenBinding.bindings as Array<Record<string, unknown>>)[0].agentIds = ["claude-code"];
   assert.throws(() => validateAiStatusSyncPayload(brokenBinding), /references are invalid/);
+});
+
+test("Compute Offers are exact, receiver-local, allow-once, and privacy minimized", () => {
+  assert.doesNotThrow(() => validateAiStatusSyncPayload(computePassportPayload()));
+  const native = computePassportPayload();
+  (native.computeOffers as Array<Record<string, unknown>>)[0]!.resourceClass = "native_agent";
+  assert.doesNotThrow(() => validateAiStatusSyncPayload(native));
+  for (const field of ["bonsaiPath", "osaurusPort", "hardware", "credential", "model", "agentConfig"]) {
+    const payload = computePassportPayload();
+    (payload.computeOffers as Array<Record<string, unknown>>)[0]![field] = "private";
+    assert.throws(() => validateAiStatusSyncPayload(payload), /unsupported field/);
+  }
+  for (const [field, value] of [
+    ["concurrency", 2],
+    ["approval", "always"],
+    ["executionLocation", "requester_local"],
+    ["inputModes", ["text", "image"]]
+  ] as const) {
+    const payload = computePassportPayload();
+    (payload.computeOffers as Array<Record<string, unknown>>)[0]![field] = value;
+    assert.throws(() => validateAiStatusSyncPayload(payload), /contract is invalid/);
+  }
 });
 
 test("rejects fields that could smuggle account or credential data", () => {

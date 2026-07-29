@@ -10,12 +10,12 @@ Beta 0.2 establishes collaboration epoch 2:
 
 - Application Envelope: version 2 only;
 - Presence: `collaborationProtocolEpoch: 2`;
-- Task protocol: version 4 only;
-- network Callable Passport: schema 3 only;
+- Task protocol: version 5 only;
+- network Compute Passport: schema 4 only;
 - processed-message Store: version 2.
 
 Application Envelope v1 is rejected before its payload is dispatched. Task
-v1–v3 and Passport v1/v2 are not downgrade targets. Historical parsers may
+v1–v4 and Passport v1–v3 are not downgrade targets. Historical parsers may
 remain for read-only archive characterization, but are outside the 0.2 network
 ingress.
 
@@ -62,8 +62,8 @@ payload is never parsed as a Task, Passport, or other Application Message.
     "status": "online",
     "timestamp": "2026-07-28T00:00:00.000Z",
     "collaborationProtocolEpoch": 2,
-    "taskProtocolVersions": [4],
-    "passportSchemaVersions": [3]
+    "taskProtocolVersions": [5],
+    "passportSchemaVersions": [4]
   }
 }
 ```
@@ -73,44 +73,81 @@ relay receive time rather than the sender's wall clock. Compatibility and
 reachability are independent: a confirmed v1 sender can be recently reachable
 and still require an upgrade.
 
-## Callable Passport
+## Compute Passport
 
-`teti.ai.status.sync` accepts only schema 3 on the Beta 0.2 network. It contains
+`teti.ai.status.sync` accepts only schema 4 on the Beta 0.2.4 network. It contains
 only locally qualified callable Agents, curated Capabilities, Bindings, bounded
-resource summaries, and sharing/expiry metadata.
+resource summaries, privacy-minimized receiver-local Compute Offers, and
+sharing/expiry metadata.
 
 It never includes installation paths, executable paths, command arguments,
 credentials, prompt text, Task input, result content, Adapter identity, login
-tokens, or process details. A Passport is sent only after the Peer advertises
-epoch 2 and schema 3; unknown and incompatible Peers receive no speculative
-payload.
+tokens, or process details. A Compute Offer contains only an abstract offer ID,
+capability, `local_model`, `receiver_local`, text modes, concurrency one,
+`allow_once`, and an observation timestamp. It contains no model name/file,
+Runtime endpoint, port, hardware detail, credential, token, local binding, or
+Agent configuration. A Passport is sent only after the Peer advertises epoch
+2, Task v5, and Passport schema 4; unknown and incompatible Peers receive no
+speculative payload.
 
-## Task v4
+## Task v5
 
 `teti.task.request` accepts only a `CollaborationTaskRequest` with
-`schemaVersion: 4`. It carries an immutable Task ID, requester/target IDs,
+`schemaVersion: 5`. It carries an immutable Task ID, requester/target IDs,
 selected offer and capability, bounded text plus up to four ordered PNG/JPEG
-descriptors, creation time, and expiry. Image bytes travel only through the
-Chatmail file field.
+descriptors, an abstract Workspace request, creation time, and expiry. The
+Workspace request can ask for temporary storage or reference a confirmed
+Workspace ID/revision and access list; it cannot contain a path. Image bytes
+travel only through the Chatmail file field.
 
 The protocol also defines:
 
-- `teti.task.receipt`: durable request ingestion and supported Task `[4]`;
+- `teti.task.receipt`: durable request ingestion and supported Task `[5]`;
 - `teti.task.attachment`: verified input or Artifact bytes;
 - `teti.task.attachment.receipt`: emitted only after durable verified storage;
 - `teti.task.status`: monotonic A2A-aligned Task state revision;
 - `teti.task.cancel`: idempotent cancellation request;
 - `teti.task.artifact`: bounded text and/or verified image result manifest.
 
-Several Task-v4 component payloads retain `schemaVersion: 1` as their own
+Several Task-v5 component payloads retain `schemaVersion: 1` as their own
 structural schema. This does not mean Task protocol v1 is accepted; the
-containing Application Envelope v2 and an existing Task-v4 identity are
+containing Application Envelope v2 and an existing Task-v5 identity are
 required.
+
+For `local.compute.general-text-assistance.v1`, the receiver resolves the
+abstract offer to its own locally qualified Connector. A `capability:` alias,
+remote Workspace reference, model ID, endpoint, or local path cannot select the
+Runtime facade. Only receiver-side Allow Once can mint the exact local grant.
 
 Transport receipt, attachment receipt, local approval, execution status, and
 Artifact are distinct events. Only the receiver's explicit Allow Once action
 creates a short-lived local Execution Grant. Chatmail data cannot grant
 execution.
+
+Beta 0.2.5 does not add a network Task or Passport field. Durable
+`ExecutionHandle`, provider execution identity, checkpoint location, lease, and
+resume controls are receiver-local lifecycle state. Peer-visible Task status
+continues to use the existing bounded state/error projection; a Peer cannot
+name a checkpoint, provider run, local path, or resume authority.
+
+Beta 0.2.6 likewise adds no network Memory field or message type. Task Memory is
+the current bounded request during execution. Workspace and Child Agent Memory
+records, authorization, provenance, content, deletion and export are
+receiver-local lifecycle state. A Peer cannot request a durable write, name a
+Memory record, select retrieval content, or receive a Memory export.
+
+Beta 0.2.7 adds a second privacy-minimized Compute Offer resource class,
+`native_agent`, for the qualified `Osaurus Native Agent (Teti)`. The wire object
+still contains only offer ID, general-text capability, receiver-local execution,
+text modes, concurrency one, allow-once and observation time. Fixed Agent UUID,
+model, endpoint, port, provider authority, configuration digest and bounded
+Workspace context remain receiver-local.
+
+The requester cannot address `/agents/{id}/run` or select the Agent. Allow Once
+resolves the abstract offer on the receiver, whose Host intersects the Teti
+grant with Child and provider authority. No new peer message gives Osaurus a
+remote Teti address, callback, Passport, Chatmail identity, provider Memory
+control or Workspace path.
 
 ## Attachment delivery and the 0.1.15 known defect
 

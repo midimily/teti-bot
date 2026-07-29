@@ -79,7 +79,7 @@ export interface QualifyCodexConnectorOptions {
 
 export class CodexConnector implements AgentConnector {
   readonly descriptor = {
-    contractVersion: 1 as const,
+    contractVersion: 2 as const,
     connectorId: CODEX_CONNECTOR.connectorId,
     connectorRevision: CODEX_CONNECTOR.connectorRevision,
     childAgentId: CODEX_CONNECTOR.childAgentId,
@@ -87,6 +87,14 @@ export class CodexConnector implements AgentConnector {
     inputModes: ["text", "image"] as const,
     outputModes: ["text"] as const,
     transportKind: "process" as const,
+    executionCapabilities: {
+      supportsProgress: false,
+      supportsPause: false,
+      supportsResume: false,
+      supportsCheckpoint: false,
+      supportsCancel: true
+    },
+    executionSemantics: "external_side_effects_possible" as const,
     timeoutMs: CODEX_CONNECTOR.timeoutMs,
     cancelGraceMs: CODEX_CONNECTOR.cancelGraceMs,
     maxOutputBytes: CODEX_CONNECTOR.maxOutputBytes

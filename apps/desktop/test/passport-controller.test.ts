@@ -37,6 +37,36 @@ test("one Passport controller reads the Runtime snapshot every three seconds", a
   controller.stop();
 });
 
+test("timestamp-only Passport polling does not rebuild an expanded peer detail UI", async () => {
+  const client = new FakePassportClient();
+  let changes = 0;
+  let scheduled: (() => void) | undefined;
+  const controller = new PassportController({
+    client,
+    initialSnapshot: structuredClone(client.snapshot),
+    onChange: () => { changes += 1; },
+    schedule(callback) {
+      scheduled = callback;
+      return 1;
+    },
+    cancel: () => undefined
+  });
+  controller.start();
+  await flushPromises();
+  assert.equal(changes, 0);
+
+  client.snapshot.generatedAt = "2026-07-22T00:00:03.000Z";
+  client.snapshot.revision += 1;
+  scheduled?.();
+  await flushPromises();
+  assert.equal(changes, 0, "generatedAt/revision churn must not replace the Passport DOM");
+
+  client.snapshot.sharing = { ...policy(true), capabilities: true };
+  await controller.refreshNow();
+  assert.equal(changes, 1, "a visible semantic change still refreshes the UI");
+  controller.stop();
+});
+
 test("Passport sharing updates optimistically and rolls back on persistence failure", async () => {
   const client = new FakePassportClient();
   const controller = new PassportController({ client, onChange: () => undefined });

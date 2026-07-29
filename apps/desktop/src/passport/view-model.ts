@@ -25,9 +25,20 @@ export type ResourceTone = "free" | "plus" | "pro" | "unknown" | "unavailable";
 export type ResourceIcon = "codex" | "generic";
 export type PeerReachability = "reachable" | "checking" | "unreachable";
 
+export interface ResourceQuotaViewModel {
+  periodLabel: string;
+  remainingPercent: number;
+  resetLabel: string;
+  windowLabel: string;
+  inferred: boolean;
+}
+
 export interface ResourceViewModel {
+  id: string;
   providerName: string;
   productName: string;
+  kindLabel: string;
+  assuranceLabel: string;
   planLabel: string;
   availabilityLabel: string;
   remainingPercent: number | null;
@@ -36,6 +47,7 @@ export interface ResourceViewModel {
   stale: boolean;
   tone: ResourceTone;
   icon: ResourceIcon;
+  quotas: ResourceQuotaViewModel[];
 }
 
 export type AgentTone = "running" | "installed" | "absent" | "unknown";
@@ -44,17 +56,46 @@ export interface AgentViewModel {
   id: string;
   name: string;
   providerName: string;
+  versionLabel: string;
   statusLabel: string;
   detailLabel: string;
+  inputModeLabels: string[];
+  outputModeLabels: string[];
+  capabilityIds: string[];
   tone: AgentTone;
+}
+
+export interface CapabilityBindingViewModel {
+  agentNames: string[];
+  resourceNames: string[];
+  statusLabel: "绑定完整" | "绑定信息不完整";
 }
 
 export interface CapabilityViewModel {
   id: string;
   name: string;
   categoryLabel: string;
+  description: string;
   availabilityLabel: string;
+  bindings: CapabilityBindingViewModel[];
   stale: boolean;
+  computeOffer?: {
+    resourceLabel: "本地算力";
+    executionLabel: "接收端本机执行";
+    concurrencyLabel: "并发 1";
+    approvalLabel: "每次授权";
+  };
+}
+
+export type ProviderLogo = "openai" | "generic";
+
+export interface ProviderViewModel {
+  id: string;
+  name: string;
+  logo: ProviderLogo;
+  fallbackLabel: string;
+  resourceNames: string[];
+  agentNames: string[];
 }
 
 export interface ManagedAgentViewModel extends AgentViewModel {
@@ -91,6 +132,11 @@ export interface PassportSettingsViewModel {
   busy: boolean;
   error?: string;
   agentManagement: AgentManagementViewModel;
+  osaurusNativeAgentId: string;
+  osaurusNativeBusy: boolean;
+  osaurusNativeStatus: "未配置" | "安全资格检查中" | "安全资格未通过" | "可调用";
+  osaurusNativeReason?: string;
+  osaurusNativeError?: string;
 }
 
 export interface RemotePassportViewModel {
@@ -99,14 +145,26 @@ export interface RemotePassportViewModel {
   stale: boolean;
   resources: ResourceViewModel[];
   agents: AgentViewModel[];
+  providers: ProviderViewModel[];
   capabilities: CapabilityViewModel[];
+  summary: RemotePassportSummaryViewModel;
+}
+
+export interface RemotePassportSummaryViewModel {
+  resource: ResourceViewModel | null;
+  resourceOverflowCount: number;
+  agents: AgentViewModel[];
+  agentOverflowCount: number;
+  capabilities: CapabilityViewModel[];
+  capabilityOverflowCount: number;
 }
 
 export interface ConnectionCardViewModel {
   requestId: string;
   state: PassportConnectionSnapshot["connectionState"];
   displayName: string;
-  address: string;
+  publicIdCode: string;
+  identityLabel: string;
   compatibility: PassportConnectionSnapshot["compatibility"];
   compatibilityLabel: "兼容" | "需要升级" | "待确认版本";
   reachability: PeerReachability;
@@ -133,7 +191,9 @@ export function toPassportViewModel(
       open: snapshot.openPanel === "passport",
       resources: snapshot.passport.localPassport.resources.map(toResourceViewModel),
       agents: snapshot.passport.localPassport.agents.map(toAgentViewModel),
-      capabilities: snapshot.passport.localPassport.capabilities.map(toCapabilityViewModel)
+      capabilities: snapshot.passport.localPassport.capabilities.map((capability) =>
+        toCapabilityViewModel(capability)
+      )
     },
     settings: {
       title: "设置",
@@ -147,7 +207,21 @@ export function toPassportViewModel(
         && snapshot.passport.sharing.capabilities,
       busy: snapshot.sharingBusy,
       ...(snapshot.sharingError ? { error: snapshot.sharingError } : {}),
-      agentManagement: toAgentManagementViewModel(snapshot)
+      agentManagement: toAgentManagementViewModel(snapshot),
+      osaurusNativeAgentId: snapshot.osaurusNative?.agentId ?? "",
+      osaurusNativeBusy: snapshot.osaurusNativeBusy ?? false,
+      osaurusNativeStatus: snapshot.osaurusNative?.readiness === "ready"
+        || snapshot.passport.localPassport.agents.some((agent) => agent.id === "osaurus-native-teti")
+        ? "可调用"
+        : snapshot.osaurusNative?.readiness === "blocked"
+          ? "安全资格未通过"
+          : snapshot.osaurusNative?.agentId
+            ? "安全资格检查中"
+            : "未配置",
+      ...(snapshot.osaurusNative?.reasonCode
+        ? { osaurusNativeReason: snapshot.osaurusNative.reasonCode }
+        : {}),
+      ...(snapshot.osaurusNativeError ? { osaurusNativeError: snapshot.osaurusNativeError } : {})
     },
     connections: snapshot.passport.connections.map((connection) => toConnectionCardViewModel(connection, now))
   };
@@ -314,8 +388,9 @@ export function toConnectionCardViewModel(
   return {
     requestId: connection.requestId,
     state: connection.connectionState,
-    displayName: connection.identity.displayName || connection.identity.tetiId,
-    address: connection.identity.address,
+    displayName: connection.identity.displayName?.trim() || "未命名",
+    publicIdCode: publicTetiIdCode(connection.identity) ?? "ID 暂不可用",
+    identityLabel: formatLocalTetiIdentity(connection.identity),
     compatibility: connection.compatibility,
     compatibilityLabel: connection.compatibility === "compatible"
       ? "兼容"
@@ -326,6 +401,16 @@ export function toConnectionCardViewModel(
     reachabilityLabel: reachability === "reachable" ? "在线" : reachability === "checking" ? "状态检测中" : "离线",
     passport: toRemotePassportViewModel(connection.passport)
   };
+}
+
+function publicTetiIdCode(identity: PassportIdentity): string | null {
+  if (isCanonicalTetiPublicId(identity.tetiId)) {
+    return identity.tetiId.slice(TETI_PUBLIC_ID_PREFIX.length);
+  }
+  if (isCanonicalTetiChatmailAddress(identity.address)) {
+    return identity.address.slice(0, TETI_PUBLIC_ID_CODE_LENGTH);
+  }
+  return null;
 }
 
 function validPastOrPresentTimestamp(value: string | null | undefined, now: Date): number | null {
@@ -344,8 +429,11 @@ export function toResourceViewModel(resource: AiResource): ResourceViewModel {
       ? planKey
       : "unknown";
   return {
-    providerName: resource.provider,
+    id: resource.id,
+    providerName: formatAgentProvider(resource.provider) || "Provider 未标注",
     productName: resource.product,
+    kindLabel: formatResourceKind(resource.kind),
+    assuranceLabel: formatResourceAssurance(resource.assurance),
     planLabel: unavailable
       ? "暂时无法确认"
       : resource.plan?.displayName || "计划未知",
@@ -355,7 +443,14 @@ export function toResourceViewModel(resource: AiResource): ResourceViewModel {
     inferred: weekly?.identification === "inferred",
     stale: resource.availability === "stale",
     tone,
-    icon: resource.id === "openai.codex" ? "codex" : "generic"
+    icon: resource.id === "openai.codex" ? "codex" : "generic",
+    quotas: resource.quotas.map((quota) => ({
+      periodLabel: formatQuotaPeriod(quota.period),
+      remainingPercent: quota.remainingPercent,
+      resetLabel: formatResetAt(quota.resetAt),
+      windowLabel: formatQuotaWindow(quota.windowSeconds),
+      inferred: quota.identification === "inferred"
+    }))
   };
 }
 
@@ -366,11 +461,15 @@ export function toAgentViewModel(agent: AiAgent | CallablePassportAgent): AgentV
       id: agent.id,
       name: agent.name,
       providerName: formatAgentProvider(agent.provider),
+      versionLabel: "版本未共享",
       statusLabel: stale ? "信息已过期" : "可调用",
       detailLabel: [
         formatAgentProvider(agent.provider),
         agent.capabilityIds.map(formatCapabilityId).join("、")
       ].filter(Boolean).join(" · "),
+      inputModeLabels: agent.inputModes.map(formatAgentMode),
+      outputModeLabels: agent.outputModes.map(formatAgentMode),
+      capabilityIds: [...agent.capabilityIds],
       tone: stale ? "unknown" : "running"
     };
   }
@@ -401,19 +500,53 @@ export function toAgentViewModel(agent: AiAgent | CallablePassportAgent): AgentV
     id: agent.id,
     name: agent.name,
     providerName,
+    versionLabel: agent.version?.trim() || "版本未知",
     statusLabel,
     detailLabel: details.join(" · "),
+    inputModeLabels: [],
+    outputModeLabels: [],
+    capabilityIds: [],
     tone
   };
 }
 
-export function toCapabilityViewModel(capability: TetiCapability): CapabilityViewModel {
+export function toCapabilityViewModel(
+  capability: TetiCapability,
+  bindings: RemotePassportSnapshot["bindings"] = [],
+  agents: AgentViewModel[] = [],
+  resources: ResourceViewModel[] = [],
+  hasComputeOffer = false
+): CapabilityViewModel {
+  const agentNames = new Map(agents.map((agent) => [agent.id, agent.name]));
+  const resourceNames = new Map(resources.map((resource) => [resource.id, resource.productName]));
   return {
     id: capability.id,
     name: capability.name,
     categoryLabel: formatCapabilityId(capability.category),
-    availabilityLabel: capability.availability === "stale" ? "信息已过期" : "可调用",
-    stale: capability.availability === "stale"
+    description: capability.description.trim(),
+    availabilityLabel: availabilityLabel(capability.availability),
+    bindings: bindings
+      .filter((binding) => binding.capabilityId === capability.id)
+      .map((binding) => {
+        const resolvedAgents = binding.agentIds.map((id) => agentNames.get(id) ?? id);
+        const resolvedResources = binding.resourceIds.map((id) => resourceNames.get(id) ?? id);
+        const complete = binding.agentIds.every((id) => agentNames.has(id))
+          && binding.resourceIds.every((id) => resourceNames.has(id));
+        return {
+          agentNames: resolvedAgents,
+          resourceNames: resolvedResources,
+          statusLabel: complete ? "绑定完整" : "绑定信息不完整"
+        };
+      }),
+    stale: capability.availability === "stale",
+    ...(hasComputeOffer ? {
+      computeOffer: {
+        resourceLabel: "本地算力" as const,
+        executionLabel: "接收端本机执行" as const,
+        concurrencyLabel: "并发 1" as const,
+        approvalLabel: "每次授权" as const
+      }
+    } : {})
   };
 }
 
@@ -443,6 +576,73 @@ function formatAgentProvider(provider: string | undefined): string {
   return known[value.toLowerCase()] ?? value;
 }
 
+function formatResourceKind(kind: AiResource["kind"]): string {
+  const known: Record<AiResource["kind"], string> = {
+    subscription: "订阅资源",
+    account: "账号资源",
+    local_model: "本地模型",
+    compute: "计算资源"
+  };
+  return known[kind];
+}
+
+function formatResourceAssurance(assurance: AiResource["assurance"]): string {
+  const known: Record<AiResource["assurance"], string> = {
+    provider_observed: "Provider 已观测",
+    local_observed: "本机已观测",
+    self_declared: "节点声明"
+  };
+  return known[assurance];
+}
+
+function formatQuotaPeriod(period: string): string {
+  const known: Record<string, string> = {
+    week: "周额度",
+    day: "日额度",
+    hour: "小时额度"
+  };
+  return known[period.toLowerCase()] ?? formatCapabilityId(period);
+}
+
+function formatQuotaWindow(windowSeconds: number | null): string {
+  if (windowSeconds === null) return "窗口时长未知";
+  if (windowSeconds % 86_400 === 0) return `${windowSeconds / 86_400} 天窗口`;
+  if (windowSeconds % 3_600 === 0) return `${windowSeconds / 3_600} 小时窗口`;
+  return `${windowSeconds} 秒窗口`;
+}
+
+function formatAgentMode(mode: "text" | "image"): string {
+  return mode === "image" ? "图片" : "文本";
+}
+
+function toProviderViewModels(
+  resources: ResourceViewModel[],
+  agents: AgentViewModel[]
+): ProviderViewModel[] {
+  const providers = new Map<string, ProviderViewModel>();
+  const ensure = (name: string) => {
+    const normalizedName = name.trim() || "Provider 未标注";
+    const id = normalizedName.toLowerCase();
+    const existing = providers.get(id);
+    if (existing) return existing;
+    const words = normalizedName.split(/\s+/).filter(Boolean);
+    const fallbackLabel = words.slice(0, 2).map((word) => word[0]?.toUpperCase() ?? "").join("") || "AI";
+    const provider: ProviderViewModel = {
+      id,
+      name: normalizedName,
+      logo: id === "openai" ? "openai" : "generic",
+      fallbackLabel,
+      resourceNames: [],
+      agentNames: []
+    };
+    providers.set(id, provider);
+    return provider;
+  };
+  for (const resource of resources) ensure(resource.providerName).resourceNames.push(resource.productName);
+  for (const agent of agents) ensure(agent.providerName).agentNames.push(agent.name);
+  return [...providers.values()];
+}
+
 function toRemotePassportViewModel(passport: RemotePassportSnapshot): RemotePassportViewModel {
   const note = passport.state === "stale"
     ? "AI Passport 已过期"
@@ -455,14 +655,45 @@ function toRemotePassportViewModel(passport: RemotePassportSnapshot): RemotePass
           && (passport.capabilities?.length ?? 0) === 0
           ? "暂无 AI Passport"
           : undefined;
+  const resources = passport.resources.map(toResourceViewModel);
+  const agents = passport.agents.map(toAgentViewModel);
+  const capabilities = (passport.capabilities ?? []).map((capability) =>
+    toCapabilityViewModel(
+      capability,
+      passport.bindings ?? [],
+      agents,
+      resources,
+      (passport.computeOffers ?? []).some((offer) => offer.capability === capability.id)
+    )
+  );
   return {
     state: passport.state,
     ...(note ? { note } : {}),
     stale: passport.state === "stale",
-    resources: passport.resources.slice(0, 2).map(toResourceViewModel),
-    agents: passport.agents.map(toAgentViewModel),
-    capabilities: (passport.capabilities ?? []).map(toCapabilityViewModel)
+    resources,
+    agents,
+    providers: toProviderViewModels(resources, agents),
+    capabilities,
+    summary: {
+      resource: selectSummaryResource(resources),
+      resourceOverflowCount: Math.max(0, resources.length - 1),
+      agents: agents.slice(0, 2),
+      agentOverflowCount: Math.max(0, agents.length - 2),
+      capabilities: capabilities.slice(0, 2),
+      capabilityOverflowCount: Math.max(0, capabilities.length - 2)
+    }
   };
+}
+
+function selectSummaryResource(resources: ResourceViewModel[]): ResourceViewModel | null {
+  return [...resources].sort((left, right) => {
+    const score = (resource: ResourceViewModel) =>
+      (resource.remainingPercent === null ? 0 : 100)
+      + (resource.tone === "unavailable" ? 0 : 20)
+      + (resource.stale ? 0 : 10)
+      + (resource.kindLabel === "本地模型" || resource.kindLabel === "计算资源" ? 5 : 0);
+    return score(right) - score(left) || left.id.localeCompare(right.id);
+  })[0] ?? null;
 }
 
 function availabilityLabel(availability: TetiAvailability): string {

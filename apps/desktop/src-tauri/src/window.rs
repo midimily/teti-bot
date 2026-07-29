@@ -11,6 +11,9 @@ use tauri::LogicalSize;
 use crate::macos_panel;
 
 const ISLAND_LABEL: &str = "island";
+pub const CONNECTION_DETAIL_BASE_HEIGHT: f64 = 352.0;
+pub const CONNECTION_DETAIL_BOTTOM_MARGIN: f64 = 24.0;
+pub const MAX_ISLAND_HEIGHT: f64 = 1_200.0;
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -18,6 +21,7 @@ pub enum IslandMode {
     Hidden,
     Idle,
     Onboarding,
+    ConnectionDetail,
     Processing,
     Error,
     Ready,
@@ -121,6 +125,46 @@ pub fn set_island_mode(app: AppHandle, mode: IslandMode, reason: String) -> Resu
 }
 
 #[tauri::command]
+pub fn set_connection_detail_height(
+    app: AppHandle,
+    height: f64,
+    reason: String,
+) -> Result<(), String> {
+    validate_reason(&reason)?;
+    if !height.is_finite() || height <= 0.0 {
+        return Err("Invalid connection detail height.".to_string());
+    }
+    eprintln!("[TetiPanel] connection_detail_height={height} reason={reason}");
+
+    #[cfg(target_os = "macos")]
+    return macos_panel::resize_connection_detail(&app, height);
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let window = island_window(&app)?;
+        let monitor_height = window
+            .current_monitor()
+            .map_err(|error| error.to_string())?
+            .map(|monitor| monitor.size().height as f64 / monitor.scale_factor())
+            .unwrap_or(MAX_ISLAND_HEIGHT);
+        let height = connection_detail_height(height, monitor_height);
+        let size = IslandSize {
+            width: 500.0,
+            height,
+        };
+        validate_size(size.width, size.height)?;
+        window
+            .set_size(LogicalSize::new(size.width, size.height))
+            .map_err(|error| error.to_string())?;
+        position_window_top_center(
+            &window,
+            size,
+            top_inset_for_mode(IslandMode::ConnectionDetail),
+        )
+    }
+}
+
+#[tauri::command]
 pub fn position_island(app: AppHandle, geometry: GeometryInput) -> Result<(), String> {
     let window = island_window(&app)?;
     let current_size = window.inner_size().map_err(|error| error.to_string())?;
@@ -196,6 +240,10 @@ pub fn size_for_mode(mode: IslandMode) -> IslandSize {
             width: 500.0,
             height: 352.0,
         },
+        IslandMode::ConnectionDetail => IslandSize {
+            width: 500.0,
+            height: CONNECTION_DETAIL_BASE_HEIGHT,
+        },
         IslandMode::Processing => IslandSize {
             width: 430.0,
             height: 300.0,
@@ -208,6 +256,20 @@ pub fn size_for_mode(mode: IslandMode) -> IslandSize {
             width: 600.0,
             height: 360.0,
         },
+    }
+}
+
+pub fn connection_detail_height(requested: f64, monitor_height: f64) -> f64 {
+    let available_height = if monitor_height.is_finite() {
+        (monitor_height - CONNECTION_DETAIL_BOTTOM_MARGIN)
+            .clamp(CONNECTION_DETAIL_BASE_HEIGHT, MAX_ISLAND_HEIGHT)
+    } else {
+        CONNECTION_DETAIL_BASE_HEIGHT
+    };
+    if requested.is_finite() {
+        requested.clamp(CONNECTION_DETAIL_BASE_HEIGHT, available_height)
+    } else {
+        CONNECTION_DETAIL_BASE_HEIGHT
     }
 }
 
@@ -286,7 +348,7 @@ fn validate_size(width: f64, height: f64) -> Result<(), String> {
     if !width.is_finite() || !height.is_finite() || width < 32.0 || height < 18.0 {
         return Err("Invalid island geometry.".to_string());
     }
-    if width > 640.0 || height > 360.0 {
+    if width > 640.0 || height > MAX_ISLAND_HEIGHT {
         return Err("Island geometry exceeds alpha bounds.".to_string());
     }
     Ok(())
@@ -317,6 +379,13 @@ mod tests {
             IslandSize {
                 width: 500.0,
                 height: 352.0
+            }
+        );
+        assert_eq!(
+            size_for_mode(IslandMode::ConnectionDetail),
+            IslandSize {
+                width: 500.0,
+                height: CONNECTION_DETAIL_BASE_HEIGHT
             }
         );
     }
@@ -368,5 +437,17 @@ mod tests {
     fn size_validation_rejects_large_windows() {
         assert!(validate_size(700.0, 200.0).is_err());
         assert!(validate_size(500.0, 352.0).is_ok());
+        assert!(validate_size(500.0, 560.0).is_ok());
+        assert!(validate_size(500.0, 1_000.0).is_ok());
+        assert!(validate_size(500.0, 1_201.0).is_err());
+    }
+
+    #[test]
+    fn connection_detail_height_follows_content_with_screen_bounds() {
+        assert_eq!(connection_detail_height(280.0, 900.0), 352.0);
+        assert_eq!(connection_detail_height(480.0, 900.0), 480.0);
+        assert_eq!(connection_detail_height(700.0, 900.0), 700.0);
+        assert_eq!(connection_detail_height(980.0, 900.0), 876.0);
+        assert_eq!(connection_detail_height(1_400.0, 1_600.0), 1_200.0);
     }
 }

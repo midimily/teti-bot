@@ -1,4 +1,4 @@
-export const TETI_CAPABILITY_PASSPORT_SCHEMA_VERSION = 2;
+export const TETI_CAPABILITY_PASSPORT_SCHEMA_VERSION = 3;
 export const TETI_PASSPORT_SHARING_POLICY_VERSION = 1;
 
 export type TetiAvailability = "available" | "unavailable" | "stale" | "unknown";
@@ -91,13 +91,32 @@ export interface CapabilityBinding {
   resourceIds: string[];
 }
 
+/**
+ * Privacy-minimized compute advertisement. It intentionally carries no local
+ * model identifier, Runtime endpoint, hardware detail, credential, path, or
+ * Connector binding. The receiver resolves the offer to local resources only
+ * after an explicit one-task approval.
+ */
+export interface ComputeOffer {
+  offerId: string;
+  capability: "general-text-assistance";
+  resourceClass: "local_model" | "native_agent";
+  executionLocation: "receiver_local";
+  inputModes: readonly ["text"];
+  outputModes: readonly ["text"];
+  concurrency: 1;
+  approval: "allow_once";
+  observedAt: string;
+}
+
 export interface TetiCapabilityPassport {
-  schemaVersion: 2;
+  schemaVersion: 3;
   generatedAt: string;
   resources: AiResource[];
   agents: CallablePassportAgent[];
   capabilities: TetiCapability[];
   bindings: CapabilityBinding[];
+  computeOffers: ComputeOffer[];
 }
 
 /**

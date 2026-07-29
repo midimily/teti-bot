@@ -51,10 +51,22 @@ import type {
 } from "../../../../../core/callability/adapter.ts";
 import {
   issueExecutionAuthority,
+  TETI_LOCAL_TEXT_COMPUTE_OFFER_ID,
   type ExecutionAuthority
 } from "../../../../../core/callability/agent-core.ts";
+import type {
+  ExecutionHandle,
+  PrepareExecutionHandleInput
+} from "../../../../../core/callability/execution.ts";
+import type {
+  TaskWorkspaceBinding,
+  TaskWorkspaceRequest
+} from "../../../../../core/workspace/types.ts";
+import { WORKSPACE_LIMITS } from "../../../../../core/workspace/types.ts";
+import { validateTaskWorkspaceRequest } from "../../../../../core/workspace/validation.ts";
 import type { TaskTransportStore } from "./store.ts";
 import type { StagedTaskImage, TaskAttachmentStore } from "./attachments.ts";
+import type { CollaborationWorkspaceStore } from "../workspaces/store.ts";
 
 const SAFE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const SAFE_SLUG_PATTERN = /^[a-z0-9]+(?:[._-][a-z0-9]+)*$/;
@@ -77,6 +89,7 @@ interface TaskTransportRuntimeOptions {
   now?: () => Date;
   taskIdFactory?: () => string;
   attachmentStore?: TaskAttachmentStore;
+  workspaceStore?: CollaborationWorkspaceStore;
   executor?: TaskExecutionBridge;
   enqueueOperation?: (operation: () => Promise<void>) => Promise<void>;
 }
@@ -89,6 +102,7 @@ export interface TaskExecutionTarget {
 
 export interface TaskExecutionBridge {
   resolveTarget(
+    offerId: string,
     capabilityId: string,
     requiredInputModes: readonly ("text" | "image")[]
   ): TaskExecutionTarget | null;
@@ -98,6 +112,9 @@ export interface TaskExecutionBridge {
   ): Promise<CallableAdapterTaskSnapshot>;
   getTask(taskId: string): CallableAdapterTaskSnapshot | null;
   cancel(taskId: string): boolean;
+  prepareExecution?(input: PrepareExecutionHandleInput): Promise<ExecutionHandle>;
+  getExecutionHandle?(taskId: string): Promise<ExecutionHandle | null>;
+  reconcileExecutionHandles?(): Promise<ExecutionHandle[]>;
 }
 
 export class TaskTransportRuntime {
@@ -108,6 +125,7 @@ export class TaskTransportRuntime {
   private readonly now: () => Date;
   private readonly taskIdFactory: () => string;
   private readonly attachmentStore?: TaskAttachmentStore;
+  private readonly workspaceStore?: CollaborationWorkspaceStore;
   private readonly executor?: TaskExecutionBridge;
   private readonly enqueueOperation: (operation: () => Promise<void>) => Promise<void>;
 
@@ -119,6 +137,7 @@ export class TaskTransportRuntime {
     this.now = options.now ?? (() => new Date());
     this.taskIdFactory = options.taskIdFactory ?? randomUUID;
     this.attachmentStore = options.attachmentStore;
+    this.workspaceStore = options.workspaceStore;
     this.executor = options.executor;
     this.enqueueOperation = options.enqueueOperation ?? ((operation) => operation());
   }
@@ -132,14 +151,14 @@ export class TaskTransportRuntime {
 
   async list(): Promise<CollaborationTaskTransportSnapshot> {
     const state = await this.store.load();
-    const changed = this.reconcileInterruptedExecutions(state);
+    const changed = await this.reconcileInterruptedExecutions(state);
     if (expireDueRecords(state, this.now()) || changed) await this.store.save(state);
     return snapshot(state, this.now());
   }
 
   async listSummaries(): Promise<CollaborationTaskSummarySnapshot> {
     const state = await this.store.load();
-    let changed = this.reconcileInterruptedExecutions(state);
+    let changed = await this.reconcileInterruptedExecutions(state);
     changed = await this.refreshAttachmentReadiness(state) || changed;
     changed = expireDueRecords(state, this.now()) || changed;
     if (changed) await this.store.save(state);
@@ -186,7 +205,7 @@ export class TaskTransportRuntime {
       throw new TaskTransportRuntimeError("TASK_INPUT_INVALID", "Task ID is invalid.");
     }
     const state = await this.store.load();
-    let changed = this.reconcileInterruptedExecutions(state);
+    let changed = await this.reconcileInterruptedExecutions(state);
     changed = await this.refreshAttachmentReadiness(state) || changed;
     changed = expireDueRecords(state, this.now()) || changed;
     if (changed) await this.store.save(state);
@@ -215,6 +234,12 @@ export class TaskTransportRuntime {
     });
     if (!path) throw new TaskTransportRuntimeError("TASK_ATTACHMENT_NOT_FOUND", "Task image is unavailable.");
     return path;
+  }
+
+  async getExecutionHandle(taskId: string): Promise<ExecutionHandle | null> {
+    const record = await this.get(taskId);
+    if (record.direction !== "incoming") return null;
+    return structuredClone(await this.executor?.getExecutionHandle?.(taskId) ?? null);
   }
 
   async observePeerVersions(
@@ -283,6 +308,7 @@ export class TaskTransportRuntime {
       offerId: normalized.offerId ?? `capability:${normalized.capabilityId}`,
       capabilityId: normalized.capabilityId,
       input: taskInputForVersion(protocolVersion, normalized.text, normalized.attachments),
+      workspace: structuredClone(normalized.workspace),
       createdAt: createdAt.toISOString(),
       expiresAt: new Date(createdAt.getTime() + normalized.ttlMs).toISOString()
     };
@@ -335,6 +361,11 @@ export class TaskTransportRuntime {
       status = canonicalTaskRequestJson(existing.request) === canonicalTaskRequestJson(request)
         ? "duplicate"
         : "conflict";
+    } else if (!(TETI_SUPPORTED_TASK_PROTOCOL_VERSIONS as readonly number[]).includes(request.schemaVersion)) {
+      status = "rejected";
+      if (ensureCapacity(state, this.now())) {
+        state.records.push(incomingRecord(input, receivedAt, "rejected"));
+      }
     } else if (Date.parse(request.createdAt) > this.now().getTime() + MAX_TASK_CLOCK_SKEW_MS) {
       status = "rejected";
       if (ensureCapacity(state, this.now())) {
@@ -641,6 +672,7 @@ export class TaskTransportRuntime {
     }
     const images = taskInputImages(record.request.input);
     const target = this.executor.resolveTarget(
+      record.request.offerId,
       record.request.capabilityId,
       images.length > 0 ? ["text", "image"] : ["text"]
     );
@@ -656,7 +688,18 @@ export class TaskTransportRuntime {
       if (!path) throw new TaskTransportRuntimeError("TASK_ATTACHMENTS_PENDING", "Task images are unavailable.");
       return { attachmentId: part.attachmentId, mimeType: part.mimeType, path };
     }));
-    const grant = createExecutionGrant(record.request, target, this.now());
+    const account = await this.accountStorage.load();
+    if (!account) throw new TaskTransportRuntimeError("TASK_ACCOUNT_REQUIRED", "A local Teti account is required.");
+    const workspaceBinding = await this.resolveWorkspaceBinding(record.request, account.id);
+    record.workspaceBinding = workspaceBinding;
+    const executionHandle = await this.executor.prepareExecution?.({
+      taskId: record.request.taskId,
+      workspaceId: workspaceBinding.workspaceId,
+      childAgentId: target.childAgentId,
+      connectorId: target.connectorId,
+      resume: false
+    });
+    const grant = createExecutionGrant(record.request, target, workspaceBinding, this.now());
     validateExecutionGrant(grant);
     record.approval = "consumed";
     record.state = "working";
@@ -679,12 +722,93 @@ export class TaskTransportRuntime {
       },
       createdAt: this.now().toISOString()
     };
-    const authority = createExecutionAuthority(grant, execution, target);
+    const executionEpoch = executionHandle?.executionEpoch ?? 1;
+    const authority = createExecutionAuthority(grant, execution, target, executionEpoch);
     void this.executor.execute(execution, authority).then(
-      (result) => this.enqueueOperation(() => this.finishExecution(record.request.taskId, result)),
-      () => this.enqueueOperation(() => this.finishExecution(record.request.taskId, null))
+      (result) => this.enqueueOperation(() => this.finishExecution(
+        record.request.taskId,
+        result,
+        executionEpoch
+      )),
+      () => this.enqueueOperation(() => this.finishExecution(
+        record.request.taskId,
+        null,
+        executionEpoch
+      ))
     ).catch(() => undefined);
     return structuredClone(record);
+  }
+
+  private async resolveWorkspaceBinding(
+    request: CollaborationTaskRequest,
+    localTetiId: string
+  ): Promise<TaskWorkspaceBinding> {
+    if (request.offerId === TETI_LOCAL_TEXT_COMPUTE_OFFER_ID) {
+      if (request.workspace?.kind === "reference") {
+        throw new TaskTransportRuntimeError(
+          "TASK_COMPUTE_WORKSPACE_UNSUPPORTED",
+          "Receiver-local compute cannot access a Collaboration Workspace."
+        );
+      }
+      return {
+        workspaceId: `workspace:none.${request.taskId}`,
+        workspaceRevision: 1,
+        mode: "ephemeral_task",
+        access: ["read"]
+      };
+    }
+    if (!this.workspaceStore) {
+      // Dependency-injected unit runtimes retain an isolated local seam. The
+      // production sidecar always supplies the persistent Workspace Store.
+      return {
+        workspaceId: `workspace:${request.taskId}`,
+        workspaceRevision: 1,
+        mode: "ephemeral_task",
+        access: [...(request.workspace?.access ?? ["read", "write", "create_artifact"])]
+      };
+    }
+    const workspaceRequest = request.workspace ?? {
+      kind: "temporary" as const,
+      access: ["read", "write", "create_artifact"] as const
+    };
+    if (workspaceRequest.kind === "temporary") {
+      const maximumExpiry = this.now().getTime() + WORKSPACE_LIMITS.maximumEphemeralTtlMs;
+      const workspace = await this.workspaceStore.create({
+        ownerTetiId: localTetiId,
+        participantTetiIds: [request.requesterTetiId],
+        mode: "ephemeral_task",
+        retentionPolicy: {
+          kind: "ttl",
+          expiresAt: new Date(Math.min(Date.parse(request.expiresAt), maximumExpiry)).toISOString()
+        }
+      });
+      return {
+        workspaceId: workspace.workspaceId,
+        workspaceRevision: workspace.revision,
+        mode: workspace.mode,
+        access: [...workspaceRequest.access]
+      };
+    }
+    const workspace = await this.workspaceStore.get(workspaceRequest.workspaceId);
+    if (!workspace || workspace.revision !== workspaceRequest.workspaceRevision) {
+      throw new TaskTransportRuntimeError(
+        "TASK_WORKSPACE_REVISION_UNAVAILABLE",
+        "The confirmed Collaboration Workspace revision is unavailable."
+      );
+    }
+    const members = new Set([workspace.ownerTetiId, ...workspace.participantTetiIds]);
+    if (!members.has(localTetiId) || !members.has(request.requesterTetiId)) {
+      throw new TaskTransportRuntimeError(
+        "TASK_WORKSPACE_ACCESS_DENIED",
+        "The Collaboration Workspace is not confirmed for both Tetis."
+      );
+    }
+    return {
+      workspaceId: workspace.workspaceId,
+      workspaceRevision: workspace.revision,
+      mode: workspace.mode,
+      access: [...workspaceRequest.access]
+    };
   }
 
   async reject(taskId: string): Promise<CollaborationTaskTransportRecord> {
@@ -721,9 +845,96 @@ export class TaskTransportRuntime {
     return structuredClone(record);
   }
 
+  async resume(taskId: string): Promise<CollaborationTaskTransportRecord> {
+    if (!SAFE_ID_PATTERN.test(taskId)) {
+      throw new TaskTransportRuntimeError("TASK_INPUT_INVALID", "Task ID is invalid.");
+    }
+    const state = await this.store.load();
+    const record = state.records.find((candidate) =>
+      candidate.direction === "incoming" && candidate.request.taskId === taskId
+    );
+    if (!record || record.state !== "input_required" || !record.workspaceBinding) {
+      throw new TaskTransportRuntimeError("TASK_RESUME_UNAVAILABLE", "Task cannot be resumed.");
+    }
+    if (!this.executor?.prepareExecution || !this.executor.getExecutionHandle) {
+      throw new TaskTransportRuntimeError("TASK_RESUME_UNAVAILABLE", "Durable execution is unavailable.");
+    }
+    const previous = await this.executor.getExecutionHandle(taskId);
+    if (!previous || previous.resumeCapability !== "checkpoint_restart") {
+      throw new TaskTransportRuntimeError("TASK_RESUME_UNAVAILABLE", "No explicit checkpoint is available.");
+    }
+    const images = taskInputImages(record.request.input);
+    const target = this.executor.resolveTarget(
+      record.request.offerId,
+      record.request.capabilityId,
+      images.length > 0 ? ["text", "image"] : ["text"]
+    );
+    if (!target
+      || target.connectorId !== previous.connectorId
+      || target.childAgentId !== previous.childAgentId) {
+      throw new TaskTransportRuntimeError("TASK_RESUME_UNAVAILABLE", "The original Child Agent is unavailable.");
+    }
+    const imageInputs = await Promise.all(images.map(async (part) => {
+      const path = await this.attachmentStore?.resolveImage({
+        taskId,
+        purpose: "input",
+        part
+      });
+      if (!path) throw new TaskTransportRuntimeError("TASK_ATTACHMENTS_PENDING", "Task images are unavailable.");
+      return { attachmentId: part.attachmentId, mimeType: part.mimeType, path };
+    }));
+    const executionHandle = await this.executor.prepareExecution({
+      taskId,
+      workspaceId: record.workspaceBinding.workspaceId,
+      childAgentId: target.childAgentId,
+      connectorId: target.connectorId,
+      resume: true
+    });
+    const grant = createExecutionGrant(record.request, target, record.workspaceBinding, this.now());
+    const execution: CallableAdapterTaskRequest = {
+      schemaVersion: 2,
+      taskId,
+      adapterId: target.connectorId,
+      agentId: target.childAgentId,
+      capabilityId: target.capabilityId,
+      input: {
+        kind: imageInputs.length > 0 ? "parts" : "text",
+        text: taskInputText(record.request.input),
+        images: imageInputs
+      },
+      createdAt: this.now().toISOString()
+    };
+    const authority = createExecutionAuthority(
+      grant,
+      execution,
+      target,
+      executionHandle.executionEpoch
+    );
+    record.state = "working";
+    record.statusRevision = (record.statusRevision ?? 0) + 1;
+    record.statusPending = true;
+    record.updatedAt = this.now().toISOString();
+    delete record.safeErrorCode;
+    await this.store.save(state);
+    await this.trySendPendingForRecord(state, record);
+    void this.executor.execute(execution, authority).then(
+      (result) => this.enqueueOperation(() => this.finishExecution(
+        taskId,
+        result,
+        executionHandle.executionEpoch
+      )),
+      () => this.enqueueOperation(() => this.finishExecution(
+        taskId,
+        null,
+        executionHandle.executionEpoch
+      ))
+    ).catch(() => undefined);
+    return structuredClone(record);
+  }
+
   async flushOutbox(): Promise<void> {
     const state = await this.store.load();
-    this.reconcileInterruptedExecutions(state);
+    await this.reconcileInterruptedExecutions(state);
     expireDueRecords(state, this.now());
     for (const record of state.records) {
       if (record.direction === "outgoing"
@@ -749,6 +960,7 @@ export class TaskTransportRuntime {
     }
     await this.refreshAttachmentReadiness(state);
     await this.attachmentStore?.cleanup(this.now()).catch(() => undefined);
+    await this.workspaceStore?.cleanup(this.now()).catch(() => undefined);
     await this.store.save(state);
   }
 
@@ -778,13 +990,33 @@ export class TaskTransportRuntime {
     return changed;
   }
 
-  private reconcileInterruptedExecutions(state: TetiTaskTransportStoreState): boolean {
+  private async reconcileInterruptedExecutions(state: TetiTaskTransportStoreState): Promise<boolean> {
+    await this.executor?.reconcileExecutionHandles?.();
     let changed = false;
     for (const record of state.records) {
+      if (!(TETI_SUPPORTED_TASK_PROTOCOL_VERSIONS as readonly number[]).includes(record.protocolVersion)
+        && !isTerminalTaskState(record.state)) {
+        record.state = "rejected";
+        record.approval = "rejected";
+        record.delivery = "rejected";
+        record.safeErrorCode = "TASK_PROTOCOL_UPGRADE_REQUIRED";
+        record.receiptPending = false;
+        record.statusPending = false;
+        record.cancelPending = false;
+        record.artifactPending = false;
+        record.updatedAt = this.now().toISOString();
+        changed = true;
+        continue;
+      }
       if (record.direction !== "incoming" || record.state !== "working") continue;
       if (this.executor?.getTask(record.request.taskId)?.state === "working") continue;
-      record.state = "failed";
-      record.safeErrorCode = "TASK_RUNTIME_RESTARTED";
+      const handle = await this.executor?.getExecutionHandle?.(record.request.taskId);
+      const resumable = handle?.progress.state === "interrupted"
+        && handle.resumeCapability === "checkpoint_restart";
+      record.state = resumable ? "input_required" : "failed";
+      record.safeErrorCode = resumable
+        ? "TASK_RESUME_AVAILABLE"
+        : "TASK_EXECUTION_INTERRUPTED";
       record.statusRevision = (record.statusRevision ?? 0) + 1;
       record.statusPending = true;
       record.updatedAt = this.now().toISOString();
@@ -935,13 +1167,16 @@ export class TaskTransportRuntime {
 
   private async finishExecution(
     taskId: string,
-    result: CallableAdapterTaskSnapshot | null
+    result: CallableAdapterTaskSnapshot | null,
+    executionEpoch = 1
   ): Promise<void> {
     const state = await this.store.load();
     const record = state.records.find((candidate) =>
       candidate.direction === "incoming" && candidate.request.taskId === taskId
     );
-    if (!record || record.state === "canceled") return;
+    if (!record || isTerminalTaskState(record.state)) return;
+    const handle = await this.executor?.getExecutionHandle?.(taskId);
+    if (handle && handle.executionEpoch !== executionEpoch) return;
     const completedAt = this.now().toISOString();
     if (result?.state === "completed" && result.artifact) {
       const resultImages = result.artifact.kind === "parts" ? result.artifact.images : [];
@@ -995,6 +1230,11 @@ export class TaskTransportRuntime {
       record.state = "auth_required";
       record.approval = "pending";
       record.safeErrorCode = "ADAPTER_AUTH_REQUIRED";
+    } else if (handle?.executionEpoch === executionEpoch
+      && handle.progress.state === "failed"
+      && handle.resumeCapability === "checkpoint_restart") {
+      record.state = "input_required";
+      record.safeErrorCode = "TASK_RESUME_AVAILABLE";
     } else {
       record.state = result?.state === "canceled" ? "canceled" : "failed";
       record.safeErrorCode = result?.safeErrorCode ?? "ADAPTER_INTERNAL_ERROR";
@@ -1115,7 +1355,7 @@ export class TaskTransportRuntime {
 
 function validateSendInput(input: SendCollaborationTaskInput): Required<Pick<
   SendCollaborationTaskInput,
-  "connectionRequestId" | "capabilityId" | "text" | "ttlMs" | "attachments"
+  "connectionRequestId" | "capabilityId" | "text" | "ttlMs" | "attachments" | "workspace"
 >> & Pick<SendCollaborationTaskInput, "taskId" | "offerId"> {
   if (typeof input !== "object" || input === null) {
     throw new TaskTransportRuntimeError("TASK_INPUT_INVALID", "Task input is invalid.");
@@ -1159,11 +1399,21 @@ function validateSendInput(input: SendCollaborationTaskInput): Required<Pick<
   if (attachments.length > 4 || totalBytes > 12 * 1024 * 1024) {
     throw new TaskTransportRuntimeError("TASK_INPUT_INVALID", "Task attachments exceed the allowed size.");
   }
+  const workspace: TaskWorkspaceRequest = input.workspace ?? {
+    kind: "temporary",
+    access: ["read", "write", "create_artifact"]
+  };
+  try {
+    validateTaskWorkspaceRequest(workspace);
+  } catch {
+    throw new TaskTransportRuntimeError("TASK_INPUT_INVALID", "Task Workspace request is invalid.");
+  }
   return {
     connectionRequestId: input.connectionRequestId.trim(),
     capabilityId: input.capabilityId,
     text: input.text,
     attachments: structuredClone(attachments),
+    workspace: structuredClone(workspace),
     ttlMs,
     ...(input.taskId === undefined ? {} : { taskId: input.taskId }),
     ...(input.offerId === undefined ? {} : { offerId: input.offerId })
@@ -1179,6 +1429,7 @@ function requireMatchingRetry(
     || record.request.capabilityId !== input.capabilityId
     || taskInputText(record.request.input) !== input.text
     || JSON.stringify(taskInputImages(record.request.input)) !== JSON.stringify(input.attachments)
+    || JSON.stringify(record.request.workspace) !== JSON.stringify(input.workspace)
     || Date.parse(record.request.expiresAt) - Date.parse(record.request.createdAt) !== input.ttlMs
     || (input.offerId !== undefined && record.request.offerId !== input.offerId)) {
     throw new TaskTransportRuntimeError(
@@ -1189,7 +1440,7 @@ function requireMatchingRetry(
 }
 
 function taskInputForVersion(
-  version: 1 | 2 | 3 | 4,
+  version: 1 | 2 | 3 | 4 | 5,
   text: string,
   attachments: readonly TaskImagePart[]
 ): CollaborationTaskInput {
@@ -1611,6 +1862,12 @@ function requireMutableIncomingTask(
     candidate.direction === "incoming" && candidate.request.taskId === taskId
   );
   if (!record) throw new TaskTransportRuntimeError("TASK_NOT_FOUND", "Task was not found.");
+  if (!(TETI_SUPPORTED_TASK_PROTOCOL_VERSIONS as readonly number[]).includes(record.protocolVersion)) {
+    throw new TaskTransportRuntimeError(
+      "TASK_PROTOCOL_UPGRADE_REQUIRED",
+      "Task was created by an unsupported collaboration protocol."
+    );
+  }
   if (Date.parse(record.request.expiresAt) <= now.getTime()) {
     expireRecord(record, now.toISOString());
     throw new TaskTransportRuntimeError("TASK_EXPIRED", "Task approval has expired.");
@@ -1681,11 +1938,12 @@ function networkTaskState(state: CollaborationTaskTransportRecord["state"]): Tet
 function createExecutionGrant(
   request: CollaborationTaskRequest,
   target: TaskExecutionTarget,
+  workspace: TaskWorkspaceBinding,
   now: Date
 ): ExecutionGrant {
   const issuedAt = now.toISOString();
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     grantId: randomUUID(),
     taskId: request.taskId,
     requesterTetiId: request.requesterTetiId,
@@ -1696,7 +1954,9 @@ function createExecutionGrant(
     issuedAt,
     expiresAt: new Date(now.getTime() + 2 * 60 * 1_000).toISOString(),
     singleUse: true,
-    workspaceAccess: "isolated_task_directory",
+    workspaceId: workspace.workspaceId,
+    workspaceRevision: workspace.workspaceRevision,
+    workspaceAccess: [...workspace.access],
     userFileAccess: "none",
     commandPolicy: "fixed_adapter_entrypoint",
     networkPolicy: "agent_managed"
@@ -1706,7 +1966,8 @@ function createExecutionGrant(
 function createExecutionAuthority(
   grant: ExecutionGrant,
   request: CallableAdapterTaskRequest,
-  target: TaskExecutionTarget
+  target: TaskExecutionTarget,
+  executionEpoch: number
 ): ExecutionAuthority {
   if (request.adapterId !== target.connectorId
     || request.agentId !== target.childAgentId
@@ -1716,6 +1977,10 @@ function createExecutionAuthority(
   return issueExecutionAuthority(request, {
     authorityId: grant.grantId,
     issuedAt: grant.issuedAt,
-    expiresAt: grant.expiresAt
+    expiresAt: grant.expiresAt,
+    workspaceId: grant.workspaceId,
+    workspaceRevision: grant.workspaceRevision,
+    workspaceAccess: grant.workspaceAccess,
+    executionEpoch
   });
 }

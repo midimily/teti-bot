@@ -94,6 +94,34 @@ test("Task v2 accepts one leading instruction and bounded PNG/JPEG descriptors",
   }), /digest/);
 });
 
+test("Task v5 carries only an abstract Workspace request and rejects every remote path field", () => {
+  const request: CollaborationTaskRequest = {
+    ...taskRequest(),
+    schemaVersion: 5,
+    input: { kind: "parts", parts: [{ kind: "text", text: "Use a controlled Workspace." }] },
+    workspace: { kind: "temporary", access: ["read", "write", "create_artifact"] }
+  };
+  assert.doesNotThrow(() => validateCollaborationTaskRequest(request));
+  assert.throws(() => validateCollaborationTaskRequest({
+    ...request,
+    workspace: {
+      kind: "reference",
+      workspaceId: "workspace-001",
+      workspaceRevision: 1,
+      access: ["read"],
+      path: "/Users/receiver/private"
+    }
+  }), /unsupported field/);
+  assert.throws(() => validateCollaborationTaskRequest({
+    ...request,
+    workspace: {
+      kind: "temporary",
+      access: ["read"],
+      remotePath: "../../escape"
+    }
+  }), /unsupported field/);
+});
+
 test("Task v2 Artifact supports bounded text and image parts without local paths", () => {
   const artifact: TaskArtifactV2 = {
     schemaVersion: 2,
@@ -147,7 +175,7 @@ function taskRequest(): CollaborationTaskRequest {
 
 function executionGrant(): ExecutionGrant {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     grantId: "grant-001",
     taskId: "task-001",
     requesterTetiId: "teti_sender001",
@@ -158,7 +186,9 @@ function executionGrant(): ExecutionGrant {
     issuedAt: createdAt,
     expiresAt: "2026-07-26T00:05:00.000Z",
     singleUse: true,
-    workspaceAccess: "isolated_task_directory",
+    workspaceId: "workspace:task-001",
+    workspaceRevision: 1,
+    workspaceAccess: ["read", "write", "create_artifact"],
     userFileAccess: "none",
     commandPolicy: "fixed_adapter_entrypoint",
     networkPolicy: "agent_managed"

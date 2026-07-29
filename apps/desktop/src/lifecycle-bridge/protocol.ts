@@ -8,6 +8,11 @@ import type {
   CollaborationTaskTransportSnapshot
 } from "../../../../core/task/transport.ts";
 import type { TaskImagePart } from "../../../../core/task/types.ts";
+import type { ExecutionHandle } from "../../../../core/callability/execution.ts";
+import type {
+  ChildMemorySnapshot,
+  MemoryExportResult
+} from "../../../../core/memory/types.ts";
 
 export const LIFECYCLE_PROTOCOL_VERSION = 1;
 export const LIFECYCLE_MAX_LINE_BYTES = 64 * 1024;
@@ -33,11 +38,20 @@ export type LifecycleMethod =
   | "task.approve"
   | "task.reject"
   | "task.cancel"
+  | "task.execution.get"
+  | "task.execution.resume"
+  | "memory.get"
+  | "memory.authorization.set"
+  | "memory.task.save"
+  | "memory.delete"
+  | "memory.export"
   | "passport.get"
   | "passport.sharing.set"
   | "agent.observation.get"
   | "agent.observation.scan"
-  | "agent.observation.override.set";
+  | "agent.observation.override.set"
+  | "osaurus.native.get"
+  | "osaurus.native.set";
 
 export const LIFECYCLE_METHODS: readonly LifecycleMethod[] = [
   "lifecycle.health",
@@ -60,11 +74,20 @@ export const LIFECYCLE_METHODS: readonly LifecycleMethod[] = [
   "task.approve",
   "task.reject",
   "task.cancel",
+  "task.execution.get",
+  "task.execution.resume",
+  "memory.get",
+  "memory.authorization.set",
+  "memory.task.save",
+  "memory.delete",
+  "memory.export",
   "passport.get",
   "passport.sharing.set",
   "agent.observation.get",
   "agent.observation.scan",
-  "agent.observation.override.set"
+  "agent.observation.override.set",
+  "osaurus.native.get",
+  "osaurus.native.set"
 ];
 
 export interface LifecycleRequest {
@@ -101,7 +124,19 @@ export type LifecycleResult =
   | CollaborationTaskSummarySnapshot
   | StagedTaskImageDto
   | ResolvedTaskImageDto
+  | ExecutionHandle
+  | ChildMemorySnapshot
+  | MemoryExportResult
+  | OsaurusNativeChildSettingsDto
+  | boolean
   | null;
+
+export interface OsaurusNativeChildSettingsDto {
+  schemaVersion: 1;
+  agentId: string | null;
+  readiness: "unconfigured" | "checking" | "ready" | "blocked";
+  reasonCode?: string;
+}
 
 export interface StagedTaskImageDto {
   part: TaskImagePart;
@@ -161,6 +196,7 @@ export interface PeerConnectionDto {
   lastHeartbeatReceivedAt?: string;
   remoteProtocolCapabilities?: {
     collaborationProtocolEpoch: number;
+    taskProtocolVersions?: number[];
     passportSchemaVersions?: number[];
     observedAt: string;
   };
@@ -211,6 +247,7 @@ export type LifecycleErrorCode =
   | "CONNECTION_RESOLVE_FAILED"
   | "CONNECTION_REQUEST_FAILED"
   | "TASK_TRANSPORT_FAILED"
+  | "MEMORY_OPERATION_FAILED"
   | "SIDECAR_UNAVAILABLE"
   | "REQUEST_TIMEOUT"
   | "INTERNAL_ERROR";
@@ -236,11 +273,20 @@ export const LIFECYCLE_TIMEOUT_MS: Record<LifecycleMethod, number> = {
   "task.approve": 10_000,
   "task.reject": 10_000,
   "task.cancel": 10_000,
+  "task.execution.get": 2_000,
+  "task.execution.resume": 10_000,
+  "memory.get": 2_000,
+  "memory.authorization.set": 5_000,
+  "memory.task.save": 5_000,
+  "memory.delete": 5_000,
+  "memory.export": 10_000,
   "passport.get": 2_000,
   "passport.sharing.set": 5_000,
   "agent.observation.get": 2_000,
   "agent.observation.scan": 10_000,
-  "agent.observation.override.set": 10_000
+  "agent.observation.override.set": 10_000,
+  "osaurus.native.get": 2_000,
+  "osaurus.native.set": 5_000
 };
 
 export function isLifecycleMethod(value: unknown): value is LifecycleMethod {

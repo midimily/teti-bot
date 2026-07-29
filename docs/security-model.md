@@ -72,6 +72,101 @@ cleanup. `FakeTransport` is test-only. `LoopbackHttpTransport` is reserved but
 disabled, so Beta 0.2.1 introduces no new local HTTP attack surface. Transport
 and Resource Binding details are excluded from both Task and Passport.
 
+Beta 0.2.2 replaces the Host's unversioned task directory with Collaboration
+Workspace v1. Network Task v5 can request only a temporary Workspace or name an
+already confirmed Workspace ID and revision. The receiving Runtime derives all
+disk paths locally, issues a path-free ExecutionGrant/Authority, executes in a
+private Snapshot, and commits only after traversal, symlink, file-type, quota,
+and optimistic-revision checks. Snapshot paths exist only inside the Host and
+Connector execution context.
+
+Beta 0.2.3 activates `LoopbackHttpTransport` for `runtime_facade` Connectors
+only. It accepts exact `http://127.0.0.1:<port>/v1/chat/completions` endpoints,
+never follows redirects, never pools sockets, and refuses any Host Workspace.
+Before sending task text, it verifies the published instance configuration,
+single listener PID, canonical `Osaurus.app` location, Bundle ID, Developer Team
+ID, code-directory hash, and owner of the exact established loopback socket.
+An arbitrary process occupying the configured port therefore cannot qualify.
+
+The Osaurus request contains one user text message, the fixed Bonsai model,
+`stream: true`, and `tools: []`. Teti sends `X-Persist: false` and omits
+`X-Osaurus-Agent-Id`, authorization, Memory, session, Skill, Agent prompt, and
+Workspace data. Strict SSE is buffered and committed only after a valid finish
+reason plus `[DONE]`; malformed streams cannot publish partial text.
+
+The reviewed official Osaurus implementation still passes the full decoded
+request body to its in-memory Insights ring even when `X-Persist: false` is
+present. Because Teti cannot remove that copy without modifying Osaurus, 0.2.3
+qualification fails closed with `OSAURUS_INSIGHTS_BODY_RETENTION`. The Child is
+not registered or advertised until a documented, machine-verifiable
+no-request-body-retention mode is available.
+
+Beta 0.2.4 makes local compute a first-class, exact Passport schema-4 object.
+Only a Host-registered Connector can publish an offer. The wire object is
+limited to capability, `local_model`, `receiver_local`, text modes, concurrency
+one, allow-once, ID, and timestamp; exact-key validation rejects model, Runtime
+endpoint/port, hardware, credential, token, path, or local Agent configuration
+fields.
+
+Task v5 binds both offer and capability, but the receiver alone resolves them
+to a local Connector. The local-compute offer cannot use a legacy capability
+alias or a remote Workspace reference. Its path-free grant uses no Host
+Workspace Snapshot. One execution may run and at most eight may wait; overflow
+fails boundedly, queued tasks remain cancelable, and shutdown cancels the whole
+queue. Osaurus trust, health, fixed-model inventory, and Insights policy are
+rechecked per task, allowing a later task to recover only after a new listener
+PID qualifies.
+
+Beta 0.2.5 persists receiver-local execution identity separately from Task and
+Passport. `providerExecutionId` and `checkpointRef` are never serialized into a
+peer message. The handle file and private checkpoint copies use owner-only
+permissions; checkpoint sources must resolve inside the Host-owned Workspace
+Snapshot before copying.
+
+Crash recovery never implies replay. An orphaned process is marked interrupted,
+and possible-side-effect Connectors cannot become resumable. Workspace-pure
+resume requires explicit Connector support, a captured checkpoint, a new
+single-use Authority, and an incremented epoch. Every terminal callback and
+Artifact publication checks that epoch, making duplicate completion and stale
+process output harmless.
+
+Beta 0.2.6 stores long-term Child Memory only after two receiver-local actions:
+an exact scope authorization and a separate save of a completed incoming text
+Artifact. Merely receiving, approving or completing a peer Task cannot persist
+Memory, even if its prompt asks the Agent to remember private data. Task Memory
+is the current execution input and is not written to the durable Memory file.
+
+Workspace Memory requires both exact `workspaceId + childAgentId` matching and
+a durable Workspace. Child Agent Memory requires an exact Child ID. Retrieval
+rechecks live authorization and expiry against the authoritative store on each
+execution; there is no v1 index that can outlive deletion. At most four records,
+4 KiB each and 8 KiB total are injected as explicitly untrusted reference data.
+The owner-only store and exports expose provenance locally, while no Memory
+record, content, authorization or export path enters Task, Passport, Chatmail,
+Connector context or peer-visible execution state.
+
+Teti's inference request uses an exact verified 127.0.0.1 socket and has no
+Authorization header, so Teti consumes no external API token for this route.
+That statement does not assert that arbitrary third-party Runtime code has no
+egress. The current Insights and local code-signature blockers remain
+fail-closed, and the UI describes the capability as `本地算力`, never
+`免费算力`.
+
+Beta 0.2.7 applies the same signed listener and socket-owner boundary to the
+Osaurus Native Child, then adds a fixed-Agent authority audit. The effective
+permission is the intersection of the one-time Teti grant, the Child descriptor
+and the provider record. Tools, Osaurus Memory, Host Workspace and Autonomous
+Exec must all resolve to deny; missing fields are not treated as safe defaults.
+
+The fixed Agent record is bounded, non-symlinked and hashed. Teti re-reads it
+before every `/agents/{id}/run` request and watches its directory for atomic
+replacement. A digest change removes the public offer and cancels work through
+that Connector. A bounded Workspace context can contain selected relative paths
+and UTF-8 content, but never the Snapshot path or an arbitrary host mount.
+Provider-native Memory remains disabled until provider writes, retrieval and
+deletion can be audited. The existing Insights body-retention blocker applies
+equally to this endpoint.
+
 ## Authentication Recovery
 
 Teti does not transport or persist Agent credentials. If an Adapter detects an

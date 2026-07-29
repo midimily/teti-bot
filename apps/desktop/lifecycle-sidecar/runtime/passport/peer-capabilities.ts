@@ -1,6 +1,7 @@
 import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { validatePassportSchemaVersions } from "../../../../../core/ai-status/negotiation.ts";
+import { validateTaskProtocolVersions } from "../../../../../core/task/transport-validation.ts";
 import { isCanonicalTetiPublicId } from "../../../../../core/identity/public-id.ts";
 
 export const TETI_PEER_PROTOCOL_CAPABILITY_STORE_SCHEMA_VERSION = 2;
@@ -9,6 +10,7 @@ export const MAX_PEER_PROTOCOL_CAPABILITIES = 512;
 export interface PassportPeerProtocolCapability {
   tetiId: string;
   collaborationProtocolEpoch: number;
+  taskProtocolVersions?: number[];
   passportSchemaVersions?: number[];
   observedAt: string;
 }
@@ -129,6 +131,9 @@ function rememberPeerProtocolCapability(
 ): boolean {
   const normalized = {
     ...structuredClone(capability),
+    ...(capability.taskProtocolVersions
+      ? { taskProtocolVersions: [...capability.taskProtocolVersions].sort((left, right) => left - right) }
+      : {}),
     ...(capability.passportSchemaVersions
       ? { passportSchemaVersions: [...capability.passportSchemaVersions].sort((left, right) => left - right) }
       : {})
@@ -140,8 +145,10 @@ function rememberPeerProtocolCapability(
     if (normalized.collaborationProtocolEpoch < existing.collaborationProtocolEpoch) return false;
     if (Date.parse(normalized.observedAt) < Date.parse(existing.observedAt)) return false;
     if (normalized.collaborationProtocolEpoch === existing.collaborationProtocolEpoch
+      && sameVersions(existing.taskProtocolVersions, normalized.taskProtocolVersions)
       && sameVersions(existing.passportSchemaVersions, normalized.passportSchemaVersions)) return false;
     existing.collaborationProtocolEpoch = normalized.collaborationProtocolEpoch;
+    existing.taskProtocolVersions = normalized.taskProtocolVersions;
     existing.passportSchemaVersions = normalized.passportSchemaVersions;
     existing.observedAt = normalized.observedAt;
     return true;
@@ -160,6 +167,7 @@ function validatePeerProtocolCapability(
     || Object.keys(value).some((key) => ![
       "tetiId",
       "collaborationProtocolEpoch",
+      "taskProtocolVersions",
       "passportSchemaVersions",
       "observedAt"
     ].includes(key))
@@ -173,6 +181,9 @@ function validatePeerProtocolCapability(
   }
   if (value.passportSchemaVersions !== undefined) {
     validatePassportSchemaVersions(value.passportSchemaVersions);
+  }
+  if (value.taskProtocolVersions !== undefined) {
+    validateTaskProtocolVersions(value.taskProtocolVersions);
   }
 }
 

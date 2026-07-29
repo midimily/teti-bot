@@ -58,8 +58,8 @@ test("pending connection is rejected before sending", async () => {
         status: "online",
         timestamp: fixedNow,
         collaborationProtocolEpoch: 2,
-        taskProtocolVersions: [4],
-        passportSchemaVersions: [3]
+        taskProtocolVersions: [5],
+        passportSchemaVersions: [4]
       }),
     /Confirmed connection/
   );
@@ -142,8 +142,8 @@ test("Presence accepts explicit Passport capability and rejects malformed versio
       status: "online",
       timestamp: fixedNow,
       collaborationProtocolEpoch: 2,
-      taskProtocolVersions: [4],
-      passportSchemaVersions: [3]
+      taskProtocolVersions: [5],
+      passportSchemaVersions: [4]
     }
   }));
   for (const passportSchemaVersions of [[], [1], [3, 3], [0], [3, 4], [256]]) {
@@ -157,7 +157,7 @@ test("Presence accepts explicit Passport capability and rejects malformed versio
         status: "online",
         timestamp: fixedNow,
         collaborationProtocolEpoch: 2,
-        taskProtocolVersions: [4],
+        taskProtocolVersions: [5],
         passportSchemaVersions
       }
     }), /Passport schema versions/);
@@ -208,8 +208,8 @@ test("duplicate message is ignored after first processing", async () => {
       status: "online",
       timestamp: fixedNow,
       collaborationProtocolEpoch: 2,
-      taskProtocolVersions: [4],
-      passportSchemaVersions: [3]
+      taskProtocolVersions: [5],
+      passportSchemaVersions: [4]
     }
   });
   chatmailAdapter.receivedMessages.push(
@@ -274,13 +274,14 @@ test("Task request and receipt use the existing Application Envelope", async () 
     messageId: "task-envelope"
   });
   const request = {
-    schemaVersion: 4 as const,
+    schemaVersion: 5 as const,
     taskId: "task-001",
     requesterTetiId: "teti_local0001",
     targetTetiId: "teti_remote001",
     offerId: "offer-001",
     capabilityId: "code-analysis",
     input: { kind: "parts" as const, parts: [{ kind: "text" as const, text: "Review this text." }] },
+    workspace: { kind: "temporary" as const, access: ["read", "write", "create_artifact"] as const },
     createdAt: fixedNow,
     expiresAt: "2026-07-11T01:00:00.000Z"
   };

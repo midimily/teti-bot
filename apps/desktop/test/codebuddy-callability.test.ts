@@ -73,7 +73,9 @@ test("CodeBuddy Connector fixes stdin-only, no-tools, no-Hook, no-MCP, ephemeral
     taskId: "task-private",
     capabilityId: "code-analysis",
     workspacePath: "/private/tmp/private-workspace",
-    images: []
+    images: [],
+    executionEpoch: 1,
+    checkpointRef: null
   });
 
   assert.deepEqual(launch.args, [...CODEBUDDY_CONTROLLED_HEADLESS_ARGS]);

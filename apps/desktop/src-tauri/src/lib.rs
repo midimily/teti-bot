@@ -22,6 +22,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             lifecycle_bridge::lifecycle_request,
             window::set_island_mode,
+            window::set_connection_detail_height,
             window::position_island,
             window::show_island,
             window::hide_island,

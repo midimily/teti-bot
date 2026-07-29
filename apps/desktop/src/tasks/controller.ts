@@ -8,6 +8,7 @@ import type { LifecycleBridgeClient } from "../provisioning/bridge-lifecycle.ts"
 import type { TauriInvoker } from "../platform/tauri-api.ts";
 import type { TauriNotchWindowController } from "../platform/tauri-notch-window.ts";
 import type { StagedTaskImageDto } from "../lifecycle-bridge/protocol.ts";
+import type { ExecutionHandle } from "../../../../core/callability/execution.ts";
 
 const TASK_REFRESH_INTERVAL_MS = 2_000;
 const EMPTY_SUMMARY: CollaborationTaskSummarySnapshot = {
@@ -26,9 +27,11 @@ export interface TaskControllerSnapshot {
   screen: TaskWorkspaceScreen;
   summary: CollaborationTaskSummarySnapshot;
   selectedTask: CollaborationTaskTransportRecord | null;
+  selectedExecution: ExecutionHandle | null;
   selectedImagePaths: Record<string, string>;
   draft: {
     connectionRequestId: string;
+    offerId: string;
     capabilityId: string;
     text: string;
     images: TaskDraftImage[];
@@ -51,6 +54,8 @@ export interface TaskClient {
   approve(taskId: string): Promise<CollaborationTaskTransportRecord>;
   reject(taskId: string): Promise<CollaborationTaskTransportRecord>;
   cancel(taskId: string): Promise<CollaborationTaskTransportRecord>;
+  getExecution(taskId: string): Promise<ExecutionHandle | null>;
+  resume(taskId: string): Promise<CollaborationTaskTransportRecord>;
 }
 
 export class TaskController {
@@ -66,8 +71,9 @@ export class TaskController {
     screen: "inbox",
     summary: structuredClone(EMPTY_SUMMARY),
     selectedTask: null,
+    selectedExecution: null,
     selectedImagePaths: {},
-    draft: { connectionRequestId: "", capabilityId: "", text: "", images: [] },
+    draft: { connectionRequestId: "", offerId: "", capabilityId: "", text: "", images: [] },
     busy: false
   };
   private timer: unknown;
@@ -112,11 +118,12 @@ export class TaskController {
     void this.refresh();
   }
 
-  openCompose(connectionRequestId = "", capabilityId = ""): void {
+  openCompose(connectionRequestId = "", capabilityId = "", offerId = ""): void {
     this.snapshotValue.open = true;
     this.snapshotValue.screen = "compose";
     this.snapshotValue.draft.connectionRequestId ||= connectionRequestId;
     this.snapshotValue.draft.capabilityId ||= capabilityId;
+    this.snapshotValue.draft.offerId ||= offerId;
     delete this.snapshotValue.error;
     this.onChange();
     void this.notchWindow.setMode("task", "compose-task").catch(() => undefined);
@@ -148,13 +155,15 @@ export class TaskController {
     }
     this.snapshotValue.screen = "inbox";
     this.snapshotValue.selectedTask = null;
+    this.snapshotValue.selectedExecution = null;
     this.snapshotValue.selectedImagePaths = {};
     delete this.snapshotValue.error;
     this.onChange();
   }
 
-  updateDraft(input: Partial<Pick<TaskControllerSnapshot["draft"], "connectionRequestId" | "capabilityId" | "text">>): void {
+  updateDraft(input: Partial<Pick<TaskControllerSnapshot["draft"], "connectionRequestId" | "offerId" | "capabilityId" | "text">>): void {
     if (input.connectionRequestId !== undefined) this.snapshotValue.draft.connectionRequestId = input.connectionRequestId;
+    if (input.offerId !== undefined) this.snapshotValue.draft.offerId = input.offerId;
     if (input.capabilityId !== undefined) this.snapshotValue.draft.capabilityId = input.capabilityId;
     if (input.text !== undefined) this.snapshotValue.draft.text = [...input.text].slice(0, 6_000).join("");
     delete this.snapshotValue.error;
@@ -164,6 +173,7 @@ export class TaskController {
     const draft = this.snapshotValue.draft;
     return !this.snapshotValue.busy
       && Boolean(draft.connectionRequestId)
+      && Boolean(draft.offerId)
       && Boolean(draft.capabilityId)
       && Boolean(draft.text.trim());
   }
@@ -191,7 +201,7 @@ export class TaskController {
 
   async send(): Promise<void> {
     const draft = this.snapshotValue.draft;
-    if (!draft.connectionRequestId || !draft.capabilityId || !draft.text.trim()) {
+    if (!draft.connectionRequestId || !draft.offerId || !draft.capabilityId || !draft.text.trim()) {
       this.snapshotValue.error = "请选择已建联的 Teti 和能力，并写明任务。";
       this.onChange();
       return;
@@ -199,14 +209,16 @@ export class TaskController {
     await this.run(async () => {
       const record = await this.client.send({
         connectionRequestId: draft.connectionRequestId,
+        offerId: draft.offerId,
         capabilityId: draft.capabilityId,
         text: draft.text.trim(),
         attachments: draft.images.map((image) => structuredClone(image.part))
       });
       this.snapshotValue.selectedTask = record;
+      await this.loadSelectedExecution(record.request.taskId);
       await this.loadSelectedImages(record);
       this.snapshotValue.screen = "detail";
-      this.snapshotValue.draft = { connectionRequestId: "", capabilityId: "", text: "", images: [] };
+      this.snapshotValue.draft = { connectionRequestId: "", offerId: "", capabilityId: "", text: "", images: [] };
       await this.refreshSummary();
     });
   }
@@ -226,6 +238,7 @@ export class TaskController {
   async select(taskId: string): Promise<void> {
     await this.run(async () => {
       this.snapshotValue.selectedTask = await this.client.get(taskId);
+      await this.loadSelectedExecution(taskId);
       await this.loadSelectedImages(this.snapshotValue.selectedTask);
       this.snapshotValue.screen = "detail";
     });
@@ -243,6 +256,10 @@ export class TaskController {
     return this.mutateSelected((taskId) => this.client.cancel(taskId));
   }
 
+  resume(): Promise<void> {
+    return this.mutateSelected((taskId) => this.client.resume(taskId));
+  }
+
   dispose(): void {
     this.disposed = true;
     this.active = false;
@@ -257,6 +274,7 @@ export class TaskController {
     if (!taskId) return;
     await this.run(async () => {
       this.snapshotValue.selectedTask = await operation(taskId);
+      await this.loadSelectedExecution(taskId);
       await this.loadSelectedImages(this.snapshotValue.selectedTask);
       await this.refreshSummary();
     });
@@ -270,15 +288,20 @@ export class TaskController {
     }
     this.refreshInFlight = true;
     try {
+      const previousPresentation = this.refreshPresentationKey();
       await this.refreshSummary();
       const taskId = this.snapshotValue.selectedTask?.request.taskId;
       if (taskId) {
         this.snapshotValue.selectedTask = await this.client.get(taskId);
+        await this.loadSelectedExecution(taskId);
         await this.loadSelectedImages(this.snapshotValue.selectedTask);
       }
-      // The composer owns a live textarea. Re-rendering it on every Runtime
-      // poll destroys the focused DOM node and makes normal typing impossible.
-      if (!(this.snapshotValue.open && this.snapshotValue.screen === "compose")) {
+      // Runtime summaries carry a fresh generatedAt value on every read. Only
+      // visible Task semantics may notify the global renderer; otherwise an
+      // unrelated open Peer Passport accordion is destroyed every two seconds.
+      const presentationChanged = previousPresentation !== this.refreshPresentationKey();
+      if (presentationChanged
+        && !(this.snapshotValue.open && this.snapshotValue.screen === "compose")) {
         this.onChange();
       }
     } catch {
@@ -315,6 +338,52 @@ export class TaskController {
       }
     }
     this.snapshotValue.selectedImagePaths = paths;
+  }
+
+  private async loadSelectedExecution(taskId: string): Promise<void> {
+    try {
+      this.snapshotValue.selectedExecution = await this.client.getExecution(taskId);
+    } catch {
+      this.snapshotValue.selectedExecution = null;
+    }
+  }
+
+  private refreshPresentationKey(): string {
+    const { generatedAt: _generatedAt, tasks, ...summaryState } = this.snapshotValue.summary;
+    const summary = {
+      ...summaryState,
+      tasks: tasks.map((task) => {
+        const { updatedAt: _updatedAt, expiresAt: _expiresAt, ...visibleTask } = task;
+        return visibleTask;
+      })
+    };
+    const execution = this.snapshotValue.selectedExecution;
+    const detailVisible = this.snapshotValue.open && this.snapshotValue.screen === "detail";
+    const selectedTask = detailVisible && this.snapshotValue.selectedTask
+      ? (() => {
+          const { updatedAt: _updatedAt, ...visibleTask } = this.snapshotValue.selectedTask!;
+          return visibleTask;
+        })()
+      : null;
+    return JSON.stringify({
+      summary,
+      selectedTask,
+      selectedExecution: detailVisible && execution ? {
+        taskId: execution.taskId,
+        workspaceId: execution.workspaceId,
+        childAgentId: execution.childAgentId,
+        connectorId: execution.connectorId,
+        executionEpoch: execution.executionEpoch,
+        progress: {
+          state: execution.progress.state,
+          completedUnits: execution.progress.completedUnits,
+          totalUnits: execution.progress.totalUnits,
+          message: execution.progress.message
+        },
+        resumeCapability: execution.resumeCapability
+      } : null,
+      selectedImagePaths: detailVisible ? this.snapshotValue.selectedImagePaths : {}
+    });
   }
 
   private async run(operation: () => Promise<void>): Promise<void> {
@@ -374,6 +443,14 @@ export class BridgeTaskClient implements TaskClient {
   cancel(taskId: string): Promise<CollaborationTaskTransportRecord> {
     return this.bridge.request("task.cancel", { taskId }) as Promise<CollaborationTaskTransportRecord>;
   }
+
+  getExecution(taskId: string): Promise<ExecutionHandle | null> {
+    return this.bridge.request("task.execution.get", { taskId }) as Promise<ExecutionHandle | null>;
+  }
+
+  resume(taskId: string): Promise<CollaborationTaskTransportRecord> {
+    return this.bridge.request("task.execution.resume", { taskId }) as Promise<CollaborationTaskTransportRecord>;
+  }
 }
 
 export class MockTaskClient implements TaskClient {
@@ -385,6 +462,8 @@ export class MockTaskClient implements TaskClient {
   async approve(): Promise<CollaborationTaskTransportRecord> { throw new Error("TASK_NOT_FOUND"); }
   async reject(): Promise<CollaborationTaskTransportRecord> { throw new Error("TASK_NOT_FOUND"); }
   async cancel(): Promise<CollaborationTaskTransportRecord> { throw new Error("TASK_NOT_FOUND"); }
+  async getExecution(): Promise<ExecutionHandle | null> { return null; }
+  async resume(): Promise<CollaborationTaskTransportRecord> { throw new Error("TASK_RESUME_UNAVAILABLE"); }
 }
 
 function taskErrorMessage(error: unknown): string {

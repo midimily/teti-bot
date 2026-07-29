@@ -1,5 +1,5 @@
 import { FirstLaunchCoordinator } from "./first-launch/coordinator.ts";
-import { Check, ClipboardList, Link2, X, createElement } from "lucide";
+import { Check, ChevronDown, ClipboardList, Link2, X, createElement } from "lucide";
 import { countUnicodeCharacters, truncateTetiDisplayName } from "../../../core/account/display-name.ts";
 import type { PassportConnectionSnapshot } from "../../../core/passport/snapshot.ts";
 import type { FirstLaunchSnapshot } from "./first-launch/state-machine.ts";
@@ -14,6 +14,7 @@ import {
 } from "./provisioning/bridge-lifecycle.ts";
 import {
   BridgePeerConnectionClient,
+  CONNECTION_DETAILS_TRANSITION_MS,
   MockPeerConnectionClient,
   PeerConnectionController,
   type PeerConnectionSnapshot
@@ -22,6 +23,7 @@ import { CONNECT_PANEL_PLACEHOLDER } from "./connections/connect-panel-state.ts"
 import {
   createRemoteTetiAvatar
 } from "./connections/remote-teti-avatar.ts";
+import { resolveConnectionDetailLayout } from "./connections/detail-layout.ts";
 import {
   BridgePassportClient,
   MockPassportClient,
@@ -32,7 +34,8 @@ import {
 import {
   createAiPassportPanel,
   createPassportSettingsPanel,
-  createRemotePassport
+  createRemotePassport,
+  createRemotePassportDetails
 } from "./passport/view.ts";
 import {
   toPassportViewModel,
@@ -50,6 +53,11 @@ import {
   TaskController
 } from "./tasks/controller.ts";
 import { createTaskWorkspace, taskComposeRenderKey } from "./tasks/view.ts";
+import {
+  BridgeChildMemoryClient,
+  MemoryController,
+  MockChildMemoryClient
+} from "./memory/controller.ts";
 import "./styles.css";
 
 const aiToolsButtonIconUrl = new URL("../assets/ai-tools-btn.png", import.meta.url).href;
@@ -67,6 +75,7 @@ export interface DesktopApp {
   connections: PeerConnectionController;
   passport: PassportController;
   tasks: TaskController;
+  memory: MemoryController;
   config: ProvisioningModeConfig;
   render(): void;
   dispose(): void;
@@ -174,6 +183,10 @@ export async function createDesktopApp(options: DesktopAppOptions): Promise<Desk
     },
     schedule: baseSchedule
   });
+  const memory = new MemoryController({
+    client: bridge ? new BridgeChildMemoryClient(bridge) : new MockChildMemoryClient(),
+    onChange: () => app?.render()
+  });
   if (options.tauri.onFocusChanged) {
     stopFocusListener = await options.tauri.onFocusChanged((focused) => {
       if (protocolBlocked) {
@@ -215,6 +228,7 @@ export async function createDesktopApp(options: DesktopAppOptions): Promise<Desk
     connections,
     passport,
     tasks,
+    memory,
     config: selection.config,
     render: () => {
       const wasProtocolBlocked = protocolBlocked;
@@ -225,11 +239,13 @@ export async function createDesktopApp(options: DesktopAppOptions): Promise<Desk
         const mode = tasks.snapshot.open
           ? "task"
           : connections.snapshot.open
-            ? "onboarding"
+            ? connections.snapshot.expandedRequestId
+              ? "connection_detail"
+              : "onboarding"
             : visualModeForViewModel(toFirstLaunchViewModel(coordinator.snapshot));
         void notchWindow.setMode(mode, "peer-protocol-compatible").catch(() => undefined);
       }
-      renderSnapshot(options.root, coordinator.snapshot, selection.config, coordinator, connections, passport, tasks);
+      renderSnapshot(options.root, coordinator.snapshot, selection.config, coordinator, connections, passport, tasks, memory);
     },
     dispose: () => {
       if (disposed) return;
@@ -241,6 +257,7 @@ export async function createDesktopApp(options: DesktopAppOptions): Promise<Desk
       options.root.removeEventListener(TETI_BOT_OPEN_SETTLED_EVENT, handleBrandWebsiteOpenSettled);
       passport.stop();
       tasks.dispose();
+      memory.dispose();
       connections.dispose();
     }
   };
@@ -248,6 +265,7 @@ export async function createDesktopApp(options: DesktopAppOptions): Promise<Desk
   await coordinator.initialize();
   passport.start();
   tasks.start();
+  await memory.start();
   app.render();
   await notchWindow.setMode(visualModeForViewModel(toFirstLaunchViewModel(coordinator.snapshot)), "initial-render");
 
@@ -261,7 +279,8 @@ export function renderSnapshot(
   coordinator?: FirstLaunchCoordinator,
   connections?: PeerConnectionController,
   passport?: PassportController,
-  tasks?: TaskController
+  tasks?: TaskController,
+  memory?: MemoryController
 ): void {
   const viewModel = toFirstLaunchViewModel(snapshot);
   const blockedPeers = blockingPeerCompatibility(
@@ -293,17 +312,37 @@ export function renderSnapshot(
       return;
     }
   }
-  root.replaceChildren(
-    taskOpen
-      ? createTaskWorkspace(
-          tasks!,
-          passport?.snapshot.passport.connections ?? [],
-          passport?.snapshot.passport.localPassport
-        )
-      : peerPanelOpen
-        ? createConnectionIsland(config, connections, passport, tasks)
-        : createIsland(viewModel, config, coordinator, connections, passport, tasks)
-  );
+  const focusKey = focusKeyWithin(root);
+  const nextContent = taskOpen
+    ? createTaskWorkspace(
+        tasks!,
+        passport?.snapshot.passport.connections ?? [],
+        passport?.snapshot.passport.localPassport,
+        memory
+      )
+    : peerPanelOpen
+      ? createConnectionIsland(config, connections, passport, tasks, memory)
+      : createIsland(viewModel, config, coordinator, connections, passport, tasks, memory);
+  root.replaceChildren(nextContent);
+  restoreFocusKey(root, focusKey);
+}
+
+function focusKeyWithin(root: HTMLElement): string | undefined {
+  const active = root.ownerDocument.activeElement;
+  return active instanceof HTMLElement && root.contains(active)
+    ? active.dataset.focusKey
+    : undefined;
+}
+
+function restoreFocusKey(root: HTMLElement, focusKey: string | undefined): void {
+  if (!focusKey) return;
+  queueMicrotask(() => {
+    const target = [...root.querySelectorAll<HTMLElement>("[data-focus-key]")]
+      .find((element) => element.dataset.focusKey === focusKey);
+    if (target?.isConnected && root.ownerDocument.activeElement !== target) {
+      target.focus({ preventScroll: true });
+    }
+  });
 }
 
 function hasBlockingPeerCompatibility(
@@ -365,14 +404,15 @@ function createIsland(
   coordinator?: FirstLaunchCoordinator,
   connections?: PeerConnectionController,
   passport?: PassportController,
-  tasks?: TaskController
+  tasks?: TaskController,
+  memory?: MemoryController
 ): HTMLElement {
   const island = document.createElement("section");
   island.className = `teti-island teti-island--${viewModel.panel} teti-island--${viewModel.character}`;
   island.setAttribute("aria-label", viewModel.title);
 
   if (viewModel.panel === "expanded") {
-    island.append(createIslandHeader(config, passport, tasks, connections));
+    island.append(createIslandHeader(config, passport, tasks, connections, memory));
   }
 
   const face = document.createElement(viewModel.panel === "collapsed" && connections ? "button" : "div");
@@ -443,7 +483,15 @@ function createIsland(
     input.addEventListener("keydown", (event) => {
       if (event.key === "Enter" && coordinator && !viewModel.input?.disabled) {
         event.preventDefault();
-        void submitAndRender(coordinator, island.ownerDocument.getElementById("app"), config, connections, passport, tasks);
+        void submitAndRender(
+          coordinator,
+          island.ownerDocument.getElementById("app"),
+          config,
+          connections,
+          passport,
+          tasks,
+          memory
+        );
       }
     });
     content.append(input);
@@ -495,7 +543,8 @@ function createIsland(
           coordinator,
           connections,
           passport,
-          tasks
+          tasks,
+          memory
         );
         return;
       }
@@ -509,7 +558,8 @@ function createIsland(
           coordinator,
           connections,
           passport,
-          tasks
+          tasks,
+          memory
         );
         return;
       }
@@ -521,7 +571,8 @@ function createIsland(
           config,
           connections,
           passport,
-          tasks
+          tasks,
+          memory
         );
         return;
       }
@@ -532,7 +583,8 @@ function createIsland(
         config,
         connections,
         passport,
-        tasks
+        tasks,
+        memory
       );
     });
     content.append(button);
@@ -546,14 +598,17 @@ function createConnectionIsland(
   config: ProvisioningModeConfig,
   controller: PeerConnectionController,
   passport?: PassportController,
-  tasks?: TaskController
+  tasks?: TaskController,
+  memory?: MemoryController
 ): HTMLElement {
   const snapshot = controller.snapshot;
   const passportViewModel = toPassportViewModel(passport?.snapshot ?? defaultPassportSnapshot());
   const island = document.createElement("section");
-  island.className = "teti-island teti-island--expanded teti-island--connections";
+  island.className = `teti-island teti-island--expanded teti-island--connections${
+    snapshot.expandedRequestId ? " has-peer-details" : ""
+  }`;
   island.setAttribute("aria-label", "连接其他 Teti");
-  island.append(createConnectionHeader(config, passport, tasks, controller));
+  island.append(createConnectionHeader(config, passport, tasks, controller, memory));
 
   const panelState = snapshot.connectPanel.state;
   const face = document.createElement("button");
@@ -644,14 +699,16 @@ function createConnectionIsland(
   content.append(stage);
 
   if (passportViewModel.connections.length > 0) {
-    const list = document.createElement("div");
+    const list = document.createElement("ul");
     list.className = "teti-connection-list";
+    list.setAttribute("aria-label", "已建联 Teti 列表");
     for (const connection of passportViewModel.connections) {
       list.append(createConnectionRow(
         connection,
         snapshot.busy,
         connection.requestId === snapshot.highlightedRequestId,
-        controller
+        controller,
+        connection.requestId === snapshot.expandedRequestId
       ));
     }
     content.append(list);
@@ -659,6 +716,7 @@ function createConnectionIsland(
 
   island.append(content);
   installConnectionPanelInteractions(island, controller, passport);
+  if (snapshot.expandedRequestId) scheduleConnectionDetailLayout(island, controller);
   return island;
 }
 
@@ -755,6 +813,14 @@ function installConnectionPanelInteractions(
       }
       return;
     }
+    const expandedDisclosure = island.querySelector<HTMLButtonElement>(
+      ".teti-connection-disclosure[aria-expanded='true']"
+    );
+    if (expandedDisclosure) {
+      updateConnectionAccordion(island, null, controller);
+      expandedDisclosure.focus({ preventScroll: true });
+      return;
+    }
     if (!controller.handleEscape()) controller.close("peer-panel-escape");
   });
 }
@@ -773,23 +839,31 @@ function createConnectionRow(
   connection: ConnectionCardViewModel,
   busy: boolean,
   highlighted: boolean,
-  controller: PeerConnectionController
+  controller: PeerConnectionController,
+  expanded: boolean
 ): HTMLElement {
-  const row = document.createElement("div");
-  row.className = `teti-connection-row is-${connection.state.toLowerCase()}${highlighted ? " is-highlighted" : ""}`;
+  const row = document.createElement("li");
+  row.className = `teti-connection-row is-${connection.state.toLowerCase()}${
+    highlighted ? " is-highlighted" : ""
+  }${expanded ? " is-expanded" : ""}`;
+  row.dataset.requestId = connection.requestId;
+  const main = document.createElement("div");
+  main.className = "teti-connection-row-main";
   const identity = document.createElement("div");
   identity.className = "teti-connection-identity";
   const name = document.createElement("strong");
+  name.id = `${connectionDetailsId(connection.requestId)}-label`;
   name.textContent = connection.displayName;
-  const address = document.createElement("small");
-  address.textContent = connection.address;
-  identity.append(name, address);
+  name.title = connection.identityLabel;
+  const publicId = document.createElement("small");
+  publicId.textContent = connection.publicIdCode;
+  identity.append(name, publicId);
 
   const state = document.createElement("div");
   state.className = "teti-connection-state";
   if (connection.state === "Confirmed") {
     row.classList.add(`is-${connection.reachability}`);
-    row.prepend(createRemoteTetiAvatar({
+    main.append(createRemoteTetiAvatar({
       reachability: connection.reachability,
       label: connection.reachabilityLabel,
       size: 28
@@ -808,17 +882,189 @@ function createConnectionRow(
   } else {
     state.textContent = connection.state;
   }
-  row.append(identity, state);
+  main.append(identity, state);
+  if (connection.state === "Confirmed") {
+    const disclosure = iconButton(
+      ChevronDown,
+      `${expanded ? "收起" : "展开"} ${connection.identityLabel} 的 AI Passport 详情`,
+      () => updateConnectionAccordion(
+        row.closest<HTMLElement>(".teti-island--connections")!,
+        disclosure.getAttribute("aria-expanded") === "true" ? null : connection.requestId,
+        controller
+      )
+    );
+    disclosure.classList.add("teti-connection-disclosure");
+    disclosure.dataset.focusKey = connectionFocusKey(connection.requestId);
+    disclosure.setAttribute("aria-controls", connectionDetailsId(connection.requestId));
+    disclosure.setAttribute("aria-expanded", String(expanded));
+    main.append(disclosure);
+    row.append(main, createConnectionDetails(connection, expanded));
+  } else {
+    row.append(main);
+  }
   return row;
+}
+
+function createConnectionDetails(
+  connection: ConnectionCardViewModel,
+  expanded: boolean
+): HTMLElement {
+  const panel = document.createElement("section");
+  panel.className = `teti-peer-details${expanded ? " is-expanded" : ""}`;
+  panel.id = connectionDetailsId(connection.requestId);
+  panel.setAttribute("aria-labelledby", `${panel.id}-label`);
+  panel.setAttribute("aria-hidden", String(!expanded));
+  panel.inert = !expanded;
+  const inner = document.createElement("div");
+  inner.className = "teti-peer-details-inner";
+  inner.append(createRemotePassportDetails(connection.passport));
+  panel.append(inner);
+  return panel;
+}
+
+function updateConnectionAccordion(
+  island: HTMLElement,
+  requestId: string | null,
+  controller: PeerConnectionController
+): void {
+  island.classList.toggle("has-peer-details", requestId !== null);
+  for (const row of island.querySelectorAll<HTMLElement>(".teti-connection-row.is-confirmed")) {
+    const isExpanded = requestId !== null && row.dataset.requestId === requestId;
+    row.classList.toggle("is-expanded", isExpanded);
+    const disclosure = row.querySelector<HTMLButtonElement>(".teti-connection-disclosure");
+    const details = row.querySelector<HTMLElement>(".teti-peer-details");
+    if (disclosure) {
+      disclosure.setAttribute("aria-expanded", String(isExpanded));
+      const identity = row.querySelector<HTMLElement>(".teti-connection-identity strong")?.textContent ?? "该节点";
+      const label = `${isExpanded ? "收起" : "展开"} ${identity} 的 AI Passport 详情`;
+      disclosure.setAttribute("aria-label", label);
+      disclosure.title = label;
+    }
+    if (details) {
+      details.classList.toggle("is-expanded", isExpanded);
+      details.setAttribute("aria-hidden", String(!isExpanded));
+      details.inert = !isExpanded;
+    }
+  }
+  if (requestId === null) {
+    island.style.removeProperty("--teti-peer-details-max-height");
+    island.classList.remove("has-constrained-peer-list");
+    controller.closeDetails({ notify: false });
+    return;
+  }
+  controller.openDetails(requestId, { notify: false });
+  const expandedRow = [...island.querySelectorAll<HTMLElement>(".teti-connection-row")]
+    .find((row) => row.dataset.requestId === requestId);
+  scheduleConnectionDetailLayout(island, controller);
+  requestAnimationFrame(() => expandedRow?.scrollIntoView({
+    block: "nearest",
+    behavior: prefersReducedMotion(island) ? "auto" : "smooth"
+  }));
+}
+
+function scheduleConnectionDetailLayout(
+  island: HTMLElement,
+  controller: PeerConnectionController
+): void {
+  const view = island.ownerDocument.defaultView;
+  const details = island.querySelector<HTMLElement>(".teti-peer-details.is-expanded");
+  if (!view || !details) return;
+
+  const generation = String(Number(details.dataset.layoutGeneration ?? "0") + 1);
+  details.dataset.layoutGeneration = generation;
+  const measure = () => {
+    view.requestAnimationFrame(() => {
+      view.requestAnimationFrame(() => {
+        if (details.dataset.layoutGeneration === generation) {
+          syncConnectionDetailLayout(island, controller, true);
+        }
+      });
+    });
+  };
+
+  measure();
+  if (prefersReducedMotion(island)) return;
+
+  let fallback: number | undefined;
+  const settle = () => {
+    if (fallback !== undefined) view.clearTimeout(fallback);
+    details.removeEventListener("transitionend", onTransitionEnd);
+    measure();
+  };
+  const onTransitionEnd = (event: TransitionEvent) => {
+    if (event.target === details && event.propertyName === "grid-template-rows") settle();
+  };
+  details.addEventListener("transitionend", onTransitionEnd);
+  fallback = view.setTimeout(settle, CONNECTION_DETAILS_TRANSITION_MS + 60);
+}
+
+function syncConnectionDetailLayout(
+  island: HTMLElement,
+  controller: PeerConnectionController,
+  settleAfterNativeResize: boolean
+): void {
+  if (!island.isConnected || !island.classList.contains("has-peer-details")) return;
+  const content = island.querySelector<HTMLElement>(".teti-connection-content");
+  const details = island.querySelector<HTMLElement>(".teti-peer-details.is-expanded");
+  const sections = details?.querySelector<HTMLElement>(".teti-peer-details-sections");
+  const view = island.ownerDocument.defaultView;
+  if (!content || !details || !sections || !view) return;
+
+  const islandStyle = view.getComputedStyle(island);
+  const verticalChrome = cssPixels(islandStyle.paddingTop) + cssPixels(islandStyle.paddingBottom);
+  const hiddenDetailOverflow = Math.max(0, sections.scrollHeight - sections.clientHeight);
+  const naturalDetailHeight = sections.scrollHeight;
+  const naturalWindowHeight = verticalChrome + content.scrollHeight + hiddenDetailOverflow;
+  const screenHeight = cssPixels(
+    island.ownerDocument.documentElement.style.getPropertyValue("--teti-screen-height")
+  ) || view.screen.availHeight;
+  const layout = resolveConnectionDetailLayout(
+    naturalWindowHeight,
+    naturalDetailHeight,
+    screenHeight
+  );
+
+  island.style.setProperty(
+    "--teti-peer-details-max-height",
+    `${Math.max(0, layout.detailViewportHeight)}px`
+  );
+  island.classList.toggle("has-constrained-peer-list", layout.listConstrained);
+  const resized = controller.resizeDetails(layout.windowHeight);
+  if (!settleAfterNativeResize) return;
+  void resized.then(() => {
+    view.requestAnimationFrame(() => {
+      view.requestAnimationFrame(() => syncConnectionDetailLayout(island, controller, false));
+    });
+  });
+}
+
+function cssPixels(value: string): number {
+  const parsed = Number.parseFloat(value);
+  return Number.isFinite(parsed) ? Math.max(0, parsed) : 0;
+}
+
+function prefersReducedMotion(element: HTMLElement): boolean {
+  return element.ownerDocument.defaultView
+    ?.matchMedia("(prefers-reduced-motion: reduce)").matches ?? false;
+}
+
+function connectionFocusKey(requestId: string): string {
+  return `peer:${requestId}`;
+}
+
+function connectionDetailsId(requestId: string): string {
+  const safeId = requestId.replace(/[^a-zA-Z0-9_-]+/g, "-").slice(0, 72) || "peer";
+  return `teti-peer-details-${safeId}`;
 }
 
 function createConnectionHeader(
   config: ProvisioningModeConfig,
   passport?: PassportController,
   tasks?: TaskController,
-  connections?: PeerConnectionController
+  connections?: PeerConnectionController,
+  memory?: MemoryController
 ): HTMLElement {
-  return createIslandHeader(config, passport, tasks, connections);
+  return createIslandHeader(config, passport, tasks, connections, memory);
 }
 
 function iconButton(
@@ -849,7 +1095,8 @@ function createIslandHeader(
   _config: ProvisioningModeConfig,
   passport?: PassportController,
   tasks?: TaskController,
-  connections?: PeerConnectionController
+  connections?: PeerConnectionController,
+  memory?: MemoryController
 ): HTMLElement {
   const header = document.createElement("header");
   header.className = "teti-header";
@@ -861,7 +1108,12 @@ function createIslandHeader(
   const snapshot = passport?.snapshot ?? defaultPassportSnapshot();
   const viewModel = toPassportViewModel(snapshot);
   const statusPanel = createAiPassportPanel(viewModel.aiPanel);
-  const sharingPanel = createPassportSettingsPanel(viewModel.settings, passport);
+  const sharingPanel = createPassportSettingsPanel(
+    viewModel.settings,
+    passport,
+    memory,
+    viewModel.aiPanel.agents
+  );
   const statusButton = createHeaderButton(
     null,
     `查看 AI Passport：${viewModel.aiPanel.resources[0]?.planLabel ?? "暂时无法确认"}`,
@@ -892,10 +1144,21 @@ function createIslandHeader(
     taskButton.classList.add("has-task-badge");
     taskButton.dataset.count = String(Math.min(pendingTasks, 9));
   }
-  controls.append(taskButton, statusButton, sharingButton, statusPanel, sharingPanel);
+  controls.append(
+    taskButton,
+    createHeaderPanelAnchor(statusButton, statusPanel),
+    createHeaderPanelAnchor(sharingButton, sharingPanel)
+  );
 
   header.append(brand, controls);
   return header;
+}
+
+function createHeaderPanelAnchor(button: HTMLButtonElement, panel: HTMLElement): HTMLElement {
+  const anchor = document.createElement("div");
+  anchor.className = "teti-header-panel-anchor";
+  anchor.append(button, panel);
+  return anchor;
 }
 
 function createHeaderButton(
@@ -947,11 +1210,14 @@ function defaultPassportSnapshot(): PassportControllerSnapshot {
     agentManagement: emptyAgentManagementSnapshot(),
     sharingBusy: false,
     agentBusy: false,
+    osaurusNative: { schemaVersion: 1, agentId: null, readiness: "unconfigured" },
+    osaurusNativeBusy: false,
     openPanel: null
   };
 }
 
 interface ScreenMetrics {
+  height?: number;
   hasNotch?: boolean;
   safeTopInset?: number;
   notchWidth?: number;
@@ -963,6 +1229,7 @@ async function syncScreenMetrics(tauri: TauriInvoker, root: HTMLElement): Promis
     const metrics = await tauri.invoke<ScreenMetrics | null>("current_monitor_info");
     const hasNotch = Boolean(metrics?.hasNotch);
     root.dataset.hasNotch = String(hasNotch);
+    root.style.setProperty("--teti-screen-height", `${nonNegative(metrics?.height)}px`);
     root.style.setProperty("--teti-safe-top-inset", `${hasNotch ? nonNegative(metrics?.safeTopInset) : 0}px`);
     root.style.setProperty("--teti-notch-width", `${nonNegative(metrics?.notchWidth)}px`);
     root.style.setProperty("--teti-notch-height", `${nonNegative(metrics?.notchHeight)}px`);
@@ -993,11 +1260,12 @@ async function submitAndRender(
   config: ProvisioningModeConfig,
   connections?: PeerConnectionController,
   passport?: PassportController,
-  tasks?: TaskController
+  tasks?: TaskController,
+  memory?: MemoryController
 ): Promise<void> {
   const pending = coordinator.submitName();
   if (root) {
-    renderSnapshot(root, coordinator.snapshot, config, coordinator, connections, passport, tasks);
+    renderSnapshot(root, coordinator.snapshot, config, coordinator, connections, passport, tasks, memory);
   }
 
   await pending;
@@ -1006,7 +1274,7 @@ async function submitAndRender(
     await passport.refreshNow();
   }
   if (root) {
-    renderSnapshot(root, coordinator.snapshot, config, coordinator, connections, passport, tasks);
+    renderSnapshot(root, coordinator.snapshot, config, coordinator, connections, passport, tasks, memory);
   }
 }
 
@@ -1016,16 +1284,17 @@ async function retryDiscoveryAndRender(
   config: ProvisioningModeConfig,
   connections?: PeerConnectionController,
   passport?: PassportController,
-  tasks?: TaskController
+  tasks?: TaskController,
+  memory?: MemoryController
 ): Promise<void> {
   const pending = coordinator.retryDiscoveryRegistration();
   if (root) {
-    renderSnapshot(root, coordinator.snapshot, config, coordinator, connections, passport, tasks);
+    renderSnapshot(root, coordinator.snapshot, config, coordinator, connections, passport, tasks, memory);
   }
 
   await pending;
   if (root) {
-    renderSnapshot(root, coordinator.snapshot, config, coordinator, connections, passport, tasks);
+    renderSnapshot(root, coordinator.snapshot, config, coordinator, connections, passport, tasks, memory);
   }
 }
 

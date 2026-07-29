@@ -21,7 +21,7 @@ test("Task receipt is strict, identity-bound metadata with advertised versions",
     targetTetiId: "teti_target001",
     status: "received",
     receivedAt,
-    supportedTaskVersions: [4]
+    supportedTaskVersions: [5]
   };
   assert.doesNotThrow(() => validateTaskReceiptPayload(receipt));
   assert.throws(
@@ -29,22 +29,22 @@ test("Task receipt is strict, identity-bound metadata with advertised versions",
     TaskTransportContractError
   );
   assert.throws(
-    () => validateTaskReceiptPayload({ ...receipt, supportedTaskVersions: [4, 4] }),
+    () => validateTaskReceiptPayload({ ...receipt, supportedTaskVersions: [5, 5] }),
     /versions/
   );
 });
 
-test("Beta 0.2 Task negotiation requires an explicit v4 advertisement and never downgrades", () => {
+test("Beta 0.2 Task negotiation requires an explicit v5 advertisement and never downgrades", () => {
   assert.equal(selectTaskProtocolVersion(), null);
   assert.equal(selectTaskProtocolVersion([2, 1]), null);
   assert.equal(selectTaskProtocolVersion([2]), null);
   assert.equal(selectTaskProtocolVersion([3]), null);
-  assert.equal(selectTaskProtocolVersion([4]), 4);
-  assert.equal(selectTaskProtocolVersion([5]), null);
-  assert.doesNotThrow(() => validateTaskProtocolVersions([1, 2, 3, 4]));
+  assert.equal(selectTaskProtocolVersion([4]), null);
+  assert.equal(selectTaskProtocolVersion([5]), 5);
+  assert.doesNotThrow(() => validateTaskProtocolVersions([1, 2, 3, 4, 5]));
 });
 
-test("Task v4 attachment receipts are explicit, strict, and bound to one attachment", () => {
+test("Task v5 attachment receipts are explicit, strict, and bound to one attachment", () => {
   const part = {
     kind: "image" as const,
     attachmentId: "image-001",

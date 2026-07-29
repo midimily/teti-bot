@@ -18,6 +18,11 @@ import {
 } from "../lifecycle-sidecar/runtime/callable/kernel.ts";
 import { FileTaskAttachmentStore } from "../lifecycle-sidecar/runtime/tasks/attachments.ts";
 import { parseRunnerManifest } from "../../../integrations/agents/codex/image-adapter.ts";
+import type { TaskImagePart } from "../../../core/task/types.ts";
+import {
+  DurableExecutionRegistry,
+  MemoryExecutionHandleStore
+} from "../lifecycle-sidecar/runtime/callable/execution-store.ts";
 
 const fixturePath = join(
   dirname(fileURLToPath(import.meta.url)),
@@ -44,12 +49,50 @@ test("Connector context never receives task text or execution authority", async 
   await authorizedExecute(hostAgent, task("no-text-in-launch"));
   assert.deepEqual(Object.keys(connector.lastContext!).sort(), [
     "capabilityId",
+    "checkpointRef",
+    "executionEpoch",
     "images",
     "taskId",
+    "workspaceContext",
     "workspacePath"
   ]);
   assert.equal("input" in (connector.lastContext as unknown as Record<string, unknown>), false);
   assert.equal("authority" in (connector.lastContext as unknown as Record<string, unknown>), false);
+  await hostAgent.shutdown();
+});
+
+test("Host injects only the bounded Teti-selected Child Memory envelope into Agent input", async () => {
+  const connector = fakeConnector("echo");
+  const queries: Array<{ taskId: string; workspaceId: string; childAgentId: string }> = [];
+  const hostAgent = new TetiHostAgentKernel({
+    connectors: [connector],
+    memoryProvider: {
+      async selectContext(input) {
+        queries.push(structuredClone(input));
+        return {
+          schemaVersion: 1,
+          records: [{
+            memoryId: "memory-1",
+            scope: "child_agent",
+            contentDigest: `sha256:${"a".repeat(64)}`,
+            content: "user-approved reference"
+          }],
+          byteLength: new TextEncoder().encode("user-approved reference").byteLength
+        };
+      }
+    }
+  });
+  const result = await authorizedExecute(hostAgent, task("memory-input-task"));
+
+  assert.deepEqual(queries, [{
+    taskId: "memory-input-task",
+    workspaceId: "workspace:memory-input-task",
+    childAgentId: "fake-agent"
+  }]);
+  assert.match(result.artifact?.text ?? "", /\[TETI_CHILD_MEMORY_V1\]/);
+  assert.match(result.artifact?.text ?? "", /user-approved reference/);
+  assert.match(result.artifact?.text ?? "", /\[CURRENT_TASK\]\nhello agent/);
+  assert.equal("memory" in (connector.lastContext as unknown as Record<string, unknown>), false);
   await hostAgent.shutdown();
 });
 
@@ -58,7 +101,7 @@ test("Kernel persists a real image file before deleting the Adapter workspace", 
   try {
     const connector: AgentConnector = {
       descriptor: {
-        contractVersion: 1,
+        contractVersion: 2,
         connectorId: "test.image-agent",
         connectorRevision: 1,
         childAgentId: "fake-image",
@@ -66,6 +109,14 @@ test("Kernel persists a real image file before deleting the Adapter workspace", 
         inputModes: ["text", "image"],
         outputModes: ["text", "image"],
         transportKind: "process",
+        executionCapabilities: {
+          supportsProgress: false,
+          supportsPause: false,
+          supportsResume: false,
+          supportsCheckpoint: false,
+          supportsCancel: true
+        },
+        executionSemantics: "external_side_effects_possible",
         timeoutMs: 2_000,
         cancelGraceMs: 20,
         maxOutputBytes: 64 * 1024
@@ -105,6 +156,98 @@ test("Kernel persists a real image file before deleting the Adapter workspace", 
     const image = result.artifact?.kind === "parts" ? result.artifact.images[0] : undefined;
     assert.ok(image);
     assert.ok(await store.resolveImage({ taskId: result.taskId, purpose: "artifact", part: image }));
+    await hostAgent.shutdown();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a canceled execution removes an image Artifact that becomes stale during persistence", async () => {
+  const root = await mkdtemp(join(tmpdir(), "teti-callable-stale-image-"));
+  try {
+    const connector: AgentConnector = {
+      descriptor: {
+        contractVersion: 2,
+        connectorId: "test.stale-image-agent",
+        connectorRevision: 1,
+        childAgentId: "fake-stale-image",
+        capabilityIds: ["image-editing"],
+        inputModes: ["text", "image"],
+        outputModes: ["text", "image"],
+        transportKind: "process",
+        executionCapabilities: {
+          supportsProgress: false,
+          supportsPause: false,
+          supportsResume: false,
+          supportsCheckpoint: false,
+          supportsCancel: true
+        },
+        executionSemantics: "external_side_effects_possible",
+        timeoutMs: 2_000,
+        cancelGraceMs: 20,
+        maxOutputBytes: 64 * 1024
+      },
+      resourceBinding: {
+        schemaVersion: 1,
+        bindingId: "fake-stale-image.process.image-editing",
+        childAgentId: "fake-stale-image",
+        connectorId: "test.stale-image-agent",
+        transportKind: "process",
+        capabilityIds: ["image-editing"]
+      },
+      fixedProcessEntrypoint: process.execPath,
+      createExecutionSpec() {
+        return { kind: "process", executable: process.execPath, args: [fixturePath, "image"] };
+      },
+      decodeArtifact(stdout) {
+        const manifest = parseRunnerManifest(stdout);
+        return { kind: "parts", text: manifest.text, images: manifest.images };
+      }
+    };
+    const backingStore = new FileTaskAttachmentStore(join(root, "artifacts"));
+    const registry = new DurableExecutionRegistry({
+      store: new MemoryExecutionHandleStore(),
+      checkpointRoot: join(root, "checkpoints")
+    });
+    let ingestedPart: TaskImagePart | null = null;
+    const artifactStore = {
+      async ingestGeneratedImage(taskId: string, sourcePath: string) {
+        const staged = await backingStore.ingestGeneratedImage(taskId, sourcePath);
+        ingestedPart = staged.part;
+        const handle = await registry.get(taskId);
+        assert.ok(handle);
+        await registry.cancel(taskId, handle.executionEpoch);
+        return staged;
+      },
+      removeGeneratedImage(taskId: string, part: TaskImagePart) {
+        return backingStore.removeGeneratedImage(taskId, part);
+      }
+    };
+    const hostAgent = new TetiHostAgentKernel({
+      connectors: [connector],
+      artifactImageStore: artifactStore,
+      executionRegistry: registry
+    });
+    const request: CallableAdapterTaskRequest = {
+      schemaVersion: 2,
+      taskId: "stale-image-output-task",
+      adapterId: connector.descriptor.connectorId,
+      agentId: connector.descriptor.childAgentId,
+      capabilityId: "image-editing",
+      input: { kind: "parts", text: "cancel during persistence", images: [] },
+      createdAt: new Date().toISOString()
+    };
+
+    const result = await authorizedExecute(hostAgent, request);
+
+    assert.equal(result.state, "canceled");
+    assert.equal(result.artifact, undefined);
+    assert.ok(ingestedPart);
+    assert.equal(await backingStore.resolveImage({
+      taskId: request.taskId,
+      purpose: "artifact",
+      part: ingestedPart
+    }), null);
     await hostAgent.shutdown();
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -234,6 +377,9 @@ test("Host safely registers a qualified Connector after Runtime bootstrap", asyn
   assert.deepEqual(kernel.getLocalChildAgents(), [{
     schemaVersion: 1,
     childAgentId: "fake-agent",
+    origin: "native_agent",
+    workspacePolicy: "snapshot",
+    maxConcurrentExecutions: null,
     connectorIds: ["test.fake-agent"],
     resourceBindingIds: ["fake.process.test.fake-agent"],
     capabilityIds: ["code-analysis"],
@@ -297,7 +443,7 @@ interface CapturingFakeConnector extends AgentConnector {
 function fakeConnector(mode: string, overrides: FakeConnectorOverrides = {}): CapturingFakeConnector {
   return {
     descriptor: {
-      contractVersion: 1,
+      contractVersion: 2,
       connectorId: overrides.connectorId ?? "test.fake-agent",
       connectorRevision: 1,
       childAgentId: "fake-agent",
@@ -305,6 +451,14 @@ function fakeConnector(mode: string, overrides: FakeConnectorOverrides = {}): Ca
       inputModes: ["text"],
       outputModes: ["text"],
       transportKind: "process",
+      executionCapabilities: {
+        supportsProgress: false,
+        supportsPause: false,
+        supportsResume: false,
+        supportsCheckpoint: false,
+        supportsCancel: true
+      },
+      executionSemantics: "external_side_effects_possible",
       timeoutMs: overrides.timeoutMs ?? 2_000,
       cancelGraceMs: overrides.cancelGraceMs ?? 20,
       maxOutputBytes: overrides.maxOutputBytes ?? 4 * 1_024

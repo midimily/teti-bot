@@ -25,7 +25,7 @@ test("Task draft survives focus collapse and sends only staged descriptors", asy
     onChange: () => undefined
   });
 
-  controller.openCompose("connection-1", "code-analysis");
+  controller.openCompose("connection-1", "code-analysis", "capability:code-analysis");
   controller.updateDraft({ text: "Analyze this image." });
   await controller.attachImages();
   controller.dismissFromOutside();
@@ -61,7 +61,7 @@ test("Task send eligibility follows the live draft instead of a stale render sna
     onChange: () => undefined
   });
 
-  controller.openCompose("connection-1", "code-analysis");
+  controller.openCompose("connection-1", "code-analysis", "capability:code-analysis");
   assert.equal(controller.canSendDraft(), false);
   controller.updateDraft({ text: "Describe the task." });
   assert.equal(controller.canSendDraft(), true);
@@ -179,6 +179,37 @@ test("periodic Runtime refresh does not rebuild the open Task composer", async (
   controller.dispose();
 });
 
+test("timestamp-only Task polling does not rebuild an expanded Peer Passport surface", async () => {
+  const client = new RecordingTaskClient();
+  let scheduled: (() => void) | undefined;
+  let renders = 0;
+  const controller = new TaskController({
+    client,
+    tauri: new RecordingTauriInvoker(),
+    notchWindow: { setMode: async () => undefined } as never,
+    onChange: () => { renders += 1; },
+    schedule(callback) {
+      scheduled = callback;
+      return 1;
+    },
+    cancel: () => undefined
+  });
+
+  controller.start();
+  await flushMicrotasks();
+  assert.equal(renders, 0);
+  client.summary.generatedAt = "2026-07-29T00:00:02.000Z";
+  scheduled?.();
+  await flushMicrotasks();
+  assert.equal(renders, 0, "generatedAt churn must not replace unrelated Peer detail DOM");
+
+  client.summary.pendingIncomingCount = 1;
+  scheduled?.();
+  await flushMicrotasks();
+  assert.equal(renders, 1, "a visible Task semantic change must still notify the shell");
+  controller.dispose();
+});
+
 test("Task controller can leave the task surface without rendering an idle frame", async () => {
   const modes: Array<{ mode: string; reason: string }> = [];
   let renders = 0;
@@ -235,6 +266,12 @@ test("Task inbox back returns to the expanded island without entering idle mode"
 });
 
 class RecordingTaskClient implements TaskClient {
+  readonly summary: CollaborationTaskSummarySnapshot = {
+    schemaVersion: 1,
+    generatedAt: "2026-07-29T00:00:00.000Z",
+    pendingIncomingCount: 0,
+    tasks: []
+  };
   readonly staged = {
     part: {
       kind: "image" as const,
@@ -252,12 +289,7 @@ class RecordingTaskClient implements TaskClient {
   private record: CollaborationTaskTransportRecord | null = null;
 
   async summaries(): Promise<CollaborationTaskSummarySnapshot> {
-    return {
-      schemaVersion: 1,
-      generatedAt: new Date().toISOString(),
-      pendingIncomingCount: 0,
-      tasks: []
-    };
+    return structuredClone(this.summary);
   }
 
   async get(): Promise<CollaborationTaskTransportRecord> {
@@ -318,4 +350,10 @@ class DeferredSummaryTaskClient extends RecordingTaskClient {
     this.summaryCalls += 1;
     return this.summary;
   }
+}
+
+async function flushMicrotasks(): Promise<void> {
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
 }

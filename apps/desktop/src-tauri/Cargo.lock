@@ -3785,7 +3785,7 @@ dependencies = [
 
 [[package]]
 name = "teti-desktop"
-version = "0.2.1"
+version = "0.2.7"
 dependencies = [
  "block2",
  "objc2",

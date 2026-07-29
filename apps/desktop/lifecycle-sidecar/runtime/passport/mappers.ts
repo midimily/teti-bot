@@ -20,6 +20,8 @@ import type {
 } from "../../../../../core/passport/types.ts";
 import type { CodexUsageState } from "../../../src/codex-usage/types.ts";
 import type { PeerConnectionDto } from "../../../src/lifecycle-bridge/protocol.ts";
+import { TETI_SUPPORTED_TASK_PROTOCOL_VERSIONS } from "../../../../../core/task/transport.ts";
+import { TETI_SUPPORTED_PASSPORT_SCHEMA_VERSIONS } from "../../../../../core/ai-status/negotiation.ts";
 
 export const CODEX_RESOURCE_ID = "openai.codex";
 
@@ -76,20 +78,29 @@ export function mapPeerConnection(
     updatedAt: connection.updatedAt,
     ...(connection.confirmedAt ? { confirmedAt: connection.confirmedAt } : {}),
     lastSeen: connection.lastHeartbeatReceivedAt ?? null,
-    compatibility: connection.remoteProtocolCapabilities?.collaborationProtocolEpoch === 2
-      ? "compatible"
-      : connection.remoteProtocolCapabilities
-        ? "upgrade_required"
-        : "unknown",
+    compatibility: peerCompatibility(connection),
     passport: mapRemoteAiStatus(connection.remoteAiStatus, now)
   };
+}
+
+function peerCompatibility(connection: PeerConnectionDto): PassportConnectionSnapshot["compatibility"] {
+  const capability = connection.remoteProtocolCapabilities;
+  if (!capability) return "unknown";
+  if (capability.collaborationProtocolEpoch !== 2) return "upgrade_required";
+  if (!capability.taskProtocolVersions || !capability.passportSchemaVersions) return "unknown";
+  return capability.taskProtocolVersions.length === 1
+    && capability.taskProtocolVersions[0] === TETI_SUPPORTED_TASK_PROTOCOL_VERSIONS[0]
+    && capability.passportSchemaVersions.length === 1
+    && capability.passportSchemaVersions[0] === TETI_SUPPORTED_PASSPORT_SCHEMA_VERSIONS[0]
+    ? "compatible"
+    : "upgrade_required";
 }
 
 export function mapRemoteAiStatus(
   snapshot: RemoteAiStatusSnapshot | undefined,
   now: Date
 ): RemotePassportSnapshot {
-  if (!snapshot) return { state: "unknown", resources: [], agents: [], capabilities: [], bindings: [] };
+  if (!snapshot) return { state: "unknown", resources: [], agents: [], capabilities: [], bindings: [], computeOffers: [] };
   if (snapshot.sharing === "disabled") {
     return {
       state: "disabled",
@@ -97,6 +108,7 @@ export function mapRemoteAiStatus(
       agents: [],
       capabilities: [],
       bindings: [],
+      computeOffers: [],
       generatedAt: snapshot.generatedAt,
       expiresAt: snapshot.expiresAt,
       receivedAt: snapshot.receivedAt
@@ -106,16 +118,19 @@ export function mapRemoteAiStatus(
   return {
     state: expired ? "stale" : "fresh",
     resources: snapshot.tools.map((tool) => mapRemoteToolResource(tool, snapshot.expiresAt, expired)),
-    agents: snapshot.schemaVersion === 3
+    agents: snapshot.schemaVersion === 4 || snapshot.schemaVersion === 3
       ? snapshot.agents.map((agent) => mapRemoteCallableAgent(agent, expired))
       : snapshot.schemaVersion === 2
         ? snapshot.agents.map((agent) => mapRemoteAgent(agent, expired))
         : [],
-    capabilities: snapshot.schemaVersion === 3
+    capabilities: snapshot.schemaVersion === 4 || snapshot.schemaVersion === 3
       ? snapshot.capabilities.map((capability) => mapRemoteCapability(capability, expired))
       : [],
-    bindings: snapshot.schemaVersion === 3
+    bindings: snapshot.schemaVersion === 4 || snapshot.schemaVersion === 3
       ? snapshot.bindings.map((binding) => cloneBinding(binding))
+      : [],
+    computeOffers: snapshot.schemaVersion === 4
+      ? snapshot.computeOffers.map((offer) => structuredClone(offer))
       : [],
     generatedAt: snapshot.generatedAt,
     expiresAt: snapshot.expiresAt,

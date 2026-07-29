@@ -4,15 +4,18 @@ import { taskArtifactImages, taskInputImages, taskInputText } from "../../../../
 import type { PassportConnectionSnapshot } from "../../../../core/passport/snapshot.ts";
 import type {
   CallablePassportAgent,
+  ComputeOffer,
   TetiCapability,
   TetiCapabilityPassport
 } from "../../../../core/passport/types.ts";
 import type { TaskController, TaskControllerSnapshot } from "./controller.ts";
+import type { MemoryController } from "../memory/controller.ts";
 
 export function createTaskWorkspace(
   controller: TaskController,
   connections: readonly PassportConnectionSnapshot[],
-  localPassport?: TetiCapabilityPassport
+  localPassport?: TetiCapabilityPassport,
+  memoryController?: MemoryController
 ): HTMLElement {
   const snapshot = controller.snapshot;
   const island = document.createElement("section");
@@ -26,7 +29,7 @@ export function createTaskWorkspace(
   body.className = "teti-task-body";
   if (snapshot.screen === "compose") body.append(createComposer(controller, snapshot, connections));
   else if (snapshot.screen === "detail" && snapshot.selectedTask) {
-    body.append(createTaskDetail(controller, snapshot, connections, localPassport));
+    body.append(createTaskDetail(controller, snapshot, connections, localPassport, memoryController));
   }
   else body.append(createInbox(controller, snapshot, connections));
   island.append(body);
@@ -117,17 +120,23 @@ function createComposer(
   const peers = connections.filter((connection) =>
     connection.connectionState === "Confirmed"
     && connection.compatibility === "compatible"
-    && availableCapabilities(connection).length > 0
+    && availableTaskOffers(connection).length > 0
   );
   const selectedPeer = peers.find((peer) => peer.requestId === snapshot.draft.connectionRequestId) ?? peers[0];
-  const capabilities = selectedPeer ? availableCapabilities(selectedPeer) : [];
-  const selectedCapability = capabilities.find((capability) => capability.id === snapshot.draft.capabilityId)
-    ?? capabilities[0];
+  const offers = selectedPeer ? availableTaskOffers(selectedPeer) : [];
+  const selectedOffer = offers.find((offer) => offer.offerId === snapshot.draft.offerId)
+    ?? offers.find((offer) => offer.capability.id === snapshot.draft.capabilityId)
+    ?? offers[0];
+  const selectedCapability = selectedOffer?.capability;
   if (selectedPeer && snapshot.draft.connectionRequestId !== selectedPeer.requestId) {
     controller.updateDraft({ connectionRequestId: selectedPeer.requestId });
   }
-  if (selectedCapability && snapshot.draft.capabilityId !== selectedCapability.id) {
-    controller.updateDraft({ capabilityId: selectedCapability.id });
+  if (selectedOffer && (snapshot.draft.capabilityId !== selectedCapability?.id
+    || snapshot.draft.offerId !== selectedOffer.offerId)) {
+    controller.updateDraft({
+      offerId: selectedOffer.offerId,
+      capabilityId: selectedOffer.capability.id
+    });
   }
 
   const selectors = document.createElement("div");
@@ -138,18 +147,24 @@ function createComposer(
   })), selectedPeer?.requestId ?? "");
   peerSelect.select.addEventListener("change", () => {
     const peer = peers.find((candidate) => candidate.requestId === peerSelect.select.value);
+    const offer = peer ? availableTaskOffers(peer)[0] : undefined;
     controller.updateDraft({
       connectionRequestId: peerSelect.select.value,
-      capabilityId: peer ? availableCapabilities(peer)[0]?.id ?? "" : ""
+      offerId: offer?.offerId ?? "",
+      capabilityId: offer?.capability.id ?? ""
     });
     controller.openCompose();
   });
-  const capabilitySelect = labeledSelect("调用能力", capabilities.map((capability) => ({
-    value: capability.id,
-    label: capability.name
-  })), selectedCapability?.id ?? "");
+  const capabilitySelect = labeledSelect("调用能力", offers.map((offer) => ({
+    value: offer.offerId,
+    label: offer.compute ? `${offer.capability.name} · 本地算力` : offer.capability.name
+  })), selectedOffer?.offerId ?? "");
   capabilitySelect.select.addEventListener("change", () => {
-    controller.updateDraft({ capabilityId: capabilitySelect.select.value });
+    const offer = offers.find((candidate) => candidate.offerId === capabilitySelect.select.value);
+    controller.updateDraft({
+      offerId: offer?.offerId ?? "",
+      capabilityId: offer?.capability.id ?? ""
+    });
     controller.openCompose();
   });
   selectors.append(peerSelect.label, capabilitySelect.label);
@@ -186,7 +201,9 @@ function createComposer(
   const footer = document.createElement("div");
   footer.className = "teti-task-actionbar";
   const hint = document.createElement("small");
-  hint.textContent = returnsImages
+  hint.textContent = selectedOffer?.compute
+    ? "接收端本地算力 · 仅文字 · 并发 1 · 每次授权"
+    : returnsImages
     ? `${supportsImages ? "PNG/JPEG · 最多 4 张 · " : ""}结果必须返回图片`
     : supportsImages ? "文字必填 · PNG/JPEG · 最多 4 张" : "该能力当前仅接受文字";
   const send = document.createElement("button");
@@ -210,7 +227,7 @@ function createComposer(
     const warning = document.createElement("p");
     warning.className = "teti-task-known-defect";
     warning.setAttribute("role", "status");
-    warning.textContent = "0.2.1 已知限制：多图送达仍在实机复盘；若图片不完整，对方无法授权或执行任务。";
+    warning.textContent = "0.2.7 延续已知限制：多图送达仍在实机复盘；若图片不完整，对方无法授权或执行任务。";
     form.append(warning);
   }
   if (snapshot.error) form.append(errorText(snapshot.error));
@@ -226,7 +243,8 @@ function createTaskDetail(
   controller: TaskController,
   snapshot: TaskControllerSnapshot,
   connections: readonly PassportConnectionSnapshot[],
-  localPassport?: TetiCapabilityPassport
+  localPassport?: TetiCapabilityPassport,
+  memoryController?: MemoryController
 ): HTMLElement {
   const record = snapshot.selectedTask!;
   const content = document.createElement("div");
@@ -242,7 +260,11 @@ function createTaskDetail(
     connections
   );
   const capability = document.createElement("small");
-  capability.textContent = `Capability · ${record.request.capabilityId}`;
+  capability.textContent = record.request.offerId === "local.compute.general-text-assistance.v1"
+    ? "通用文字协助 · 接收端本地算力"
+    : record.request.offerId === "local.agent.osaurus-native-text.v1"
+      ? "通用文字协助 · Osaurus Native Agent"
+    : `Capability · ${record.request.capabilityId}`;
   peer.append(peerTitle, capability);
   const status = document.createElement("span");
   status.className = `teti-task-status is-${record.state}`;
@@ -280,6 +302,18 @@ function createTaskDetail(
   }
   content.append(identity, prompt);
 
+  if (snapshot.selectedExecution) {
+    const execution = document.createElement("section");
+    execution.className = "teti-task-scope teti-task-execution";
+    const title = document.createElement("strong");
+    title.textContent = `本机执行 · 第 ${snapshot.selectedExecution.executionEpoch} 轮`;
+    const detail = document.createElement("span");
+    detail.textContent = snapshot.selectedExecution.progress.message
+      ?? executionProgressLabel(snapshot.selectedExecution.progress.state);
+    execution.append(title, detail);
+    content.append(execution);
+  }
+
   if (record.direction === "incoming" && record.approval === "pending") {
     const scope = document.createElement("section");
     scope.className = "teti-task-scope";
@@ -291,7 +325,11 @@ function createTaskDetail(
     const scopeDetail = document.createElement("span");
     scopeDetail.textContent = record.state === "auth_required"
       ? "Teti 不保存登录凭据；请先在本机完成 Agent 登录，再重新授权本任务。"
-      : "只执行本任务；授权时重新校验 Agent，不开放文件、命令或持续权限。";
+      : record.request.offerId === "local.compute.general-text-assistance.v1"
+        ? "只执行本任务；接收端在本机解析 Runtime 与模型，不向对端公开端口、路径、硬件或凭据。"
+        : record.request.offerId === "local.agent.osaurus-native-text.v1"
+          ? "只执行本任务；使用接收端固定的 Osaurus Agent。Tools、原生 Memory、Host Workspace 与 Autonomous Exec 必须保持关闭。"
+        : "只执行本任务；授权时重新校验 Agent，不开放文件、命令或持续权限。";
     scope.append(scopeTitle, scopeDetail);
     content.append(scope);
   }
@@ -324,6 +362,9 @@ function createTaskDetail(
     }
     content.append(card);
   }
+  if (memoryController && snapshot.selectedExecution) {
+    content.append(createTaskMemorySection(memoryController, snapshot));
+  }
   if (record.safeErrorCode) {
     const code = document.createElement("p");
     code.className = "teti-task-safe-code";
@@ -344,13 +385,134 @@ function createTaskDetail(
     reject.disabled = snapshot.busy;
     allow.disabled = snapshot.busy || record.attachmentsReady === false;
     actions.append(reject, allow);
-  } else if (!["completed", "failed", "canceled", "rejected"].includes(record.state)) {
+  } else if (record.direction === "incoming"
+    && record.state === "input_required"
+    && snapshot.selectedExecution?.resumeCapability === "checkpoint_restart") {
+    const resume = actionButton("从检查点重新开始", "primary", () => void controller.resume());
+    resume.disabled = snapshot.busy;
+    actions.append(resume);
+  } else if (!["completed", "failed", "canceled", "rejected", "input_required"].includes(record.state)) {
     const cancel = actionButton(record.direction === "incoming" ? "停止任务" : "取消任务", "secondary", () => void controller.cancel());
     cancel.disabled = snapshot.busy || Boolean(record.cancelPending);
     actions.append(cancel);
   }
   content.append(actions);
   return content;
+}
+
+function createTaskMemorySection(
+  controller: MemoryController,
+  snapshot: TaskControllerSnapshot
+): HTMLElement {
+  const record = snapshot.selectedTask!;
+  const execution = snapshot.selectedExecution!;
+  const memory = controller.snapshot;
+  const section = document.createElement("section");
+  section.className = "teti-task-card teti-task-memory";
+  const title = document.createElement("strong");
+  title.textContent = "Child Memory";
+  const note = document.createElement("p");
+  note.textContent = "Task Memory 仅存在于本次执行。长期保存必须由你先开启范围授权，再单独保存完成结果。";
+  section.append(title, note);
+
+  if (record.direction !== "incoming" || record.state !== "completed" || !taskHasTextArtifact(record)) {
+    const unavailable = document.createElement("small");
+    unavailable.textContent = "本机 Child Agent 完成文字任务后，可选择保存；对端任务内容不会自动进入长期 Memory。";
+    section.append(unavailable);
+    return section;
+  }
+
+  section.append(createTaskMemoryScopeRow({
+    controller,
+    taskId: record.request.taskId,
+    scope: "child_agent",
+    workspaceId: null,
+    childAgentId: execution.childAgentId,
+    label: `${execution.childAgentId} 长期 Memory`,
+    description: "仅供同一 Child Agent 后续任务检索"
+  }));
+
+  if (record.workspaceBinding?.mode === "durable_collaboration") {
+    section.append(createTaskMemoryScopeRow({
+      controller,
+      taskId: record.request.taskId,
+      scope: "workspace",
+      workspaceId: record.workspaceBinding.workspaceId,
+      childAgentId: execution.childAgentId,
+      label: "Workspace Memory",
+      description: "仅供此 Workspace 与此 Child Agent 检索"
+    }));
+  }
+  if (memory.error) {
+    const error = document.createElement("small");
+    error.className = "teti-memory-error";
+    error.setAttribute("role", "alert");
+    error.textContent = memory.error;
+    section.append(error);
+  }
+  return section;
+}
+
+function createTaskMemoryScopeRow(input: {
+  controller: MemoryController;
+  taskId: string;
+  scope: "workspace" | "child_agent";
+  workspaceId: string | null;
+  childAgentId: string;
+  label: string;
+  description: string;
+}): HTMLElement {
+  const snapshot = input.controller.snapshot;
+  const authorized = input.controller.isAuthorized(input.scope, input.workspaceId, input.childAgentId);
+  const saved = input.controller.hasTaskMemory(input.taskId, input.scope);
+  const row = document.createElement("div");
+  row.className = "teti-task-memory-scope";
+  const authorization = document.createElement("label");
+  const copy = document.createElement("span");
+  const name = document.createElement("strong");
+  name.textContent = input.label;
+  const description = document.createElement("small");
+  description.textContent = input.description;
+  copy.append(name, description);
+  const toggle = document.createElement("input");
+  toggle.type = "checkbox";
+  toggle.checked = authorized;
+  toggle.disabled = snapshot.busy;
+  toggle.setAttribute("aria-label", `授权 ${input.label}`);
+  toggle.addEventListener("change", () => void input.controller.setAuthorization({
+    scope: input.scope,
+    workspaceId: input.workspaceId,
+    childAgentId: input.childAgentId,
+    enabled: toggle.checked
+  }));
+  authorization.append(copy, toggle);
+  const save = document.createElement("button");
+  save.type = "button";
+  save.className = "teti-memory-action";
+  save.textContent = saved ? "已保存" : "保存结果";
+  save.disabled = snapshot.busy || !authorized || saved;
+  save.addEventListener("click", () => void input.controller.saveTask(input.taskId, input.scope));
+  row.append(authorization, save);
+  return row;
+}
+
+function taskHasTextArtifact(
+  record: NonNullable<TaskControllerSnapshot["selectedTask"]>
+): boolean {
+  return (record.artifacts ?? []).some((artifact) => artifact.schemaVersion === 1
+    ? Boolean(artifact.text.trim())
+    : artifact.parts.some((part) => part.kind === "text" && Boolean(part.text.trim()))
+  );
+}
+
+function executionProgressLabel(state: string): string {
+  if (state === "queued") return "等待本机 Child Agent";
+  if (state === "running") return "本机 Child Agent 正在执行";
+  if (state === "interrupted") return "执行已中断";
+  if (state === "completed") return "执行已完成";
+  if (state === "canceled") return "执行已取消";
+  if (state === "failed") return "执行失败";
+  return "执行状态正在更新";
 }
 
 function availableCapabilities(connection: PassportConnectionSnapshot): TetiCapability[] {
@@ -362,6 +524,32 @@ function availableCapabilities(connection: PassportConnectionSnapshot): TetiCapa
   return connection.passport.capabilities.filter((capability) =>
     capability.availability === "available" && callableIds.has(capability.id)
   );
+}
+
+interface AvailableTaskOffer {
+  offerId: string;
+  capability: TetiCapability;
+  compute?: ComputeOffer;
+}
+
+function availableTaskOffers(connection: PassportConnectionSnapshot): AvailableTaskOffer[] {
+  const capabilities = availableCapabilities(connection);
+  const offers = (connection.passport.computeOffers ?? []).flatMap((offer) => {
+    const capability = capabilities.find((candidate) => candidate.id === offer.capability);
+    return capability && connection.passport.state === "fresh"
+      ? [{ offerId: offer.offerId, capability, compute: offer }]
+      : [];
+  });
+  const offeredCapabilities = new Set(offers.map((offer) => offer.capability.id));
+  return [
+    ...offers,
+    ...capabilities
+      .filter((capability) => !offeredCapabilities.has(capability.id))
+      .map((capability) => ({
+        offerId: `capability:${capability.id}`,
+        capability
+      }))
+  ];
 }
 
 function capabilityAcceptsImages(connection: PassportConnectionSnapshot, capabilityId: string): boolean {

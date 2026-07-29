@@ -5,16 +5,20 @@ import type {
   TaskImagePart,
   TaskApprovalState
 } from "./types.ts";
+import type {
+  TaskWorkspaceBinding,
+  TaskWorkspaceRequest
+} from "../workspace/types.ts";
 
 export const TETI_TASK_TRANSPORT_SCHEMA_VERSION = 1;
 export const TETI_TASK_TRANSPORT_STORE_SCHEMA_VERSION = 2;
-export const TETI_SUPPORTED_TASK_PROTOCOL_VERSIONS = [4] as const;
+export const TETI_SUPPORTED_TASK_PROTOCOL_VERSIONS = [5] as const;
 export const DEFAULT_TASK_REQUEST_TTL_MS = 60 * 60 * 1_000;
 export const MAX_TASK_CLOCK_SKEW_MS = 5 * 60 * 1_000;
 export const MAX_TASK_PROTOCOL_VERSIONS = 8;
 export const MAX_TASK_TRANSPORT_RECORDS = 512;
 
-export type TetiTaskProtocolVersion = 1 | 2 | 3 | 4;
+export type TetiTaskProtocolVersion = 1 | 2 | 3 | 4 | 5;
 
 export type TetiTaskReceiptStatus =
   | "received"
@@ -54,12 +58,12 @@ export interface TetiTaskAttachmentPayload {
   part: TaskImagePart;
   createdAt: string;
   expiresAt: string;
-  /** Task v4 requests a durable per-attachment receipt. Omitted by v1-v3. */
+  /** Task v4+ requests a durable per-attachment receipt. Omitted by v1-v3. */
   deliveryReceiptRequested?: true;
 }
 
 /**
- * Task v4 end-to-end delivery receipt. The receiver sends this only after the
+ * Task v4+ end-to-end delivery receipt. The receiver sends this only after the
  * attachment bytes have been validated and durably copied into the local Task
  * store. Chatmail queueing or download completion alone is not an ACK.
  */
@@ -141,6 +145,7 @@ export interface SendCollaborationTaskInput {
   capabilityId: string;
   text: string;
   attachments?: TaskImagePart[];
+  workspace?: TaskWorkspaceRequest;
   ttlMs?: number;
 }
 
@@ -157,7 +162,8 @@ export type TaskDeliveryState =
 
 /**
  * Local transport read model. It deliberately contains no Adapter, command,
- * path, workspace, prompt transcript, credential, or execution grant.
+ * host path, Workspace Snapshot path, prompt transcript, credential, or
+ * execution grant. The optional Workspace binding is local-only metadata.
  */
 export interface CollaborationTaskTransportRecord {
   schemaVersion: 1;
@@ -173,6 +179,7 @@ export interface CollaborationTaskTransportRecord {
   attachmentDeliveryAttempts?: TaskAttachmentDeliveryAttempt[];
   artifactAttachmentDeliveryAttempts?: TaskAttachmentDeliveryAttempt[];
   attachmentDiagnostics?: TaskAttachmentDiagnostic[];
+  workspaceBinding?: TaskWorkspaceBinding;
   request: CollaborationTaskRequest;
   state: CollaborationTaskState;
   approval: TaskApprovalState;

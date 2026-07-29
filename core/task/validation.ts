@@ -1,5 +1,9 @@
 import { isCanonicalTetiPublicId } from "../identity/public-id.ts";
 import {
+  validateTaskWorkspaceRequest,
+  validateWorkspaceAccess
+} from "../workspace/validation.ts";
+import {
   MAX_EXECUTION_GRANT_TTL_MS,
   MAX_TASK_ARTIFACT_BYTES,
   MAX_TASK_ARTIFACT_TEXT_BYTES,
@@ -34,6 +38,8 @@ export function validateCollaborationTaskRequest(
   if (encodedSize(value, "Task request") > MAX_TASK_REQUEST_BYTES) {
     throw new TaskContractError("Task request exceeds the allowed size.");
   }
+  if (!isRecord(value)) throw new TaskContractError("Task request must be an object.");
+  const schemaVersion = value.schemaVersion;
   const request = exactRecord(value, [
     "schemaVersion",
     "taskId",
@@ -42,12 +48,14 @@ export function validateCollaborationTaskRequest(
     "offerId",
     "capabilityId",
     "input",
+    ...(schemaVersion === TETI_COLLABORATION_TASK_SCHEMA_VERSION ? ["workspace"] : []),
     "createdAt",
     "expiresAt"
   ], "Task request");
   if (request.schemaVersion !== 1
     && request.schemaVersion !== 2
     && request.schemaVersion !== 3
+    && request.schemaVersion !== 4
     && request.schemaVersion !== TETI_COLLABORATION_TASK_SCHEMA_VERSION) {
     throw new TaskContractError("Unsupported Task request schema version.");
   }
@@ -63,6 +71,9 @@ export function validateCollaborationTaskRequest(
     validateTextPart(request.input, MAX_TASK_INPUT_TEXT_BYTES, "Task input");
   } else {
     validateMultipartInput(request.input);
+  }
+  if (request.schemaVersion === TETI_COLLABORATION_TASK_SCHEMA_VERSION) {
+    validateTaskWorkspaceRequest(request.workspace);
   }
   const createdAt = timestamp(request.createdAt, "createdAt");
   const expiresAt = timestamp(request.expiresAt, "expiresAt");
@@ -146,6 +157,8 @@ export function validateExecutionGrant(
     "issuedAt",
     "expiresAt",
     "singleUse",
+    "workspaceId",
+    "workspaceRevision",
     "workspaceAccess",
     "userFileAccess",
     "commandPolicy",
@@ -168,8 +181,12 @@ export function validateExecutionGrant(
   if (expiresAt <= issuedAt || expiresAt - issuedAt > MAX_EXECUTION_GRANT_TTL_MS) {
     throw new TaskContractError("Execution Grant expiry is invalid.");
   }
+  safeId(grant.workspaceId, "workspaceId");
+  if (!Number.isSafeInteger(grant.workspaceRevision) || Number(grant.workspaceRevision) <= 0) {
+    throw new TaskContractError("Execution Grant workspaceRevision is invalid.");
+  }
+  validateWorkspaceAccess(grant.workspaceAccess);
   if (grant.singleUse !== true
-    || grant.workspaceAccess !== "isolated_task_directory"
     || grant.userFileAccess !== "none"
     || grant.commandPolicy !== "fixed_adapter_entrypoint"
     || grant.networkPolicy !== "agent_managed") {

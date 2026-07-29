@@ -11,6 +11,7 @@ import {
   type LifecycleResponse,
   type LifecycleResult,
   type LifecycleStatusResult,
+  type OsaurusNativeChildSettingsDto,
   type PublicTetiAccount
 } from "../src/lifecycle-bridge/protocol.ts";
 import { isUnsafeIncompleteMarker, readCreationMarker, writeCreationMarker } from "./marker.ts";
@@ -37,6 +38,12 @@ import {
 } from "../../../core/task/transport.ts";
 import { MAX_TASK_INPUT_TEXT_BYTES, MAX_TASK_REQUEST_TTL_MS } from "../../../core/task/types.ts";
 import { validateTaskImagePart } from "../../../core/task/validation.ts";
+import { validateTaskWorkspaceRequest } from "../../../core/workspace/validation.ts";
+import type {
+  ChildMemorySnapshot,
+  DurableMemoryScope,
+  MemoryExportResult
+} from "../../../core/memory/types.ts";
 
 export interface LifecycleSidecarDependencies {
   loadTetiAccount(): Promise<TetiAccount | null>;
@@ -50,6 +57,18 @@ export interface LifecycleSidecarDependencies {
   getAgentManagementSnapshot?(): Promise<AgentManagementSnapshot>;
   rescanAgents?(): Promise<AgentManagementSnapshot>;
   setAgentPathOverride?(agentId: string, path: string | null): Promise<AgentManagementSnapshot>;
+  getChildMemory?(): Promise<ChildMemorySnapshot>;
+  setChildMemoryAuthorization?(input: {
+    scope: DurableMemoryScope;
+    workspaceId: string | null;
+    childAgentId: string;
+    enabled: boolean;
+  }): Promise<ChildMemorySnapshot>;
+  saveTaskMemory?(taskId: string, scope: DurableMemoryScope, confirmed: true): Promise<ChildMemorySnapshot>;
+  deleteChildMemory?(memoryId: string): Promise<boolean>;
+  exportChildMemory?(): Promise<MemoryExportResult>;
+  getOsaurusNativeChildSettings?(): Promise<OsaurusNativeChildSettingsDto>;
+  setOsaurusNativeChildAgentId?(agentId: string | null): Promise<OsaurusNativeChildSettingsDto>;
 }
 
 export const defaultLifecycleSidecarDependencies: LifecycleSidecarDependencies = {
@@ -222,6 +241,49 @@ async function dispatchLifecycleRequest(
       return service.cancelTask(validateTaskId(request.params?.taskId));
     }
 
+    case "task.execution.get": {
+      const service = await dependencies.getPeerConnectionService();
+      if (!service.getTaskExecution) throw new Error("Durable execution is unavailable.");
+      return service.getTaskExecution(validateTaskId(request.params?.taskId));
+    }
+
+    case "task.execution.resume": {
+      const service = await dependencies.getPeerConnectionService();
+      if (!service.resumeTask) throw new Error("Durable execution resume is unavailable.");
+      return service.resumeTask(validateTaskId(request.params?.taskId));
+    }
+
+    case "memory.get":
+      if (!dependencies.getChildMemory) throw new Error("Child Memory service is unavailable.");
+      return dependencies.getChildMemory();
+
+    case "memory.authorization.set": {
+      if (!dependencies.setChildMemoryAuthorization) throw new Error("Child Memory service is unavailable.");
+      const scope = validateDurableMemoryScope(request.params?.scope);
+      return dependencies.setChildMemoryAuthorization({
+        scope,
+        workspaceId: validateMemoryWorkspaceId(scope, request.params?.workspaceId),
+        childAgentId: validateChildAgentId(request.params?.childAgentId),
+        enabled: validateBoolean(request.params?.enabled, "Memory authorization state")
+      });
+    }
+
+    case "memory.task.save":
+      if (!dependencies.saveTaskMemory) throw new Error("Child Memory service is unavailable.");
+      return dependencies.saveTaskMemory(
+        validateTaskId(request.params?.taskId),
+        validateDurableMemoryScope(request.params?.scope),
+        validateExplicitMemoryConfirmation(request.params?.confirmed)
+      );
+
+    case "memory.delete":
+      if (!dependencies.deleteChildMemory) throw new Error("Child Memory service is unavailable.");
+      return dependencies.deleteChildMemory(validateMemoryId(request.params?.memoryId));
+
+    case "memory.export":
+      if (!dependencies.exportChildMemory) throw new Error("Child Memory service is unavailable.");
+      return dependencies.exportChildMemory();
+
     case "passport.get":
       if (!dependencies.getPassportSnapshot) throw new Error("Runtime Passport service is unavailable.");
       return await dependencies.getPassportSnapshot();
@@ -244,6 +306,14 @@ async function dispatchLifecycleRequest(
         validateAgentId(request.params?.agentId),
         validateAgentPathOverride(request.params?.path)
       );
+
+    case "osaurus.native.get":
+      if (!dependencies.getOsaurusNativeChildSettings) throw new Error("Osaurus Native Child settings are unavailable.");
+      return dependencies.getOsaurusNativeChildSettings();
+
+    case "osaurus.native.set":
+      if (!dependencies.setOsaurusNativeChildAgentId) throw new Error("Osaurus Native Child settings are unavailable.");
+      return dependencies.setOsaurusNativeChildAgentId(validateOsaurusNativeAgentId(request.params?.agentId));
   }
 }
 
@@ -336,7 +406,16 @@ function validateTaskSendInput(value: unknown): SendCollaborationTaskInput {
     throw new Error("Task parameters are required.");
   }
   const params = value as Record<string, unknown>;
-  const allowed = ["connectionRequestId", "taskId", "offerId", "capabilityId", "text", "attachments", "ttlMs"];
+  const allowed = [
+    "connectionRequestId",
+    "taskId",
+    "offerId",
+    "capabilityId",
+    "text",
+    "attachments",
+    "workspace",
+    "ttlMs"
+  ];
   if (Object.keys(params).some((key) => !allowed.includes(key))) {
     throw new Error("Task parameters contain an unsupported field.");
   }
@@ -367,11 +446,13 @@ function validateTaskSendInput(value: unknown): SendCollaborationTaskInput {
     throw new Error("Task attachments are invalid.");
   }
   for (const attachment of attachments) validateTaskImagePart(attachment);
+  if (params.workspace !== undefined) validateTaskWorkspaceRequest(params.workspace);
   return {
     connectionRequestId,
     capabilityId: params.capabilityId,
     text: params.text,
     attachments: structuredClone(attachments),
+    ...(params.workspace === undefined ? {} : { workspace: structuredClone(params.workspace) }),
     ttlMs: Number(ttlMs),
     ...(params.taskId === undefined ? {} : { taskId: params.taskId }),
     ...(params.offerId === undefined ? {} : { offerId: params.offerId })
@@ -416,6 +497,56 @@ function validateAgentPathOverride(value: unknown): string | null {
     throw new Error("A valid local Agent path is required.");
   }
   return value;
+}
+
+function validateOsaurusNativeAgentId(value: unknown): string | null {
+  if (value === null || value === "") return null;
+  if (typeof value !== "string"
+    || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)) {
+    throw new Error("A valid fixed Osaurus Agent UUID is required.");
+  }
+  return value.toUpperCase();
+}
+
+function validateDurableMemoryScope(value: unknown): DurableMemoryScope {
+  if (value !== "workspace" && value !== "child_agent") {
+    throw new Error("A durable Memory scope is required.");
+  }
+  return value;
+}
+
+function validateMemoryWorkspaceId(scope: DurableMemoryScope, value: unknown): string | null {
+  if (scope === "child_agent") {
+    if (value !== null) throw new Error("Child Agent Memory must not include a Workspace ID.");
+    return null;
+  }
+  return validateMemoryId(value);
+}
+
+function validateChildAgentId(value: unknown): string {
+  if (typeof value !== "string"
+    || value.length > 64
+    || !/^[a-z0-9]+(?:[._-][a-z0-9]+)*$/.test(value)) {
+    throw new Error("Child Agent ID is invalid.");
+  }
+  return value;
+}
+
+function validateMemoryId(value: unknown): string {
+  if (typeof value !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$/.test(value)) {
+    throw new Error("Memory identifier is invalid.");
+  }
+  return value;
+}
+
+function validateBoolean(value: unknown, label: string): boolean {
+  if (typeof value !== "boolean") throw new Error(`${label} is invalid.`);
+  return value;
+}
+
+function validateExplicitMemoryConfirmation(value: unknown): true {
+  if (value !== true) throw new Error("Saving durable Memory requires explicit local confirmation.");
+  return true;
 }
 
 function statusToDto(status: TetiStatus, account: TetiAccount | null): LifecycleStatusResult {
@@ -483,7 +614,15 @@ function fallbackCodeForMethod(method: LifecycleRequest["method"]) {
     case "task.approve":
     case "task.reject":
     case "task.cancel":
+    case "task.execution.get":
+    case "task.execution.resume":
       return "TASK_TRANSPORT_FAILED";
+    case "memory.get":
+    case "memory.authorization.set":
+    case "memory.task.save":
+    case "memory.delete":
+    case "memory.export":
+      return "MEMORY_OPERATION_FAILED";
     case "account.load":
     case "account.status":
       return "ACCOUNT_LOAD_FAILED";
@@ -492,6 +631,8 @@ function fallbackCodeForMethod(method: LifecycleRequest["method"]) {
     case "agent.observation.get":
     case "agent.observation.scan":
     case "agent.observation.override.set":
+    case "osaurus.native.get":
+    case "osaurus.native.set":
       return "INTERNAL_ERROR";
     default:
       return "INTERNAL_ERROR";

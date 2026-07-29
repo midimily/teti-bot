@@ -22,7 +22,8 @@ test("an empty qualified set produces no Agent or inferred capability", () => {
   assert.deepEqual(projectCallablePassport([]), {
     agents: [],
     capabilities: [],
-    bindings: []
+    bindings: [],
+    computeOffers: []
   });
 });
 
@@ -39,6 +40,43 @@ test("multiple qualified Adapters for one Agent become one public Agent", () => 
   assert.deepEqual(projection.agents[0]?.outputModes, ["text", "image"]);
   assert.equal(projection.capabilities.find((capability) => capability.id === "image-editing")?.category, "image");
   assert.equal(projection.agents[0]?.observedAt, "2026-07-26T00:01:00.000Z");
+});
+
+test("qualified Osaurus Runtime projects one abstract local-compute offer without local binding", () => {
+  const osaurus = callable("osaurus-runtime", "osaurus.runtime.bonsai-chat");
+  osaurus.capabilityIds = ["general-text-assistance"];
+  const projection = projectCallablePassport([osaurus], [{
+    offerId: "local.compute.general-text-assistance.v1",
+    capability: "general-text-assistance",
+    resourceClass: "local_model",
+    executionLocation: "receiver_local",
+    inputModes: ["text"],
+    outputModes: ["text"],
+    concurrency: 1,
+    approval: "allow_once"
+  }]);
+  assert.deepEqual(projection.computeOffers, [{
+    offerId: "local.compute.general-text-assistance.v1",
+    capability: "general-text-assistance",
+    resourceClass: "local_model",
+    executionLocation: "receiver_local",
+    inputModes: ["text"],
+    outputModes: ["text"],
+    concurrency: 1,
+    approval: "allow_once",
+    observedAt: osaurus.readyAt
+  }]);
+  assert.deepEqual(Object.keys(projection.computeOffers[0]!).sort(), [
+    "approval",
+    "capability",
+    "concurrency",
+    "executionLocation",
+    "inputModes",
+    "observedAt",
+    "offerId",
+    "outputModes",
+    "resourceClass"
+  ]);
 });
 
 function callable(agentId: string, adapterId: string): CallableAgent {

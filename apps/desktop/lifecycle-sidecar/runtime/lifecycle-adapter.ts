@@ -27,6 +27,11 @@ export function createRuntimeOwnedLifecycleDependencies(
     setPassportSharing: (policy) => runtime.setPassportSharing(policy),
     getAgentManagementSnapshot: () => runtime.getAgentManagementSnapshot(),
     rescanAgents: () => runtime.rescanAgents(),
-    setAgentPathOverride: (agentId, path) => runtime.setAgentPathOverride(agentId, path)
+    setAgentPathOverride: (agentId, path) => runtime.setAgentPathOverride(agentId, path),
+    getChildMemory: () => runtime.getChildMemory(),
+    setChildMemoryAuthorization: (input) => runtime.setChildMemoryAuthorization(input),
+    saveTaskMemory: (taskId, scope, confirmed) => runtime.saveTaskMemory(taskId, scope, confirmed),
+    deleteChildMemory: (memoryId) => runtime.deleteChildMemory(memoryId),
+    exportChildMemory: () => runtime.exportChildMemory()
   };
 }

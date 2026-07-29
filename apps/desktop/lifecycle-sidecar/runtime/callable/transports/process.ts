@@ -2,7 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { homedir, tmpdir } from "node:os";
 import type {
   ExecutionExit,
-  ExecutionHandle,
+  ExecutionTransportHandle,
   ExecutionSpec,
   ExecutionTransport
 } from "../../../../../../core/callability/agent-core.ts";
@@ -14,10 +14,13 @@ export class ProcessTransport implements ExecutionTransport {
 
   start(input: {
     spec: ExecutionSpec;
-    workspacePath: string;
-  }): ExecutionHandle {
+    workspacePath: string | null;
+  }): ExecutionTransportHandle {
     if (input.spec.kind !== this.kind) {
       throw new Error("ProcessTransport received a non-process execution specification.");
+    }
+    if (!input.workspacePath) {
+      throw new Error("ProcessTransport requires a Host Workspace Snapshot.");
     }
     const child = spawn(input.spec.executable, input.spec.args, {
       cwd: input.workspacePath,
@@ -30,7 +33,7 @@ export class ProcessTransport implements ExecutionTransport {
   }
 }
 
-class ManagedProcessExecution implements ExecutionHandle {
+class ManagedProcessExecution implements ExecutionTransportHandle {
   readonly stdout: NodeJS.ReadableStream;
   readonly stderr: NodeJS.ReadableStream;
   readonly completion: Promise<ExecutionExit>;

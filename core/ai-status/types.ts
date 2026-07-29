@@ -1,12 +1,14 @@
 import type {
   CallablePassportAgent,
   CapabilityBinding,
+  ComputeOffer,
   TetiCapability
 } from "../passport/types.ts";
 
 export const TETI_AI_STATUS_LEGACY_SCHEMA_VERSION = 1;
 export const TETI_AI_STATUS_AGENT_SCHEMA_VERSION = 2;
-export const TETI_AI_STATUS_SCHEMA_VERSION = 3;
+export const TETI_AI_STATUS_CALLABLE_SCHEMA_VERSION = 3;
+export const TETI_AI_STATUS_SCHEMA_VERSION = 4;
 
 export type AiToolStatusKind = "ready" | "stale" | "unavailable";
 export type AiQuotaIdentification = "exact" | "inferred";
@@ -82,10 +84,24 @@ export interface CallablePassportAiStatusSyncPayload {
   bindings: CapabilityBinding[];
 }
 
+/** Schema 4 adds only privacy-minimized receiver-local Compute Offers. */
+export interface ComputePassportAiStatusSyncPayload {
+  schemaVersion: 4;
+  sharing: AiStatusSharing;
+  generatedAt: string;
+  expiresAt: string;
+  tools: AiToolStatusSnapshot[];
+  agents: CallablePassportAgent[];
+  capabilities: TetiCapability[];
+  bindings: CapabilityBinding[];
+  computeOffers: ComputeOffer[];
+}
+
 export type AiStatusSyncPayload =
   | LegacyAiStatusSyncPayload
   | PassportAiStatusSyncPayload
-  | CallablePassportAiStatusSyncPayload;
+  | CallablePassportAiStatusSyncPayload
+  | ComputePassportAiStatusSyncPayload;
 
 export type RemoteAiStatusSnapshot = AiStatusSyncPayload & {
   receivedAt: string;

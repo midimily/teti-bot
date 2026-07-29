@@ -11,7 +11,7 @@ import { join } from "node:path";
 
 const CONFIG_PATH = "/tmp/teti-agent-detectors.override.json";
 
-test("missing or malformed override config keeps the five safe built-in detectors", async () => {
+test("missing or malformed override config keeps the six safe built-in detectors", async () => {
   const missing = await loadAgentDetectorCatalog({
     path: CONFIG_PATH,
     async readText() {
@@ -20,7 +20,7 @@ test("missing or malformed override config keeps the five safe built-in detector
   });
   assert.deepEqual(
     missing.definitions.map((definition) => definition.id),
-    ["codex", "claude-code", "gemini-cli", "cursor", "codebuddy"]
+    ["codex", "osaurus", "claude-code", "gemini-cli", "cursor", "codebuddy"]
   );
   assert.deepEqual(missing.errors, []);
 
@@ -30,7 +30,7 @@ test("missing or malformed override config keeps the five safe built-in detector
   });
   assert.deepEqual(
     malformed.definitions.map((definition) => definition.id),
-    ["codex", "claude-code", "gemini-cli", "cursor", "codebuddy"]
+    ["codex", "osaurus", "claude-code", "gemini-cli", "cursor", "codebuddy"]
   );
   assert.equal(malformed.errors[0]?.code, "AGENT_CONFIG_INVALID_JSON");
 });
@@ -53,7 +53,7 @@ test("override can disable built-ins and the custom-detector kill switch blocks 
 
   assert.deepEqual(
     result.definitions.map((definition) => definition.id),
-    ["codex", "claude-code", "gemini-cli", "codebuddy"]
+    ["codex", "osaurus", "claude-code", "gemini-cli", "codebuddy"]
   );
   assert.equal(result.customDetectorsEnabled, false);
   assert.deepEqual(result.errors, []);

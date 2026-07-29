@@ -192,7 +192,7 @@ export function validateTaskArtifactPayload(
   timestamp(payload.createdAt, "createdAt");
 }
 
-/** Beta 0.2 never speculatively downgrades or sends before a v4 advertisement. */
+/** Beta 0.2 never speculatively downgrades or sends before a v5 advertisement. */
 export function selectTaskProtocolVersion(
   remoteVersions?: readonly number[]
 ): TetiTaskProtocolVersion | null {
@@ -212,9 +212,21 @@ export function canonicalTaskRequestJson(value: CollaborationTaskRequest): strin
     offerId: value.offerId,
     capabilityId: value.capabilityId,
     input: canonicalInput(value.input),
+    ...(value.workspace ? { workspace: canonicalWorkspace(value.workspace) } : {}),
     createdAt: value.createdAt,
     expiresAt: value.expiresAt
   });
+}
+
+function canonicalWorkspace(workspace: NonNullable<CollaborationTaskRequest["workspace"]>): unknown {
+  return workspace.kind === "temporary"
+    ? { kind: "temporary", access: [...workspace.access] }
+    : {
+        kind: "reference",
+        workspaceId: workspace.workspaceId,
+        workspaceRevision: workspace.workspaceRevision,
+        access: [...workspace.access]
+      };
 }
 
 function canonicalInput(input: CollaborationTaskRequest["input"]): unknown {

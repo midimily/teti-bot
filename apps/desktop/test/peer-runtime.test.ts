@@ -227,7 +227,11 @@ test("AI status is opt-in, sent only to confirmed peers, and revoked independent
   assert.equal(confirmed.connections[0]?.remoteAiStatus, undefined);
   assert.deepEqual(
     confirmed.connections[0]?.remoteProtocolCapabilities?.passportSchemaVersions,
-    [3]
+    [4]
+  );
+  assert.deepEqual(
+    confirmed.connections[0]?.remoteProtocolCapabilities?.taskProtocolVersions,
+    [5]
   );
   assert.deepEqual(await runtimeA.getPassportSharing(), resourceSharingPolicy(false));
 
@@ -237,27 +241,27 @@ test("AI status is opt-in, sent only to confirmed peers, and revoked independent
     .map((message) => message.text ? parseApplicationEnvelope(message.text) : null)
     .filter((envelope) => envelope?.type === "teti.ai.status.sync")
     .map((envelope) => (envelope!.payload as { schemaVersion: number }).schemaVersion);
-  assert.deepEqual(schemas, [3], "current peers receive one Callable Passport payload");
+  assert.deepEqual(schemas, [4], "current peers receive one Compute Passport payload");
   const shared = await runtimeB.poll();
   assert.equal(shared.connections[0]?.remoteAiStatus?.sharing, "enabled");
-  assert.equal(shared.connections[0]?.remoteAiStatus?.schemaVersion, 3);
+  assert.equal(shared.connections[0]?.remoteAiStatus?.schemaVersion, 4);
   assert.equal(shared.connections[0]?.remoteAiStatus?.tools[0]?.toolId, "openai.codex");
   assert.equal(shared.connections[0]?.remoteAiStatus?.tools[0]?.plan.key, "plus");
   assert.equal(shared.connections[0]?.remoteAiStatus?.tools[0]?.quotas[0]?.remainingPercent, 42);
   assert.equal(
-    shared.connections[0]?.remoteAiStatus?.schemaVersion === 3
+    shared.connections[0]?.remoteAiStatus?.schemaVersion === 4
       ? shared.connections[0].remoteAiStatus.agents[0]?.id
       : undefined,
     "codex"
   );
   assert.equal(
-    shared.connections[0]?.remoteAiStatus?.schemaVersion === 3
+    shared.connections[0]?.remoteAiStatus?.schemaVersion === 4
       ? shared.connections[0].remoteAiStatus.capabilities[0]?.id
       : undefined,
     "code-analysis"
   );
   assert.deepEqual(
-    shared.connections[0]?.remoteAiStatus?.schemaVersion === 3
+    shared.connections[0]?.remoteAiStatus?.schemaVersion === 4
       ? shared.connections[0].remoteAiStatus.bindings[0]?.agentIds
       : undefined,
     ["codex"]
@@ -275,7 +279,7 @@ test("AI status is opt-in, sent only to confirmed peers, and revoked independent
     .map((message) => message.text ? parseApplicationEnvelope(message.text) : null)
     .filter((envelope) => envelope?.type === "teti.ai.status.sync")
     .map((envelope) => (envelope!.payload as { schemaVersion: number }).schemaVersion);
-  assert.deepEqual(responseSchemas, [3], "known current peers receive one negotiated payload");
+  assert.deepEqual(responseSchemas, [4], "known current peers receive one negotiated payload");
   await runtimeA.poll();
 
   await runtimeA.setPassportSharing(resourceSharingPolicy(false));
@@ -284,19 +288,19 @@ test("AI status is opt-in, sent only to confirmed peers, and revoked independent
     .map((message) => message.text ? parseApplicationEnvelope(message.text) : null)
     .filter((envelope) => envelope?.type === "teti.ai.status.sync")
     .map((envelope) => (envelope!.payload as { schemaVersion: number }).schemaVersion);
-  assert.deepEqual(revokeSchemas, [3]);
+  assert.deepEqual(revokeSchemas, [4]);
   const revoked = await runtimeB.poll();
   assert.equal(revoked.connections[0]?.remoteAiStatus?.sharing, "disabled");
   assert.deepEqual(revoked.connections[0]?.remoteAiStatus?.tools, []);
   assert.deepEqual(
-    revoked.connections[0]?.remoteAiStatus?.schemaVersion === 3
+    revoked.connections[0]?.remoteAiStatus?.schemaVersion === 4
       ? revoked.connections[0].remoteAiStatus.agents
       : undefined,
     []
   );
 });
 
-test("a delayed legacy Passport is rejected without downgrading an established schema 3 snapshot", async () => {
+test("a delayed legacy Passport is rejected without downgrading an established schema 4 snapshot", async () => {
   const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
   const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
   const registry = new StaticRegistry([toIdentity(accountA), toIdentity(accountB)]);
@@ -308,7 +312,7 @@ test("a delayed legacy Passport is rejected without downgrading an established s
   });
   const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), registry);
   await confirmPeers(runtimeA, runtimeB, "beta00002");
-  assert.equal((await runtimeB.list()).connections[0]?.remoteAiStatus?.schemaVersion, 3);
+  assert.equal((await runtimeB.list()).connections[0]?.remoteAiStatus?.schemaVersion, 4);
 
   const delayedLegacy = {
     version: 2,
@@ -327,11 +331,11 @@ test("a delayed legacy Passport is rejected without downgrading an established s
   relay.pushRaw(accountB.address, accountA.address, JSON.stringify(delayedLegacy));
 
   const afterLegacy = await runtimeB.poll();
-  assert.equal(afterLegacy.connections[0]?.remoteAiStatus?.schemaVersion, 3);
+  assert.equal(afterLegacy.connections[0]?.remoteAiStatus?.schemaVersion, 4);
   assert.equal(afterLegacy.connections[0]?.remoteAiStatus?.sharing, "enabled");
 });
 
-test("out-of-order schema 3 Passport snapshots keep the newest generation", async () => {
+test("out-of-order schema 4 Passport snapshots keep the newest generation", async () => {
   const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
   const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
   const registry = new StaticRegistry([toIdentity(accountA), toIdentity(accountB)]);
@@ -352,11 +356,11 @@ test("out-of-order schema 3 Passport snapshots keep the newest generation", asyn
   }
 
   const result = await runtimeB.poll();
-  assert.equal(result.connections[0]?.remoteAiStatus?.schemaVersion, 3);
+  assert.equal(result.connections[0]?.remoteAiStatus?.schemaVersion, 4);
   assert.equal(result.connections[0]?.remoteAiStatus?.generatedAt, "2026-07-27T04:00:00.000Z");
 });
 
-test("a dropped schema 3 Passport is retried without legacy fallback", async () => {
+test("a dropped schema 4 Passport is retried without legacy fallback", async () => {
   let nowMs = Date.parse("2026-07-27T05:00:00.000Z");
   const now = () => new Date(nowMs);
   const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
@@ -383,11 +387,11 @@ test("a dropped schema 3 Passport is retried without legacy fallback", async () 
     .map((message) => message.text ? parseApplicationEnvelope(message.text) : null)
     .filter((envelope) => envelope?.type === "teti.ai.status.sync")
     .map((envelope) => (envelope!.payload as { schemaVersion: number }).schemaVersion);
-  assert.deepEqual(retrySchemas, [3]);
-  assert.equal((await runtimeB.poll()).connections[0]?.remoteAiStatus?.schemaVersion, 3);
+  assert.deepEqual(retrySchemas, [4]);
+  assert.equal((await runtimeB.poll()).connections[0]?.remoteAiStatus?.schemaVersion, 4);
 });
 
-test("Runtime restart retains explicit Peer capability and immediately resends schema 3", async () => {
+test("Runtime restart retains explicit Peer capability and immediately resends schema 4", async () => {
   const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
   const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
   const registry = new StaticRegistry([toIdentity(accountA), toIdentity(accountB)]);
@@ -402,7 +406,7 @@ test("Runtime restart retains explicit Peer capability and immediately resends s
   });
   const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), registry);
   await confirmPeers(runtimeA, runtimeB, "beta00002");
-  assert.deepEqual((await protocolsA.get(accountB.id))?.passportSchemaVersions, [3]);
+  assert.deepEqual((await protocolsA.get(accountB.id))?.passportSchemaVersions, [4]);
 
   const restarted = await makeRuntime(accountA, relay.adapter(accountA.address), registry, connectionsA, {
     passportSharing: sharingA,
@@ -414,7 +418,7 @@ test("Runtime restart retains explicit Peer capability and immediately resends s
     .map((message) => message.text ? parseApplicationEnvelope(message.text) : null)
     .filter((envelope) => envelope?.type === "teti.ai.status.sync")
     .map((envelope) => (envelope!.payload as { schemaVersion: number }).schemaVersion);
-  assert.deepEqual(schemas, [3]);
+  assert.deepEqual(schemas, [4]);
 });
 
 test("sharing consent persistence does not wait for a blocked peer network queue", async () => {
@@ -484,7 +488,7 @@ test("Chatmail keeps a Task offline, receiver stores it once, and returns a rece
   const acknowledged = await runtimeA.listTasks();
   assert.equal(acknowledged.records.length, 1);
   assert.equal(acknowledged.records[0]?.delivery, "acknowledged");
-  assert.deepEqual(acknowledged.peers[0]?.supportedVersions, [4]);
+  assert.deepEqual(acknowledged.peers[0]?.supportedVersions, [5]);
 });
 
 test("Task ID retry is idempotent and conflicting immutable content is rejected", async () => {
@@ -549,7 +553,7 @@ test("known incompatible Task protocol prevents speculative transport", async ()
     records: [],
     peers: [{
       tetiId: accountB.id,
-      supportedVersions: [5],
+      supportedVersions: [4],
       observedAt: "2026-07-26T00:00:00.000Z"
     }]
   });
@@ -563,7 +567,7 @@ test("known incompatible Task protocol prevents speculative transport", async ()
     records: [],
     peers: [{
       tetiId: accountB.id,
-      supportedVersions: [5],
+      supportedVersions: [4],
       observedAt: "2026-07-26T03:00:00.000Z"
     }]
   });
@@ -611,6 +615,43 @@ test("a confirmed 0.1 peer is reachable but explicitly requires upgrade and cann
   assert.equal(relay.peek(accountB.address).filter(isTaskRequestMessage).length, 0);
 });
 
+test("two peers execute an abstract receiver-local Compute Offer without sharing Runtime bindings", async () => {
+  const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
+  const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
+  const registry = new StaticRegistry([toIdentity(accountA), toIdentity(accountB)]);
+  const relay = new MemoryChatmailRelay();
+  const executor = new FakeLocalComputeTaskExecutor();
+  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), registry);
+  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), registry, undefined, {
+    taskExecutor: executor
+  });
+  const connection = await confirmPeers(runtimeA, runtimeB, "beta00002");
+  const sent = await runtimeA.sendTask({
+    connectionRequestId: connection.requestId,
+    offerId: "local.compute.general-text-assistance.v1",
+    capabilityId: "general-text-assistance",
+    text: "Summarize this with receiver-local compute."
+  });
+  assert.equal(sent.request.offerId, "local.compute.general-text-assistance.v1");
+  assert.doesNotMatch(
+    JSON.stringify(sent.request),
+    /"(?:endpoint|port|model|path|hardware|credential|token|agentId|adapterId|config)"/i
+  );
+
+  await runtimeB.poll();
+  const working = await runtimeB.approveTask(sent.request.taskId);
+  assert.equal(working.approval, "consumed");
+  assert.equal(working.workspaceBinding?.workspaceId, `workspace:none.${sent.request.taskId}`);
+  assert.deepEqual(working.workspaceBinding?.access, ["read"]);
+  assert.equal(executor.resolvedOfferId, sent.request.offerId);
+  await flushBackgroundWork();
+  await flushBackgroundWork();
+  await runtimeA.poll();
+  const result = (await runtimeA.listTasks()).records[0];
+  assert.equal(result?.state, "completed");
+  assert.match(JSON.stringify(result?.artifacts), /receiver-local answer/);
+});
+
 test("two peers deliver a verified image Task, approve once, execute, and return an Artifact", async () => {
   const root = await mkdtemp(join(tmpdir(), "teti-task-e2e-"));
   try {
@@ -639,7 +680,7 @@ test("two peers deliver a verified image Task, approve once, execute, and return
       text: "Read the attached pixel.",
       attachments: [staged.part]
     });
-    assert.equal(sent.protocolVersion, 4);
+    assert.equal(sent.protocolVersion, 5);
 
     await runtimeB.poll();
     const inbox = await runtimeB.listTasks();
@@ -693,7 +734,7 @@ test("two-image editing returns a verified image Artifact after completed status
       text: "Merge these two reference images and return the edited image.",
       attachments: [first.part, second.part]
     });
-    assert.equal(sent.protocolVersion, 4);
+    assert.equal(sent.protocolVersion, 5);
 
     await runtimeB.poll();
     await runtimeB.approveTask(sent.request.taskId);
@@ -730,7 +771,7 @@ test("two-image editing returns a verified image Artifact after completed status
   }
 });
 
-test("Task v4 resends only missing images until a four-image request is complete", async () => {
+test("Task v5 resends only missing images until a four-image request is complete", async () => {
   const root = await mkdtemp(join(tmpdir(), "teti-task-v4-image-retry-"));
   try {
     const source = join(root, "source.png");
@@ -757,12 +798,12 @@ test("Task v4 resends only missing images until a four-image request is complete
     }
     const sent = await runtimeA.sendTask({
       connectionRequestId: connection.requestId,
-      taskId: "task-v4-four-image-retry",
+      taskId: "task-v5-four-image-retry",
       capabilityId: "image-editing",
       text: "Use all four reference images.",
       attachments
     });
-    assert.equal(sent.protocolVersion, 4);
+    assert.equal(sent.protocolVersion, 5);
     assert.equal(relay.dropFirstApplicationMessage(accountB.address, "teti.task.attachment"), true);
     assert.equal(relay.dropFirstApplicationMessage(accountB.address, "teti.task.attachment"), true);
 
@@ -1299,12 +1340,12 @@ test("Runtime restart durably fails interrupted work and reports recovery to the
   );
   const recovered = await restartedB.getTask(sent.request.taskId);
   assert.equal(recovered.state, "failed");
-  assert.equal(recovered.safeErrorCode, "TASK_RUNTIME_RESTARTED");
+  assert.equal(recovered.safeErrorCode, "TASK_EXECUTION_INTERRUPTED");
   await restartedB.poll();
   await runtimeA.poll();
   const reported = await runtimeA.getTask(sent.request.taskId);
   assert.equal(reported.state, "failed");
-  assert.equal(reported.safeErrorCode, "TASK_RUNTIME_RESTARTED");
+  assert.equal(reported.safeErrorCode, "TASK_EXECUTION_INTERRUPTED");
 });
 
 test("expired Agent authentication returns to explicit allow-once after local login", async () => {
@@ -1434,8 +1475,8 @@ test("an oversized malicious envelope is isolated without blocking the next vali
       status: "alpha-heartbeat",
       timestamp: new Date().toISOString(),
       collaborationProtocolEpoch: 2,
-      taskProtocolVersions: [4],
-      passportSchemaVersions: [3]
+      taskProtocolVersions: [5],
+      passportSchemaVersions: [4]
     }
   });
   relay.pushRaw(accountB.address, accountA.address, serializeApplicationEnvelope(presence));
@@ -1527,14 +1568,15 @@ function localCodexAgent(): CallableAgent {
 
 function emptyCallablePassport(generatedAt: string): AiStatusSyncPayload {
   return {
-    schemaVersion: 3,
+    schemaVersion: 4,
     sharing: "enabled",
     generatedAt,
     expiresAt: new Date(Date.parse(generatedAt) + 30 * 60 * 1_000).toISOString(),
     tools: [],
     agents: [],
     capabilities: [],
-    bindings: []
+    bindings: [],
+    computeOffers: []
   };
 }
 
@@ -1831,7 +1873,7 @@ class FakeTaskExecutor implements TaskExecutionBridge {
   readonly requests: CallableAdapterTaskRequest[] = [];
   private readonly tasks = new Map<string, CallableAdapterTaskSnapshot>();
 
-  resolveTarget(capabilityId: string, requiredInputModes: readonly ("text" | "image")[]) {
+  resolveTarget(_offerId: string, capabilityId: string, requiredInputModes: readonly ("text" | "image")[]) {
     if (capabilityId !== "code-analysis" || !requiredInputModes.includes("text")) return null;
     return { connectorId: "fake.adapter", childAgentId: "fake-agent", capabilityId };
   }
@@ -1871,6 +1913,35 @@ class FakeTaskExecutor implements TaskExecutionBridge {
   }
 }
 
+class FakeLocalComputeTaskExecutor implements TaskExecutionBridge {
+  resolvedOfferId = "";
+  private task: CallableAdapterTaskSnapshot | null = null;
+
+  resolveTarget(offerId: string, capabilityId: string, requiredInputModes: readonly ("text" | "image")[]) {
+    this.resolvedOfferId = offerId;
+    return offerId === "local.compute.general-text-assistance.v1"
+      && capabilityId === "general-text-assistance"
+      && requiredInputModes.length === 1
+      && requiredInputModes[0] === "text"
+      ? { connectorId: "osaurus.runtime.bonsai-chat", childAgentId: "osaurus-runtime", capabilityId }
+      : null;
+  }
+
+  async execute(request: CallableAdapterTaskRequest): Promise<CallableAdapterTaskSnapshot> {
+    this.task = {
+      ...workingSnapshot(request),
+      state: "completed",
+      updatedAt: new Date().toISOString(),
+      completedAt: new Date().toISOString(),
+      artifact: { kind: "text", text: "receiver-local answer" }
+    };
+    return structuredClone(this.task);
+  }
+
+  getTask(): CallableAdapterTaskSnapshot | null { return structuredClone(this.task); }
+  cancel(): boolean { return false; }
+}
+
 class FakeImageTaskExecutor implements TaskExecutionBridge {
   private readonly store: FileTaskAttachmentStore;
   private readonly resultSource: string;
@@ -1880,7 +1951,7 @@ class FakeImageTaskExecutor implements TaskExecutionBridge {
     this.resultSource = resultSource;
   }
 
-  resolveTarget(capabilityId: string) {
+  resolveTarget(_offerId: string, capabilityId: string) {
     return capabilityId === "image-editing"
       ? { connectorId: "fake.image", childAgentId: "fake-image", capabilityId }
       : null;
@@ -1906,7 +1977,7 @@ class FakeImageTaskExecutor implements TaskExecutionBridge {
 }
 
 class MissingImageTaskExecutor implements TaskExecutionBridge {
-  resolveTarget(capabilityId: string) {
+  resolveTarget(_offerId: string, capabilityId: string) {
     return capabilityId === "image-editing"
       ? { connectorId: "fake.missing-image", childAgentId: "fake-image", capabilityId }
       : null;
@@ -1929,7 +2000,7 @@ class MissingImageTaskExecutor implements TaskExecutionBridge {
 class HangingTaskExecutor implements TaskExecutionBridge {
   private readonly tasks = new Map<string, CallableAdapterTaskSnapshot>();
 
-  resolveTarget(capabilityId: string) {
+  resolveTarget(_offerId: string, capabilityId: string) {
     return { connectorId: "fake.adapter", childAgentId: "fake-agent", capabilityId };
   }
 
@@ -1952,7 +2023,7 @@ class RecoveringAuthTaskExecutor implements TaskExecutionBridge {
   readonly tasks = new Map<string, CallableAdapterTaskSnapshot>();
   authenticated = false;
 
-  resolveTarget(capabilityId: string) {
+  resolveTarget(_offerId: string, capabilityId: string) {
     return { connectorId: "fake.adapter", childAgentId: "fake-agent", capabilityId };
   }
 

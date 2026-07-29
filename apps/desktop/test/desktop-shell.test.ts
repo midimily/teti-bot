@@ -159,6 +159,23 @@ test("notch mode updates coalesce before native dispatch and keep the latest mod
   ]);
 });
 
+test("measured connection detail height follows its active native mode", async () => {
+  const invoker = new RecordingTauriInvoker();
+  const controller = new TauriNotchWindowController(invoker);
+
+  const open = controller.setMode("connection_detail", "peer-details-open");
+  const resize = controller.setConnectionDetailHeight(704.4, "peer-details-measured");
+  await Promise.all([open, resize]);
+
+  assert.deepEqual(invoker.calls, [
+    { command: "set_island_mode", args: { mode: "connection_detail", reason: "peer-details-open" } },
+    {
+      command: "set_connection_detail_height",
+      args: { height: 704, reason: "peer-details-measured" }
+    }
+  ]);
+});
+
 test("recording Tauri bridge delivers Dock activation events", async () => {
   const invoker = new RecordingTauriInvoker();
   let activations = 0;

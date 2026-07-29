@@ -113,16 +113,16 @@ function validatePayload(type: TetiApplicationMessageType, payload: Record<strin
     }
     try {
       validateTaskProtocolVersions(payload.taskProtocolVersions);
-      if (payload.taskProtocolVersions.length !== 1 || payload.taskProtocolVersions[0] !== 4) {
-        throw new Error("0.2 requires Task protocol v4.");
+      if (payload.taskProtocolVersions.length !== 1 || payload.taskProtocolVersions[0] !== 5) {
+        throw new Error("0.2 requires Task protocol v5.");
       }
     } catch {
       throw new TetiApplicationProtocolError("Presence task protocol versions are invalid.");
     }
     try {
       validatePassportSchemaVersions(payload.passportSchemaVersions);
-      if (payload.passportSchemaVersions.length !== 1 || payload.passportSchemaVersions[0] !== 3) {
-        throw new Error("0.2 requires Passport schema 3.");
+      if (payload.passportSchemaVersions.length !== 1 || payload.passportSchemaVersions[0] !== 4) {
+        throw new Error("0.2.4 requires Passport schema 4.");
       }
     } catch {
       throw new TetiApplicationProtocolError("Presence Passport schema versions are invalid.");
@@ -132,8 +132,8 @@ function validatePayload(type: TetiApplicationMessageType, payload: Record<strin
 
   if (type === "teti.ai.status.sync") {
     try {
-      if (payload.schemaVersion !== 3) {
-        throw new Error("0.2 requires Callable Passport schema 3.");
+      if (payload.schemaVersion !== 4) {
+        throw new Error("0.2.4 requires Compute Passport schema 4.");
       }
       validateAiStatusSyncPayload(payload);
     } catch {
@@ -144,8 +144,8 @@ function validatePayload(type: TetiApplicationMessageType, payload: Record<strin
 
   if (type === "teti.task.request") {
     try {
-      if (payload.schemaVersion !== 4) {
-        throw new Error("0.2 requires Task protocol v4.");
+      if (payload.schemaVersion !== 5) {
+        throw new Error("0.2 requires Task protocol v5.");
       }
       validateCollaborationTaskRequest(payload);
     } catch {

@@ -112,7 +112,7 @@ export interface QualifyCodeBuddyConnectorOptions {
 
 export class CodeBuddyConnector implements AgentConnector {
   readonly descriptor = {
-    contractVersion: 1 as const,
+    contractVersion: 2 as const,
     connectorId: CODEBUDDY_CONNECTOR.connectorId,
     connectorRevision: CODEBUDDY_CONNECTOR.connectorRevision,
     childAgentId: CODEBUDDY_CONNECTOR.childAgentId,
@@ -120,6 +120,14 @@ export class CodeBuddyConnector implements AgentConnector {
     inputModes: ["text"] as const,
     outputModes: ["text"] as const,
     transportKind: "process" as const,
+    executionCapabilities: {
+      supportsProgress: false,
+      supportsPause: false,
+      supportsResume: false,
+      supportsCheckpoint: false,
+      supportsCancel: true
+    },
+    executionSemantics: "external_side_effects_possible" as const,
     timeoutMs: CODEBUDDY_CONNECTOR.timeoutMs,
     cancelGraceMs: CODEBUDDY_CONNECTOR.cancelGraceMs,
     maxOutputBytes: CODEBUDDY_CONNECTOR.maxOutputBytes

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
@@ -17,6 +18,7 @@ import {
 } from "../lifecycle-sidecar/runtime/callable/kernel.ts";
 import { FakeTransport } from "../lifecycle-sidecar/runtime/callable/transports/fake.ts";
 import { LoopbackHttpTransport } from "../lifecycle-sidecar/runtime/callable/transports/loopback-http.ts";
+import { FileCollaborationWorkspaceStore } from "../lifecycle-sidecar/runtime/workspaces/store.ts";
 
 const fixedDate = new Date("2026-07-28T00:00:00.000Z");
 
@@ -39,8 +41,11 @@ test("FakeTransport proves Host authorization and stdin delivery without a proce
   assert.equal(result.artifact?.text, "fake:hello host");
   assert.deepEqual(Object.keys(context!).sort(), [
     "capabilityId",
+    "checkpointRef",
+    "executionEpoch",
     "images",
     "taskId",
+    "workspaceContext",
     "workspacePath"
   ]);
   assert.equal("authority" in context!, false);
@@ -96,6 +101,48 @@ test("ExecutionAuthority is exact-input-bound, expiring, and single-use", async 
   await hostAgent.shutdown();
 });
 
+test("Host executes in a versioned Workspace Snapshot and atomically commits Agent changes", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "teti-host-workspace-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const workspaceStore = new FileCollaborationWorkspaceStore(root, { now: () => fixedDate });
+  await workspaceStore.initialize();
+  const workspace = await workspaceStore.create({
+    workspaceId: "workspace-host-001",
+    ownerTetiId: "teti_owner0001",
+    participantTetiIds: ["teti_peer00001"],
+    mode: "durable_collaboration"
+  });
+  const transport = new FakeTransport(new Map([
+    ["echo", async (input: string, workspacePath: string) => {
+      await writeFile(join(workspacePath, "agent-result.txt"), input, "utf8");
+      return { stdout: "committed" };
+    }]
+  ]));
+  const hostAgent = new TetiHostAgentKernel({
+    connectors: [fakeConnector()],
+    transports: [transport],
+    workspaceStore,
+    now: () => fixedDate
+  });
+  const request = task("workspace-snapshot-task");
+  const result = await hostAgent.execute(request, issueExecutionAuthority(request, {
+    now: fixedDate,
+    workspaceId: workspace.workspaceId,
+    workspaceRevision: workspace.revision,
+    workspaceAccess: ["read", "write", "create_artifact"]
+  }));
+  assert.equal(result.state, "completed");
+  assert.equal((await workspaceStore.get(workspace.workspaceId))?.revision, 2);
+  const committed = await workspaceStore.createSnapshot({
+    workspaceId: workspace.workspaceId,
+    workspaceRevision: 2,
+    access: ["read"]
+  });
+  assert.equal(await readFile(join(committed.snapshotPath, "agent-result.txt"), "utf8"), "hello host");
+  await workspaceStore.discardSnapshot(committed);
+  await hostAgent.shutdown();
+});
+
 test("Connector and Passport projections contain no collaboration identity or transport details", async () => {
   const connector = fakeConnector();
   assert.doesNotThrow(() => validateAgentConnector(connector));
@@ -120,29 +167,39 @@ test("Connector and Passport projections contain no collaboration identity or tr
   const connectorSources = await Promise.all([
     readFile(join(repositoryRoot, "integrations", "agents", "codex", "adapter.ts"), "utf8"),
     readFile(join(repositoryRoot, "integrations", "agents", "codex", "image-adapter.ts"), "utf8"),
-    readFile(join(repositoryRoot, "integrations", "agents", "codebuddy", "qualification.ts"), "utf8")
+    readFile(join(repositoryRoot, "integrations", "agents", "codebuddy", "qualification.ts"), "utf8"),
+    readFile(join(repositoryRoot, "integrations", "agents", "osaurus", "connector.ts"), "utf8")
   ]);
   const forbiddenImport = /from\s+["'][^"']*(?:passport|chatmail|connection)[^"']*["']/i;
   connectorSources.forEach((source) => assert.equal(forbiddenImport.test(source), false));
   await hostAgent.shutdown();
 });
 
-test("LoopbackHttpTransport is reserved and cannot perform network execution in 0.2.1", () => {
-  const transport = new LoopbackHttpTransport();
+test("LoopbackHttpTransport refuses Host Workspace access in 0.2.4", () => {
+  const transport = new LoopbackHttpTransport({
+    identityVerifier: {
+      async verifyListener() {},
+      async verifyConnectedSocket() {}
+    }
+  });
   assert.throws(() => transport.start({
     spec: {
       kind: "loopback_http",
-      endpoint: "http://127.0.0.1:1234",
-      requestId: "reserved-request"
+      endpoint: "http://127.0.0.1:1234/v1/chat/completions",
+      requestId: "reserved-request",
+      runtimeInstanceId: "11111111-1111-4111-8111-111111111111",
+      model: "OsaurusAI/Bonsai-27b-1bit-JANG",
+      listenerPid: 123,
+      codeIdentityHash: `sha256:${"a".repeat(64)}`
     },
     workspacePath: "/private/tmp/reserved"
-  }), /reserved and disabled/);
+  }), /refuses Host Workspace/);
 });
 
 function fakeConnector(capture?: (context: AgentConnectorContext) => void): AgentConnector {
   return {
     descriptor: {
-      contractVersion: 1,
+      contractVersion: 2,
       connectorId: "test.fake.connector",
       connectorRevision: 1,
       childAgentId: "fake-child",
@@ -150,6 +207,14 @@ function fakeConnector(capture?: (context: AgentConnectorContext) => void): Agen
       inputModes: ["text"],
       outputModes: ["text"],
       transportKind: "fake",
+      executionCapabilities: {
+        supportsProgress: false,
+        supportsPause: false,
+        supportsResume: false,
+        supportsCheckpoint: false,
+        supportsCancel: true
+      },
+      executionSemantics: "external_side_effects_possible",
       timeoutMs: 2_000,
       cancelGraceMs: 20,
       maxOutputBytes: 4 * 1_024

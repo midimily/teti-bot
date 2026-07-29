@@ -18,11 +18,16 @@ use objc2_foundation::{
 use tauri::{AppHandle, Manager, WebviewWindow, Wry};
 use tauri_nspanel::WebviewWindowExt;
 
-use crate::window::{size_for_mode_on_monitor, IslandMode, MonitorInfo};
+use crate::window::{
+    connection_detail_height, size_for_mode_on_monitor, IslandMode, MonitorInfo,
+    CONNECTION_DETAIL_BASE_HEIGHT,
+};
 
 const ISLAND_LABEL: &str = "island";
 const BOTTOM_CORNER_MASK: usize = 3;
 static CURRENT_MODE: AtomicU8 = AtomicU8::new(1);
+static CURRENT_DETAIL_HEIGHT_BITS: AtomicU64 =
+    AtomicU64::new(CONNECTION_DETAIL_BASE_HEIGHT.to_bits());
 static REFRESH_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 pub fn configure(window: &WebviewWindow<Wry>) -> Result<(), String> {
@@ -48,7 +53,20 @@ pub fn configure(window: &WebviewWindow<Wry>) -> Result<(), String> {
 
 pub fn resize_and_pin(app: &AppHandle, mode: IslandMode) -> Result<(), String> {
     CURRENT_MODE.store(mode_code(mode), Ordering::SeqCst);
+    if mode == IslandMode::ConnectionDetail {
+        CURRENT_DETAIL_HEIGHT_BITS.store(CONNECTION_DETAIL_BASE_HEIGHT.to_bits(), Ordering::SeqCst);
+    }
     run_on_main_thread(app, move |handle| resize_and_pin_on_main(handle, mode))
+}
+
+pub fn resize_connection_detail(app: &AppHandle, requested_height: f64) -> Result<(), String> {
+    if mode_from_code(CURRENT_MODE.load(Ordering::SeqCst)) != IslandMode::ConnectionDetail {
+        return Err("Connection detail panel is not active".to_owned());
+    }
+    CURRENT_DETAIL_HEIGHT_BITS.store(requested_height.to_bits(), Ordering::SeqCst);
+    run_on_main_thread(app, move |handle| {
+        resize_and_pin_on_main(handle, IslandMode::ConnectionDetail)
+    })
 }
 
 pub fn current_screen_info(app: &AppHandle) -> Result<Option<MonitorInfo>, String> {
@@ -102,7 +120,11 @@ fn resize_and_pin_on_main(app: &AppHandle, mode: IslandMode) -> Result<(), Strin
     let screen = resolve_target_screen(mtm, panel)
         .ok_or_else(|| "No macOS screen is available".to_owned())?;
     let info = screen_info(&screen);
-    let base = size_for_mode_on_monitor(mode, info.has_notch);
+    let mut base = size_for_mode_on_monitor(mode, info.has_notch);
+    if mode == IslandMode::ConnectionDetail {
+        let requested = f64::from_bits(CURRENT_DETAIL_HEIGHT_BITS.load(Ordering::SeqCst));
+        base.height = connection_detail_height(requested, info.height as f64);
+    }
     let safe_top = if info.has_notch {
         info.safe_top_inset
     } else {
@@ -125,7 +147,10 @@ fn resize_and_pin_on_main(app: &AppHandle, mode: IslandMode) -> Result<(), Strin
     panel.setHasShadow(!matches!(mode, IslandMode::Hidden | IslandMode::Idle));
     let accepts_input = matches!(
         mode,
-        IslandMode::Onboarding | IslandMode::Error | IslandMode::Task
+        IslandMode::Onboarding
+            | IslandMode::ConnectionDetail
+            | IslandMode::Error
+            | IslandMode::Task
     );
     panel.setBecomesKeyOnlyIfNeeded(!accepts_input);
     apply_content_clip(
@@ -214,7 +239,11 @@ fn panel_height(mode: IslandMode, base_height: f64, safe_top: f64, has_notch: bo
     if has_notch
         && matches!(
             mode,
-            IslandMode::Onboarding | IslandMode::Processing | IslandMode::Error | IslandMode::Task
+            IslandMode::Onboarding
+                | IslandMode::ConnectionDetail
+                | IslandMode::Processing
+                | IslandMode::Error
+                | IslandMode::Task
         )
     {
         return base_height;
@@ -304,6 +333,7 @@ const fn mode_code(mode: IslandMode) -> u8 {
         IslandMode::Error => 4,
         IslandMode::Ready => 5,
         IslandMode::Task => 6,
+        IslandMode::ConnectionDetail => 7,
     }
 }
 
@@ -315,6 +345,7 @@ const fn mode_from_code(code: u8) -> IslandMode {
         4 => IslandMode::Error,
         5 => IslandMode::Ready,
         6 => IslandMode::Task,
+        7 => IslandMode::ConnectionDetail,
         _ => IslandMode::Idle,
     }
 }
@@ -340,6 +371,10 @@ mod tests {
         assert_eq!(
             panel_height(IslandMode::Onboarding, 352.0, 32.0, true),
             352.0
+        );
+        assert_eq!(
+            panel_height(IslandMode::ConnectionDetail, 700.0, 32.0, true),
+            700.0
         );
         assert_eq!(
             panel_height(IslandMode::Processing, 300.0, 32.0, true),

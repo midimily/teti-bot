@@ -8,6 +8,7 @@ import {
   CONNECT_PANEL_CLOSE_MS,
   CONNECT_PANEL_OPEN_MS,
   CONNECT_PANEL_SUCCESS_MS,
+  CONNECTION_DETAILS_TRANSITION_MS,
   PeerConnectionController,
   type PeerConnectionClient,
   type PeerConnectionCommandResult
@@ -69,6 +70,50 @@ test("controller starts with the connect panel idle and opens it only through th
   scheduler.runDelay(CONNECT_PANEL_OPEN_MS);
   assert.equal(controller.snapshot.connectPanel.state, "editing");
   assert.equal(controller.snapshot.connectPanel.message, "");
+});
+
+test("confirmed peer details persist in controller state and Escape returns to the list row", () => {
+  const { controller } = makeHarness();
+  const connection = confirmedConnection("detail-peer");
+  controller.syncPassportConnections([connection]);
+  controller.open();
+
+  controller.openDetails(connection.requestId);
+  assert.equal(controller.snapshot.expandedRequestId, connection.requestId);
+  assert.equal(controller.snapshot.open, true);
+  assert.equal(controller.handleEscape(), true);
+  assert.equal(controller.snapshot.expandedRequestId, undefined);
+  assert.equal(controller.snapshot.open, true, "Escape closes details before the connection island");
+
+  controller.openDetails(connection.requestId);
+  controller.syncPassportConnections([]);
+  assert.equal(controller.snapshot.expandedRequestId, undefined, "removed peers cannot leave orphaned details open");
+});
+
+test("inline details grow the native window before shrinking after the accordion transition", async () => {
+  const { controller, scheduler, invoker } = makeHarness();
+  const connection = confirmedConnection("detail-window-peer");
+  controller.syncPassportConnections([connection]);
+  controller.open();
+  await flushPromises();
+  invoker.calls.length = 0;
+
+  controller.openDetails(connection.requestId);
+  await flushPromises();
+  assert.deepEqual(invoker.calls.at(-1), {
+    command: "set_island_mode",
+    args: { mode: "connection_detail", reason: "peer-details-open" }
+  });
+
+  controller.closeDetails();
+  assert.equal(controller.snapshot.expandedRequestId, undefined);
+  assert.equal(scheduler.hasDelay(CONNECTION_DETAILS_TRANSITION_MS), true);
+  scheduler.runDelay(CONNECTION_DETAILS_TRANSITION_MS);
+  await flushPromises();
+  assert.deepEqual(invoker.calls.at(-1), {
+    command: "set_island_mode",
+    args: { mode: "onboarding", reason: "peer-details-close" }
+  });
 });
 
 test("peer identity input trims pasted-style whitespace, folds case, and caps at 9 characters", () => {
@@ -361,15 +406,21 @@ test("connection UI keeps status inside the input and closes on clicks outside i
   assert.match(styles, /@media \(prefers-reduced-motion: reduce\)/);
 });
 
-test("connection UI renders the complete existing card list inside a bounded scroller", async () => {
+test("connection UI renders the complete semantic row list inside a bounded scroller", async () => {
   const [appSource, styles] = await Promise.all([
     readFile(new URL("../src/app.ts", import.meta.url), "utf8"),
     readFile(new URL("../src/styles.css", import.meta.url), "utf8")
   ]);
 
   assert.doesNotMatch(appSource, /slice\(0,\s*3\)/);
-  assert.match(styles, /\.teti-connection-list\s*\{[\s\S]*max-height:\s*138px/);
+  assert.match(appSource, /document\.createElement\("ul"\)/);
+  assert.match(appSource, /document\.createElement\("li"\)/);
+  assert.match(appSource, /teti-connection-disclosure/);
+  assert.doesNotMatch(appSource, /•••/);
+  assert.match(styles, /\.teti-connection-list\s*\{[\s\S]*max-height:\s*196px/);
   assert.match(styles, /\.teti-connection-list\s*\{[\s\S]*overflow-y:\s*auto/);
+  assert.match(styles, /Beta 0\.2\.1 connection-list integration:[\s\S]*\.teti-connection-row\.is-confirmed \.teti-connection-row-main\s*\{[\s\S]*height:\s*64px/);
+  assert.match(styles, /\.teti-island--connections\.has-peer-details \.teti-connection-list\s*\{[\s\S]*max-height:/);
   assert.match(styles, /\.teti-pending-indicator\s*\{/);
   assert.match(styles, /data-has-notch="true"\]\s+\.teti-header\s*\{[\s\S]*grid-template-columns/);
   assert.match(styles, /data-has-notch="true"\]\s+\.teti-island--connections\s*\{[\s\S]*safe-top-inset/);
@@ -378,13 +429,15 @@ test("connection UI renders the complete existing card list inside a bounded scr
 function makeHarness(client: PeerConnectionClient = new StaticPeerConnectionClient(emptyResult)): {
   controller: PeerConnectionController;
   scheduler: ControlledScheduler;
+  invoker: RecordingTauriInvoker;
   client: PeerConnectionClient & { requestCalls: string[] };
 } {
   const scheduler = new ControlledScheduler();
+  const invoker = new RecordingTauriInvoker();
   let controller: PeerConnectionController;
   controller = new PeerConnectionController({
     client,
-    notchWindow: new TauriNotchWindowController(new RecordingTauriInvoker()),
+    notchWindow: new TauriNotchWindowController(invoker),
     onChange: () => undefined,
     refreshPassport: async () => {
       const connections = (client as Partial<TestPeerConnectionClient>).connections ?? [];
@@ -396,8 +449,13 @@ function makeHarness(client: PeerConnectionClient = new StaticPeerConnectionClie
   return {
     controller,
     scheduler,
+    invoker,
     client: client as PeerConnectionClient & { requestCalls: string[] }
   };
+}
+
+async function flushPromises(): Promise<void> {
+  await new Promise<void>((resolve) => setImmediate(resolve));
 }
 
 function openEditor(controller: PeerConnectionController, scheduler: ControlledScheduler): void {

@@ -100,16 +100,31 @@ test("remote avatar uses an accessible blue silhouette with a static yellow chec
   assert.doesNotMatch(app, /createElement\(Radio/);
 });
 
-test("confirmed cards use only the avatar for presence while retaining AI status", async () => {
-  const [app, styles] = await Promise.all([
+test("confirmed peers use a stable identity-first semantic list summary", async () => {
+  const [app, passportView, styles] = await Promise.all([
     readFile(new URL("../src/app.ts", import.meta.url), "utf8"),
+    readFile(new URL("../src/passport/view.ts", import.meta.url), "utf8"),
     readFile(new URL("../src/styles.css", import.meta.url), "utf8")
   ]);
 
-  assert.match(app, /row\.prepend\(createRemoteTetiAvatar\(\{/);
+  assert.match(app, /main\.append\(createRemoteTetiAvatar\(\{/);
   assert.match(app, /label:\s*connection\.reachabilityLabel/);
+  assert.match(app, /name\.textContent = connection\.displayName/);
+  assert.match(app, /publicId\.textContent = connection\.publicIdCode/);
+  assert.match(app, /document\.createElement\("ul"\)/);
+  assert.match(app, /document\.createElement\("li"\)/);
+  assert.match(app, /teti-connection-disclosure/);
+  assert.doesNotMatch(app, /row\.addEventListener\("click"/);
+  assert.doesNotMatch(app, /•••/);
+  assert.doesNotMatch(app, /connection\.address/);
   assert.doesNotMatch(app, /teti-connection-presence|teti-connection-relationship|teti-connection-reachability/);
   assert.match(app, /state\.append\(createRemotePassport\(connection\.passport\)\)/);
+  assert.match(passportView, /viewModel\.summary\.resource/);
+  assert.match(passportView, /viewModel\.summary\.agents/);
+  assert.match(passportView, /viewModel\.summary\.capabilities/);
+  assert.match(passportView, /name\.textContent = agent\.name/);
+  assert.match(passportView, /teti-peer-signal-summary/);
+  assert.match(passportView, /createSummaryOverflow/);
   assert.match(app, /connection\.compatibility !== "compatible"/);
   assert.match(app, /setAttribute\("role", "alertdialog"\)/);
   assert.match(app, /本机 Teti 的所有功能均暂停使用/);
@@ -118,8 +133,10 @@ test("confirmed cards use only the avatar for presence while retaining AI status
   assert.doesNotMatch(app, /teti-brand-dot/);
   assert.match(
     styles,
-    /\.teti-connection-row\.is-confirmed \.teti-connection-state\s*\{[\s\S]*width:\s*max-content;[\s\S]*justify-self:\s*end;[\s\S]*white-space:\s*nowrap;/
+    /Beta 0\.2\.1 connection-list integration:[\s\S]*\.teti-connection-row\.is-confirmed \.teti-connection-row-main\s*\{[\s\S]*height:\s*64px;[\s\S]*grid-template-columns:\s*28px minmax\(76px, 96px\) minmax\(0, 1fr\) 28px;/
   );
+  assert.match(styles, /Beta 0\.2\.1 connection-list integration:[\s\S]*\.teti-peer-ai-status\s*\{[\s\S]*grid-template-rows:\s*repeat\(2, 17px\);/);
+  assert.match(styles, /\.teti-island--connections\.has-peer-details \.teti-connection-list\s*\{[\s\S]*max-height:/);
 });
 
 function confirmedPeer(

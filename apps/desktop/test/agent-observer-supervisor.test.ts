@@ -24,7 +24,7 @@ test("Passport Agent list stays empty until the first discovery completes", asyn
   catalogGate.resolve(builtinCatalog());
   const snapshot = await discovery;
   assert.equal(snapshot.state, "ready");
-  assert.equal(observer.getPassportAgents().length, 5);
+  assert.equal(observer.getPassportAgents().length, 6);
   assert.equal(observer.getPassportAgents().find((agent) => agent.id === "codex")?.installationStatus, "installed");
   assert.equal(observer.getPassportAgents().find((agent) => agent.id === "claude-code")?.runtimeStatus, "running");
 });
@@ -100,7 +100,7 @@ test("damaged configuration degrades the snapshot without suppressing healthy bu
   const snapshot = await observer.discover();
   assert.equal(snapshot.state, "degraded");
   assert.equal(snapshot.errors[0]?.code, "AGENT_CONFIG_INVALID_JSON");
-  assert.equal(snapshot.agents.length, 5);
+  assert.equal(snapshot.agents.length, 6);
   assert.equal(snapshot.agents.find((agent) => agent.agentId === "codex")?.installation?.state, "installed");
 });
 

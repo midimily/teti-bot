@@ -16,6 +16,7 @@ import {
   validateCollaborationTaskRequest,
   validateTaskArtifact
 } from "../../../../../core/task/validation.ts";
+import { validateTaskWorkspaceBinding } from "../../../../../core/workspace/validation.ts";
 
 export interface TaskTransportStore {
   load(): Promise<TetiTaskTransportStoreState>;
@@ -121,6 +122,7 @@ function validateRecord(value: unknown): asserts value is CollaborationTaskTrans
     "attachmentDeliveryAttempts",
     "artifactAttachmentDeliveryAttempts",
     "attachmentDiagnostics",
+    "workspaceBinding",
     "request",
     "state",
     "approval",
@@ -146,7 +148,8 @@ function validateRecord(value: unknown): asserts value is CollaborationTaskTrans
     || (value.protocolVersion !== 1
       && value.protocolVersion !== 2
       && value.protocolVersion !== 3
-      && value.protocolVersion !== 4)) {
+      && value.protocolVersion !== 4
+      && value.protocolVersion !== 5)) {
     throw new Error("Teti Task transport record peer is invalid.");
   }
   if (value.envelopeMessageId !== undefined
@@ -199,6 +202,7 @@ function validateRecord(value: unknown): asserts value is CollaborationTaskTrans
     "Teti Task Artifact attachment delivery attempts"
   );
   validateAttachmentDiagnostics(value.attachmentDiagnostics);
+  if (value.workspaceBinding !== undefined) validateTaskWorkspaceBinding(value.workspaceBinding);
   if (value.statusRevision !== undefined
     && (!Number.isSafeInteger(value.statusRevision) || Number(value.statusRevision) < 0)) {
     throw new Error("Teti Task status revision is invalid.");

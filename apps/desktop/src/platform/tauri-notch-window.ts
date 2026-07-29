@@ -2,7 +2,15 @@ import type { NotchWindowController, NotchWindowGeometry } from "../first-launch
 import type { FirstLaunchViewModel } from "../first-launch/view-model.ts";
 import type { TauriInvoker } from "./tauri-api.ts";
 
-export type IslandVisualMode = "hidden" | "idle" | "onboarding" | "processing" | "error" | "ready" | "task";
+export type IslandVisualMode =
+  | "hidden"
+  | "idle"
+  | "onboarding"
+  | "connection_detail"
+  | "processing"
+  | "error"
+  | "ready"
+  | "task";
 
 export class TauriNotchWindowController implements NotchWindowController {
   private readonly tauri: TauriInvoker;
@@ -23,6 +31,17 @@ export class TauriNotchWindowController implements NotchWindowController {
 
   async setGeometry(geometry: Partial<NotchWindowGeometry>): Promise<void> {
     await this.tauri.invoke("position_island", { geometry: sanitizeGeometry(geometry) });
+  }
+
+  setConnectionDetailHeight(height: number, reason: string): Promise<void> {
+    const revision = this.modeRevision;
+    const safeHeight = finitePositiveNumber(height);
+    const pending = this.modeQueue.then(async () => {
+      if (revision !== this.modeRevision || safeHeight === undefined) return;
+      await this.tauri.invoke("set_connection_detail_height", { height: safeHeight, reason });
+    });
+    this.modeQueue = pending.catch(() => undefined);
+    return pending;
   }
 
   setMode(mode: IslandVisualMode, reason: string): Promise<void> {
@@ -80,4 +99,10 @@ function positiveNumber(value: unknown): number | undefined {
 
 function nonNegativeNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+function finitePositiveNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value > 0
+    ? Math.round(value)
+    : undefined;
 }

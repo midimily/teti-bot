@@ -10,6 +10,7 @@ import {
   type PassportSharingPolicy
 } from "../../../../../core/passport/types.ts";
 import type { CallableAgent } from "../../../../../core/callability/types.ts";
+import type { AgentComputeOffer } from "../../../../../core/callability/agent-core.ts";
 import { projectCallablePassport } from "../../../../../core/passport/callable-projection.ts";
 import type { CodexUsageState } from "../../../src/codex-usage/types.ts";
 import type { PeerConnectionDto } from "../../../src/lifecycle-bridge/protocol.ts";
@@ -20,6 +21,7 @@ export interface RuntimePassportSources {
   getConnections(): readonly PeerConnectionDto[];
   getCodexUsage(): CodexUsageState;
   getCallableAgents?(): readonly CallableAgent[];
+  getComputeOffers?(): readonly AgentComputeOffer[];
   getRegistry(): RegistryStatus;
   getSharing(): Promise<PassportSharingPolicy>;
 }
@@ -44,7 +46,10 @@ export class RuntimePassportService {
       this.sources.loadAccount(),
       this.sources.getSharing().catch(() => ({ ...DEFAULT_PASSPORT_SHARING_POLICY }))
     ]);
-    const callable = projectCallablePassport(this.sources.getCallableAgents?.() ?? []);
+    const callable = projectCallablePassport(
+      this.sources.getCallableAgents?.() ?? [],
+      this.sources.getComputeOffers?.() ?? []
+    );
     const content = {
       identity: mapAccountIdentity(account),
       registry: this.sources.getRegistry(),
@@ -69,7 +74,8 @@ export class RuntimePassportService {
         resources: content.resources,
         agents: content.callable.agents,
         capabilities: content.callable.capabilities,
-        bindings: content.callable.bindings
+        bindings: content.callable.bindings,
+        computeOffers: content.callable.computeOffers
       },
       connections: content.connections,
       sharing: content.sharing

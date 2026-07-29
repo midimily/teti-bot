@@ -8,6 +8,14 @@ import type { PassportSharingPolicy } from "../../../../core/passport/types.ts";
 import type { AgentManagementSnapshot } from "../../../../core/observation/management.ts";
 import type { CodexUsageState } from "../../src/codex-usage/types.ts";
 import type { CallableAgent } from "../../../../core/callability/types.ts";
+import type { AgentComputeOffer } from "../../../../core/callability/agent-core.ts";
+import type { ExecutionHandle } from "../../../../core/callability/execution.ts";
+import type {
+  ChildMemorySnapshot,
+  DurableMemoryScope,
+  MemoryExportResult,
+  MemoryRecord
+} from "../../../../core/memory/types.ts";
 import type {
   CollaborationTaskTransportRecord,
   CollaborationTaskTransportSnapshot,
@@ -63,7 +71,26 @@ export interface RuntimeCodexUsageService {
 
 export interface RuntimeTetiHostAgent {
   getCallableAgents(): CallableAgent[];
+  getComputeOffers(): AgentComputeOffer[];
   shutdown(): Promise<void>;
+}
+
+export interface RuntimeChildMemoryService {
+  list(): Promise<ChildMemorySnapshot>;
+  setAuthorization(input: {
+    scope: DurableMemoryScope;
+    workspaceId: string | null;
+    childAgentId: string;
+    enabled: boolean;
+  }): Promise<ChildMemorySnapshot>;
+  saveFromTask(input: {
+    task: CollaborationTaskTransportRecord;
+    execution: ExecutionHandle;
+    scope: DurableMemoryScope;
+    confirmed: true;
+  }): Promise<MemoryRecord>;
+  delete(memoryId: string): Promise<boolean>;
+  export(): Promise<MemoryExportResult>;
 }
 
 export interface TetiRuntimeDependencies {
@@ -75,6 +102,7 @@ export interface TetiRuntimeDependencies {
   agentObserver?: RuntimeAgentObserver;
   agentConfiguration?: RuntimeAgentConfiguration;
   hostAgent?: RuntimeTetiHostAgent;
+  memoryService?: RuntimeChildMemoryService;
   dispose?(): Promise<void>;
 }
 
@@ -133,6 +161,7 @@ export class TetiRuntime {
         getConnections: () => this.peerConnections ?? [],
         getCodexUsage: () => this.getCodexUsageState(),
         getCallableAgents: () => this.dependencies.hostAgent?.getCallableAgents() ?? [],
+        getComputeOffers: () => this.dependencies.hostAgent?.getComputeOffers() ?? [],
         getRegistry: () => clone(this.registryStatus),
         getSharing: () => this.dependencies.passportSharingStore.load()
       },
@@ -487,6 +516,65 @@ export class TetiRuntime {
     return clone(await service.cancelTask(taskId));
   }
 
+  async getTaskExecution(taskId: string): Promise<ExecutionHandle | null> {
+    const service = await this.rawPeerService();
+    if (!service.getTaskExecution) throw new Error("Durable execution is unavailable.");
+    return clone(await service.getTaskExecution(taskId));
+  }
+
+  async resumeTask(taskId: string): Promise<CollaborationTaskTransportRecord> {
+    const service = await this.rawPeerService();
+    if (!service.resumeTask) throw new Error("Durable execution resume is unavailable.");
+    return clone(await service.resumeTask(taskId));
+  }
+
+  async getChildMemory(): Promise<ChildMemorySnapshot> {
+    if (!this.dependencies.memoryService) throw new Error("Child Memory is unavailable.");
+    return clone(await this.dependencies.memoryService.list());
+  }
+
+  async setChildMemoryAuthorization(input: {
+    scope: DurableMemoryScope;
+    workspaceId: string | null;
+    childAgentId: string;
+    enabled: boolean;
+  }): Promise<ChildMemorySnapshot> {
+    if (!this.dependencies.memoryService) throw new Error("Child Memory is unavailable.");
+    return clone(await this.dependencies.memoryService.setAuthorization(input));
+  }
+
+  async saveTaskMemory(
+    taskId: string,
+    scope: DurableMemoryScope,
+    confirmed: true
+  ): Promise<ChildMemorySnapshot> {
+    if (!this.dependencies.memoryService) throw new Error("Child Memory is unavailable.");
+    const service = await this.rawPeerService();
+    if (!service.getTask || !service.getTaskExecution) throw new Error("Task Memory source is unavailable.");
+    const [task, execution] = await Promise.all([
+      service.getTask(taskId),
+      service.getTaskExecution(taskId)
+    ]);
+    if (!execution) throw new Error("Task has no local Child Agent execution.");
+    await this.dependencies.memoryService.saveFromTask({
+      task,
+      execution,
+      scope,
+      confirmed
+    });
+    return clone(await this.dependencies.memoryService.list());
+  }
+
+  async deleteChildMemory(memoryId: string): Promise<boolean> {
+    if (!this.dependencies.memoryService) throw new Error("Child Memory is unavailable.");
+    return this.dependencies.memoryService.delete(memoryId);
+  }
+
+  async exportChildMemory(): Promise<MemoryExportResult> {
+    if (!this.dependencies.memoryService) throw new Error("Child Memory is unavailable.");
+    return clone(await this.dependencies.memoryService.export());
+  }
+
   async getPassportSharing(): Promise<PassportSharingPolicy> {
     return clone(await this.dependencies.passportSharingStore.load());
   }
@@ -565,6 +653,14 @@ class RuntimePeerConnectionFacade implements PeerConnectionService {
 
   cancelTask(taskId: string): Promise<CollaborationTaskTransportRecord> {
     return this.runtime.cancelTask(taskId);
+  }
+
+  getTaskExecution(taskId: string): Promise<ExecutionHandle | null> {
+    return this.runtime.getTaskExecution(taskId);
+  }
+
+  resumeTask(taskId: string): Promise<CollaborationTaskTransportRecord> {
+    return this.runtime.resumeTask(taskId);
   }
 
   getPassportSharing(): Promise<PassportSharingPolicy> {

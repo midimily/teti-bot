@@ -1,15 +1,18 @@
 # Teti Beta 0.2 Roadmap
 
-Status: 0.2.1 Host/Child Agent Core implemented; automated release verification complete; physical two-Mac sign-off pending
+Status: 0.2.7 Osaurus Native Child Agent implementation landed; current
+official Osaurus Insights retention and the locally modified/invalid app
+signature remain release blockers, and physical two-Mac sign-off remains
+pending
 
-Current application version: `0.2.1`
+Current application version: `0.2.7`
 
 ## Release history clarification
 
 The public product line did not land Beta 0.1.6, 0.1.7, or 0.1.8. Work once
 described as 0.1.9–0.1.12 was folded into the Beta 0.1.13 product baseline rather
 than shipped as separate product releases. The effective sequence for this
-roadmap is therefore 0.1.5 → 0.1.13 → 0.1.14 → 0.1.15 → 0.2.0 → 0.2.1.
+roadmap is therefore 0.1.5 → 0.1.13 → 0.1.14 → 0.1.15 → 0.2.0 → 0.2.1 → 0.2.2 → 0.2.3 → 0.2.4 → 0.2.5 → 0.2.6 → 0.2.7.
 
 ## 0.2 product direction
 
@@ -138,40 +141,219 @@ Release gates:
 7. The accepted multi-image physical-delivery defect remains visible and
    fail-closed; it is not silently reclassified as fixed by this refactor.
 
+## 0.2.2 — Collaboration Workspace v1
+
+Goal: give Agent collaboration, long-running Tasks, future Memory, and Artifact
+work a stable Teti-owned container without exposing either Mac's filesystem.
+
+Implemented:
+
+- `ephemeral_task` and `durable_collaboration` Workspace modes;
+- Workspace schema v1 with ID, owner, participants, revision, quota, retention,
+  bounded manifest, and timestamps;
+- Task protocol v5, which can request a temporary Workspace or reference an
+  already confirmed Workspace ID/revision using only abstract access rights;
+- ExecutionGrant v2 and ExecutionAuthority v2 bind the approved Workspace ID,
+  revision, and `read` / `write` / `create_artifact` access;
+- each Child Agent runs inside a private Workspace Snapshot; successful writes
+  commit as a new revision, while stale concurrent revisions fail closed;
+- committed trees reject traversal paths, symlinks, unsupported file types,
+  byte quota violations, and file-count quota violations;
+- ephemeral Workspaces use TTL and are removed after a Runtime crash/restart;
+- durable Workspaces and their manifests are verified and recovered after
+  restart;
+- the lifecycle `task.send` boundary validates abstract Workspace requests and
+  rejects path-like extension fields;
+- AI Passport and Settings panels are anchored to their own toolbar icon, with
+  each panel's top-right edge aligned to the clicked icon's horizontal center.
+
+Explicitly unsupported in v1: `external_user_folder`, `arbitrary_host_path`,
+and `remote_path`.
+
+Release gates:
+
+1. Absolute paths, traversal segments, path extension fields, and symlink
+   escapes are rejected before commit or execution.
+2. Workspace byte/file quotas and ephemeral TTL cleanup pass.
+3. Runtime restart removes crashed ephemeral state and recovers durable state.
+4. Concurrent Snapshots cannot overwrite a newer revision.
+5. Task, Passport, ExecutionGrant, and network envelopes contain no local
+   Workspace Snapshot path.
+6. Codex, CodeBuddy, cancellation, timeout, process cleanup, output bounds,
+   image delivery, and Artifact behavior remain green on Task v5.
+
+## 0.2.3 — Osaurus Local Runtime Child
+
+Goal: add the first `LocalService` Child Agent on the 0.2 Host/Child framework,
+using Osaurus only as a bounded local model Runtime facade.
+
+Implemented:
+
+- `Osaurus Runtime Child -> Osaurus Connector -> LoopbackHttpTransport ->
+  /v1/chat/completions -> Bonsai`;
+- the Child origin is explicitly `runtime_facade`; its Passport name is
+  `Osaurus Runtime (Bonsai)`, never `Osaurus Native Agent`;
+- text-only input/output, fixed `OsaurusAI/Bonsai-27b-1bit-JANG`, empty tools,
+  no Agent header, no Osaurus Memory, no Osaurus Agent Prompt, and no Host
+  Workspace;
+- per-Child concurrency is one, independently of the Host's global concurrency;
+- Teti only discovers an already-running Osaurus instance and never starts,
+  downloads, configures, or modifies it;
+- only exact IPv4 loopback URLs are accepted; redirects, hostname aliases,
+  credentials, query strings, fragments, LAN exposure, and socket reuse are
+  rejected;
+- shared configuration is rebound to the live listener PID, canonical
+  `Osaurus.app` path, Bundle ID, Developer Team ID, code-directory hash, and the
+  owner of the exact established TCP connection before a request body is sent;
+- strict, bounded SSE is atomically committed only after a valid finish reason
+  and `[DONE]`; malformed or tool-bearing streams return no partial Artifact;
+- cancellation destroys request, response, and socket; the accepted Osaurus
+  baseline cancels request Tasks when the channel closes;
+- model absence, load failure, insufficient memory, inference saturation/503,
+  malformed SSE, untrusted Runtime, and unavailable Runtime have distinct safe
+  error mappings.
+
+Release blocker:
+
+- the reviewed official Osaurus source captures the decoded
+  `/chat/completions` request body and submits it to its 500-entry in-memory
+  `InsightsService` ring buffer;
+- `X-Persist: false` disables chat-history persistence only and does not disable
+  Insights request-body retention;
+- there is no public, per-request, verifiable opt-out in the reviewed Runtime;
+- therefore production qualification returns
+  `OSAURUS_INSIGHTS_BODY_RETENTION`, the Connector is not registered, and no
+  callable capability enters Passport. Installed/running observation may still
+  be shown separately.
+
+Release gates:
+
+1. Osaurus provides a documented and machine-verifiable mode in which the full
+   request body is not retained by Insights, and Teti verifies that mode before
+   sending task text. Teti must not silently modify Osaurus configuration.
+2. A trusted, supported Osaurus build and the fixed Bonsai model pass health and
+   model inventory qualification; missing or mismatched evidence fails closed.
+3. A process merely occupying localhost cannot qualify: config, listener PID,
+   connected socket owner, app location, Bundle ID, Team ID, and CDHash all
+   agree at request time.
+4. Redirect refusal, strict SSE, bounded output, concurrency one, and all safe
+   error mappings pass automated tests.
+5. Cancellation closes the HTTP stream and a real supported Osaurus Runtime
+   returns its inference activity to baseline; this still requires physical
+   Runtime sign-off.
+6. Codex and CodeBuddy execution, Workspace behavior, Task collaboration, and
+   Passport sharing remain green.
+
+## 0.2.4 — Local Compute Collaboration
+
+Goal: publish a privacy-minimized local-compute capability and let a confirmed
+Peer request receiver-local Osaurus/Bonsai text work through explicit
+allow-once approval.
+
+Implemented:
+
+- Callable Passport schema 4 and an exact `general-text-assistance` Compute
+  Offer with `local_model`, `receiver_local`, text-only I/O, concurrency one,
+  and `allow_once`;
+- Host-registered offer provenance; Agent observation or naming cannot create
+  an offer;
+- exact `offerId + capability` receiver resolution to the local Connector;
+- no remote Runtime, model, port, path, hardware, credential, or configuration
+  selection;
+- no Host Workspace for the Runtime facade;
+- concurrency one plus an eight-task receiver-local queue, queued
+  cancellation, bounded overflow, and shutdown cleanup;
+- per-execution Osaurus re-qualification and startup retry without auto-start
+  or configuration mutation;
+- `本地算力` UI labeling and no `免费算力` claim.
+
+Release status and the complete gate matrix are recorded in
+[`implementation/TETI_BETA_0_2_4_LOCAL_COMPUTE_COLLABORATION.md`](implementation/TETI_BETA_0_2_4_LOCAL_COMPUTE_COLLABORATION.md).
+The current Insights retention and invalid local Osaurus signature keep real
+two-Mac acceptance blocked; no bypass is permitted.
+
+## 0.2.5 — Durable Async Execution v1
+
+Goal: establish a restart-queryable, cancelable long-running execution base
+without silently replaying external side effects.
+
+Implemented:
+
+- receiver-local `ExecutionHandle` schema v1 with Task, Workspace, Child,
+  Connector, epoch, lease, progress, provider ID, checkpoint, and resume state;
+- durable mode-`0600` handle persistence and startup reconciliation;
+- explicit Connector declarations for Progress, Pause, Resume, Checkpoint, and
+  Cancel, plus pure-compute versus possible-side-effect semantics;
+- checkpoint restart only for Workspace-pure work with an explicit contained
+  checkpoint; current production Connectors truthfully remain non-resumable;
+- resume mints a new one-time authority and increments `executionEpoch`;
+- stale completion, cancellation, checkpoint, and Artifact callbacks cannot
+  update a newer epoch;
+- local UI query and explicit resume controls without exposing provider IDs or
+  checkpoint paths to a Peer;
+- semantic Passport presentation diffing prevents periodic polling from
+  flashing an unchanged expanded connection detail.
+
+The full implementation and gate matrix are recorded in
+[`implementation/TETI_BETA_0_2_5_DURABLE_ASYNC_EXECUTION_V1.md`](implementation/TETI_BETA_0_2_5_DURABLE_ASYNC_EXECUTION_V1.md).
+
+## 0.2.6 — Child Agent Memory v1
+
+Goal: give local Child Agents controlled, auditable long-term context without
+depending on provider-native Memory or enabling Peer-shared Memory.
+
+Implemented:
+
+- Teti-owned Task, Workspace and Child Agent scope policy; Task context remains
+  execution-only while both durable scopes default to disabled;
+- exact local authorization followed by a separate save action on a completed
+  receiver-local text Artifact; no peer or completion event can auto-write;
+- schema-v1 private records with Task, Peer, Workspace, Child, digest, expiry
+  and visible local-user provenance;
+- strict Workspace/Child isolation, 90-day expiry, deletion, authorization
+  revocation and owner-only JSON export;
+- authoritative-store retrieval with no stale v1 index, at most four records,
+  4 KiB per record and 8 KiB total injection;
+- Host-owned reference-data envelope injection; Connector context and all peer
+  protocols remain Memory-free;
+- Task-poll semantic diffing fixes the remaining expanded Peer Passport flash
+  caused by the global renderer's two-second timestamp-only refresh.
+
+The complete contract and gate matrix are recorded in
+[`implementation/TETI_BETA_0_2_6_CHILD_AGENT_MEMORY_V1.md`](implementation/TETI_BETA_0_2_6_CHILD_AGENT_MEMORY_V1.md).
+
+## 0.2.7 — Osaurus Native Child Agent
+
+Goal: connect a dedicated, fixed Osaurus Agent through `/agents/{id}/run` while
+preserving Teti-owned collaboration, Workspace, durable execution and Memory
+contracts.
+
+Implemented:
+
+- separate Runtime-facade and Native-Agent Child/Connector/Transport/Passport
+  identities;
+- local Settings control for the fixed Agent UUID;
+- signed Runtime plus exact local Agent-policy audit and public metadata match;
+- deny-only Tools, provider Memory, Host Workspace and Autonomous Exec
+  authority, rechecked for every execution;
+- file-change Readiness invalidation, Connector withdrawal and queued/in-flight
+  cancellation;
+- a Host-selected 64 KiB bounded Workspace context with no path mount;
+- `/agents/{id}/run` text streaming, cancellation, strict SSE and existing
+  Durable Execution state mapping;
+- a privacy-minimized `native_agent` Compute Offer and allow-once receiver
+  resolution;
+- post-transition and post-native-resize measurement fixing Peer Passport
+  bottom clipping without restoring periodic flashing.
+
+The complete gate matrix is recorded in
+[`implementation/TETI_BETA_0_2_7_OSAURUS_NATIVE_CHILD_AGENT.md`](implementation/TETI_BETA_0_2_7_OSAURUS_NATIVE_CHILD_AGENT.md).
+Official Insights request-body retention and physical two-Mac acceptance remain
+release blockers.
+
 ## Planned follow-on versions
 
-### 0.2.2 — Workspace and durable collaboration identity
-
-- introduce a Teti-owned Workspace ID and bounded Workspace manifest;
-- bind Task, Artifact, memory reference, and asynchronous continuation to the
-  Workspace without allowing a remote Peer to choose a local filesystem path;
-- define cleanup, retention, ownership, and migration rules.
-
-### 0.2.3 — Osaurus local Runtime Adapter
-
-- integrate Osaurus as a native Agent Runtime rather than treating a chat
-  completion endpoint as Teti's architectural center;
-- prefer the Osaurus Agent/CLI execution route where it preserves Agent
-  lifecycle, tool policy, cancellation, and progress semantics;
-- use `/v1/chat/completions` only as a bounded model-inference surface beneath
-  the Connector when a task genuinely needs model completion rather than Agent
-  behavior.
-
-### 0.2.4 — Memory and Skill foundations
-
-- add explicit, permissioned memory references scoped to Workspace and Task;
-- add Skill identity/version/reference contracts without transporting arbitrary
-  executable Skill content across Peers;
-- define provenance, expiration, revocation, and disclosure boundaries.
-
-### 0.2.5 — Long-running asynchronous collaboration
-
-- durable checkpoints, retry policy, pause/resume, cancellation propagation,
-  progress snapshots, and crash recovery;
-- bounded concurrency and scheduling owned by Teti Runtime;
-- no unattended reusable execution grant by default.
-
-### 0.2.6 — 0.2 stabilization
+### 0.2.8 — 0.2 stabilization
 
 - complete the post-upgrade multi-image review;
 - run the full compatibility, migration, restart, security, and physical Mac

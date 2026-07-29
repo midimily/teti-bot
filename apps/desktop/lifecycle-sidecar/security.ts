@@ -54,6 +54,9 @@ function classifyError(message: string, fallbackCode: LifecycleErrorCode): Lifec
   if (fallbackCode === "TASK_TRANSPORT_FAILED") {
     return fallbackCode;
   }
+  if (fallbackCode === "MEMORY_OPERATION_FAILED") {
+    return fallbackCode;
+  }
   if (/(network|fetch|registry|discover|register|cloudflare|ECONN|ENOTFOUND|timeout)/i.test(message)) {
     return "DISCOVERY_REGISTRATION_FAILED";
   }
@@ -92,6 +95,8 @@ function publicMessageForCode(code: LifecycleErrorCode): string {
       return "Teti could not complete the connection request.";
     case "TASK_TRANSPORT_FAILED":
       return "Teti could not complete the Task transport request.";
+    case "MEMORY_OPERATION_FAILED":
+      return "Teti could not complete the local Child Memory operation.";
     case "REQUEST_TIMEOUT":
       return "Teti took too long to respond.";
     case "SIDECAR_UNAVAILABLE":

@@ -1,5 +1,6 @@
 import {
   TETI_AI_STATUS_AGENT_SCHEMA_VERSION,
+  TETI_AI_STATUS_CALLABLE_SCHEMA_VERSION,
   TETI_AI_STATUS_LEGACY_SCHEMA_VERSION,
   TETI_AI_STATUS_SCHEMA_VERSION,
   type AiAgentStatusSnapshot,
@@ -10,6 +11,7 @@ import {
 import type {
   CallablePassportAgent,
   CapabilityBinding,
+  ComputeOffer,
   TetiCapability
 } from "../passport/types.ts";
 
@@ -17,6 +19,7 @@ const MAX_TOOLS = 8;
 const MAX_AGENTS = 64;
 const MAX_CAPABILITIES = 64;
 const MAX_BINDINGS = 64;
+const MAX_COMPUTE_OFFERS = 32;
 const MAX_QUOTAS_PER_TOOL = 8;
 const MAX_PAYLOAD_BYTES = 64 * 1024;
 const MAX_TOOL_ID_LENGTH = 64;
@@ -43,9 +46,10 @@ export function validateAiStatusSyncPayload(value: unknown): asserts value is Ai
   }
   const payload = record(value, "AI status payload");
   const current = payload.schemaVersion === TETI_AI_STATUS_SCHEMA_VERSION;
+  const callable = payload.schemaVersion === TETI_AI_STATUS_CALLABLE_SCHEMA_VERSION;
   const observedAgent = payload.schemaVersion === TETI_AI_STATUS_AGENT_SCHEMA_VERSION;
   const legacy = payload.schemaVersion === TETI_AI_STATUS_LEGACY_SCHEMA_VERSION;
-  if (!current && !observedAgent && !legacy) {
+  if (!current && !callable && !observedAgent && !legacy) {
     throw new AiStatusProtocolError("Unsupported AI status schema version.");
   }
   exactKeys(
@@ -59,8 +63,11 @@ export function validateAiStatusSyncPayload(value: unknown): asserts value is Ai
           "tools",
           "agents",
           "capabilities",
-          "bindings"
+          "bindings",
+          "computeOffers"
         ]
+      : callable
+        ? ["schemaVersion", "sharing", "generatedAt", "expiresAt", "tools", "agents", "capabilities", "bindings"]
       : observedAgent
         ? ["schemaVersion", "sharing", "generatedAt", "expiresAt", "tools", "agents"]
       : ["schemaVersion", "sharing", "generatedAt", "expiresAt", "tools"],
@@ -84,7 +91,7 @@ export function validateAiStatusSyncPayload(value: unknown): asserts value is Ai
     throw new AiStatusProtocolError("A disabled AI status payload cannot contain tools.");
   }
   for (const tool of payload.tools) validateTool(tool);
-  if (current || observedAgent) {
+  if (current || callable || observedAgent) {
     if (!Array.isArray(payload.agents) || payload.agents.length > MAX_AGENTS) {
       throw new AiStatusProtocolError("AI status agents must be a bounded array.");
     }
@@ -92,11 +99,11 @@ export function validateAiStatusSyncPayload(value: unknown): asserts value is Ai
       throw new AiStatusProtocolError("A disabled AI status payload cannot contain agents.");
     }
     for (const agent of payload.agents) {
-      if (current) validateCallableAgent(agent);
+      if (current || callable) validateCallableAgent(agent);
       else validateAgent(agent);
     }
   }
-  if (current) {
+  if (current || callable) {
     if (!Array.isArray(payload.capabilities) || payload.capabilities.length > MAX_CAPABILITIES) {
       throw new AiStatusProtocolError("AI status capabilities must be a bounded array.");
     }
@@ -109,8 +116,47 @@ export function validateAiStatusSyncPayload(value: unknown): asserts value is Ai
     }
     for (const capability of payload.capabilities) validateCapability(capability);
     for (const binding of payload.bindings) validateBinding(binding);
-    validateCallableReferences(payload);
+    if (current) {
+      if (!Array.isArray(payload.computeOffers) || payload.computeOffers.length > MAX_COMPUTE_OFFERS) {
+        throw new AiStatusProtocolError("Compute Offers must be a bounded array.");
+      }
+      if (payload.sharing === "disabled" && payload.computeOffers.length !== 0) {
+        throw new AiStatusProtocolError("A disabled AI status payload cannot contain Compute Offers.");
+      }
+      for (const offer of payload.computeOffers) validateComputeOffer(offer);
+    }
+    validateCallableReferences(payload, current);
   }
+}
+
+function validateComputeOffer(value: unknown): asserts value is ComputeOffer {
+  const offer = record(value, "Compute Offer");
+  exactKeys(offer, [
+    "offerId",
+    "capability",
+    "resourceClass",
+    "executionLocation",
+    "inputModes",
+    "outputModes",
+    "concurrency",
+    "approval",
+    "observedAt"
+  ], "Compute Offer");
+  slug(offer.offerId, "Compute Offer ID", 128);
+  if (offer.capability !== "general-text-assistance"
+    || (offer.resourceClass !== "local_model" && offer.resourceClass !== "native_agent")
+    || offer.executionLocation !== "receiver_local"
+    || !singleTextMode(offer.inputModes)
+    || !singleTextMode(offer.outputModes)
+    || offer.concurrency !== 1
+    || offer.approval !== "allow_once") {
+    throw new AiStatusProtocolError("Compute Offer contract is invalid.");
+  }
+  isoTimestamp(offer.observedAt, "Compute Offer observedAt");
+}
+
+function singleTextMode(value: unknown): value is ["text"] {
+  return Array.isArray(value) && value.length === 1 && value[0] === "text";
 }
 
 function validateCallableAgent(value: unknown): asserts value is CallablePassportAgent {
@@ -168,11 +214,12 @@ function validateBinding(value: unknown): asserts value is CapabilityBinding {
   safeIdArray(binding.resourceIds, "Binding Resource IDs", MAX_TOOLS);
 }
 
-function validateCallableReferences(payload: Record<string, unknown>): void {
+function validateCallableReferences(payload: Record<string, unknown>, withComputeOffers: boolean): void {
   const tools = payload.tools as AiToolStatusSnapshot[];
   const agents = payload.agents as CallablePassportAgent[];
   const capabilities = payload.capabilities as TetiCapability[];
   const bindings = payload.bindings as CapabilityBinding[];
+  const computeOffers = withComputeOffers ? payload.computeOffers as ComputeOffer[] : [];
   const toolIds = new Set(tools.map((tool) => tool.toolId));
   const agentIds = new Set(agents.map((agent) => agent.id));
   const capabilityIds = new Set(capabilities.map((capability) => capability.id));
@@ -209,6 +256,20 @@ function validateCallableReferences(payload: Record<string, unknown>): void {
   }
   if (boundCapabilities.size !== capabilityIds.size) {
     throw new AiStatusProtocolError("Every Callable Passport capability must have one binding.");
+  }
+  const offerIds = new Set<string>();
+  for (const offer of computeOffers) {
+    const binding = bindingByCapability.get(offer.capability);
+    const boundAgents = agents.filter((agent) => binding?.agentIds.includes(agent.id));
+    if (offerIds.has(offer.offerId)
+      || !capabilityIds.has(offer.capability)
+      || !binding
+      || !boundAgents.some((agent) =>
+        offer.inputModes.every((mode) => agent.inputModes.includes(mode))
+        && offer.outputModes.every((mode) => agent.outputModes.includes(mode)))) {
+      throw new AiStatusProtocolError("Compute Offer references are invalid.");
+    }
+    offerIds.add(offer.offerId);
   }
 }
 

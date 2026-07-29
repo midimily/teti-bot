@@ -1,6 +1,11 @@
-export const TETI_COLLABORATION_TASK_SCHEMA_VERSION = 4;
+import type {
+  TaskWorkspaceRequest,
+  WorkspaceAccess
+} from "../workspace/types.ts";
+
+export const TETI_COLLABORATION_TASK_SCHEMA_VERSION = 5;
 export const TETI_TASK_ARTIFACT_SCHEMA_VERSION = 2;
-export const TETI_EXECUTION_GRANT_SCHEMA_VERSION = 1;
+export const TETI_EXECUTION_GRANT_SCHEMA_VERSION = 2;
 
 export const MAX_TASK_REQUEST_BYTES = 32 * 1024;
 export const MAX_TASK_INPUT_TEXT_BYTES = 24 * 1024;
@@ -67,16 +72,18 @@ export type CollaborationTaskInput = TaskTextPart | TaskMultipartInput;
 
 /**
  * Beta 0.2 planning boundary: the requester selects an advertised offer and
- * Capability, never a local executable, Adapter, path, command, or workspace.
+ * Capability and an abstract Workspace request, never a local executable,
+ * Adapter, path, command, or host filesystem location.
  */
 export interface CollaborationTaskRequest {
-  schemaVersion: 1 | 2 | 3 | 4;
+  schemaVersion: 1 | 2 | 3 | 4 | 5;
   taskId: string;
   requesterTetiId: string;
   targetTetiId: string;
   offerId: string;
   capabilityId: string;
   input: CollaborationTaskInput;
+  workspace?: TaskWorkspaceRequest;
   createdAt: string;
   expiresAt: string;
 }
@@ -105,7 +112,7 @@ export type CollaborationTaskArtifact = TaskTextArtifact | TaskArtifactV2;
  * exact approved task input. It is not part of Passport or a Chatmail payload.
  */
 export interface ExecutionGrant {
-  schemaVersion: 1;
+  schemaVersion: 2;
   grantId: string;
   taskId: string;
   requesterTetiId: string;
@@ -116,7 +123,9 @@ export interface ExecutionGrant {
   issuedAt: string;
   expiresAt: string;
   singleUse: true;
-  workspaceAccess: "isolated_task_directory";
+  workspaceId: string;
+  workspaceRevision: number;
+  workspaceAccess: WorkspaceAccess[];
   userFileAccess: "none";
   commandPolicy: "fixed_adapter_entrypoint";
   networkPolicy: "agent_managed";

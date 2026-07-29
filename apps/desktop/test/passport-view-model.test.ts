@@ -144,10 +144,12 @@ test("Agent presentation distinguishes installed, absent, and unknown states", (
   const installed = toAgentViewModel({
     ...base,
     provider: "openai",
+    version: "codex-cli 1.2.3",
     installationStatus: "installed",
     runtimeStatus: "not_running"
   });
   assert.equal(installed.providerName, "OpenAI");
+  assert.equal(installed.versionLabel, "codex-cli 1.2.3");
   assert.equal(installed.statusLabel, "已安装");
   assert.equal(toAgentViewModel({
     ...base,
@@ -250,10 +252,99 @@ test("confirmed peer cards present shared Agent Passport rows", () => {
     { passport, sharingBusy: false, openPanel: null },
     new Date("2026-07-25T00:00:10.000Z")
   );
+  assert.equal(viewModel.connections[0]?.identityLabel, "Remote（remote001）");
+  assert.equal("address" in viewModel.connections[0]!, false);
   assert.equal(viewModel.connections[0]?.passport.note, undefined);
   assert.equal(viewModel.connections[0]?.passport.agents[0]?.name, "Claude Code");
   assert.equal(viewModel.connections[0]?.passport.agents[0]?.providerName, "Anthropic");
   assert.equal(viewModel.connections[0]?.passport.agents[0]?.statusLabel, "运行中");
+});
+
+test("remote AI card summary keeps one Resource, two Agents, and two Capabilities", () => {
+  const passport = emptyPassportSnapshot();
+  const observedAt = "2026-07-25T00:00:00.000Z";
+  passport.connections = [{
+    requestId: "summary-peer",
+    connectionState: "Confirmed",
+    direction: "incoming",
+    identity: {
+      tetiId: "teti_remote001",
+      address: "remote001@mail.seep.im",
+      displayName: "Remote"
+    },
+    createdAt: observedAt,
+    updatedAt: observedAt,
+    lastSeen: observedAt,
+    compatibility: "compatible",
+    passport: {
+      state: "fresh",
+      resources: ["Codex", "Local Model", "Compute"].map((product, index) => ({
+        id: `resource-${index}`,
+        provider: `provider-${index}`,
+        product,
+        kind: "subscription" as const,
+        plan: { key: "plus", displayName: "Plus" },
+        availability: "available" as const,
+        quotas: index === 0 ? [{
+          period: "week",
+          remainingPercent: 55,
+          resetAt: "2026-08-01T08:30:00.000Z",
+          windowSeconds: 604_800,
+          identification: "exact" as const
+        }] : [],
+        assurance: "provider_observed" as const,
+        observedAt
+      })),
+      agents: ["Codex", "CodeBuddy", "Osaurus"].map((name, index) => ({
+        id: `agent-${index}`,
+        name,
+        provider: `provider-${index}`,
+        capabilityIds: [`capability-${index}`],
+        inputModes: ["text" as const],
+        outputModes: ["text" as const],
+        availability: "available" as const,
+        observedAt
+      })),
+      capabilities: ["Code", "Image", "Research", "Document"].map((name, index) => ({
+        id: `capability-${index}`,
+        name,
+        category: "collaboration",
+        description: `${name} capability`,
+        availability: "available" as const,
+        observedAt
+      })),
+      bindings: [{
+        capabilityId: "capability-0",
+        agentIds: ["agent-0"],
+        resourceIds: ["resource-0"]
+      }]
+    }
+  }];
+
+  const card = toPassportViewModel(
+    { passport, sharingBusy: false, openPanel: null },
+    new Date("2026-07-25T00:00:01.000Z")
+  ).connections[0]!;
+  assert.equal(card.identityLabel, "Remote（remote001）");
+  assert.equal(card.passport.summary.resource?.productName, "Codex");
+  assert.equal(card.passport.summary.resourceOverflowCount, 2);
+  assert.deepEqual(card.passport.summary.agents.map((agent) => agent.name), ["Codex", "CodeBuddy"]);
+  assert.equal(card.passport.summary.agentOverflowCount, 1);
+  assert.deepEqual(card.passport.summary.capabilities.map((capability) => capability.name), ["Code", "Image"]);
+  assert.equal(card.passport.summary.capabilityOverflowCount, 2);
+  assert.equal(card.passport.resources.length, 3, "full Resource detail remains available");
+  assert.equal(card.passport.resources[0]?.quotas[0]?.periodLabel, "周额度");
+  assert.equal(card.passport.resources[0]?.quotas[0]?.remainingPercent, 55);
+  assert.equal(card.passport.agents.length, 3, "full Agent detail remains available");
+  assert.equal(card.passport.agents[0]?.versionLabel, "版本未共享");
+  assert.deepEqual(card.passport.agents[0]?.inputModeLabels, ["文本"]);
+  assert.equal(card.passport.providers.length, 3, "Provider detail is grouped without flattening into the card");
+  assert.equal(card.passport.capabilities.length, 4, "full Capability detail remains available");
+  assert.deepEqual(card.passport.capabilities[0]?.bindings, [{
+    agentNames: ["Codex"],
+    resourceNames: ["Codex"],
+    statusLabel: "绑定完整"
+  }]);
 });
 
 test("legacy peer compatibility is separate from reachability", () => {

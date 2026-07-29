@@ -32,7 +32,7 @@ interface CodexImageRunnerManifest {
 
 export class CodexImageConnector implements AgentConnector {
   readonly descriptor = {
-    contractVersion: 1 as const,
+    contractVersion: 2 as const,
     connectorId: CODEX_IMAGE_CONNECTOR.connectorId,
     connectorRevision: CODEX_IMAGE_CONNECTOR.connectorRevision,
     childAgentId: CODEX_IMAGE_CONNECTOR.childAgentId,
@@ -40,6 +40,14 @@ export class CodexImageConnector implements AgentConnector {
     inputModes: ["text", "image"] as const,
     outputModes: ["text", "image"] as const,
     transportKind: "process" as const,
+    executionCapabilities: {
+      supportsProgress: false,
+      supportsPause: false,
+      supportsResume: false,
+      supportsCheckpoint: false,
+      supportsCancel: true
+    },
+    executionSemantics: "external_side_effects_possible" as const,
     timeoutMs: CODEX_IMAGE_CONNECTOR.timeoutMs,
     cancelGraceMs: CODEX_IMAGE_CONNECTOR.cancelGraceMs,
     maxOutputBytes: CODEX_IMAGE_CONNECTOR.maxOutputBytes
@@ -65,6 +73,9 @@ export class CodexImageConnector implements AgentConnector {
   }
 
   createExecutionSpec(context: Readonly<AgentConnectorContext>) {
+    if (!context.workspacePath) {
+      throw new Error("Codex image Connector requires a Host Workspace Snapshot.");
+    }
     return {
       kind: "process" as const,
       executable: this.fixedProcessEntrypoint,
