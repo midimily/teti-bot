@@ -58,7 +58,7 @@ test("pending connection is rejected before sending", async () => {
         status: "online",
         timestamp: fixedNow,
         collaborationProtocolEpoch: 2,
-        taskProtocolVersions: [5],
+        taskProtocolVersions: [6],
         passportSchemaVersions: [4]
       }),
     /Confirmed connection/
@@ -142,7 +142,7 @@ test("Presence accepts explicit Passport capability and rejects malformed versio
       status: "online",
       timestamp: fixedNow,
       collaborationProtocolEpoch: 2,
-      taskProtocolVersions: [5],
+      taskProtocolVersions: [6],
       passportSchemaVersions: [4]
     }
   }));
@@ -157,7 +157,7 @@ test("Presence accepts explicit Passport capability and rejects malformed versio
         status: "online",
         timestamp: fixedNow,
         collaborationProtocolEpoch: 2,
-        taskProtocolVersions: [5],
+        taskProtocolVersions: [6],
         passportSchemaVersions
       }
     }), /Passport schema versions/);
@@ -208,7 +208,7 @@ test("duplicate message is ignored after first processing", async () => {
       status: "online",
       timestamp: fixedNow,
       collaborationProtocolEpoch: 2,
-      taskProtocolVersions: [5],
+      taskProtocolVersions: [6],
       passportSchemaVersions: [4]
     }
   });
@@ -274,7 +274,7 @@ test("Task request and receipt use the existing Application Envelope", async () 
     messageId: "task-envelope"
   });
   const request = {
-    schemaVersion: 5 as const,
+    schemaVersion: 6 as const,
     taskId: "task-001",
     requesterTetiId: "teti_local0001",
     targetTetiId: "teti_remote001",
@@ -282,6 +282,7 @@ test("Task request and receipt use the existing Application Envelope", async () 
     capabilityId: "code-analysis",
     input: { kind: "parts" as const, parts: [{ kind: "text" as const, text: "Review this text." }] },
     workspace: { kind: "temporary" as const, access: ["read", "write", "create_artifact"] as const },
+    executionMode: "single_stage" as const,
     createdAt: fixedNow,
     expiresAt: "2026-07-11T01:00:00.000Z"
   };

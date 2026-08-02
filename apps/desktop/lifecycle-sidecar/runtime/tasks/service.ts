@@ -7,17 +7,22 @@ import { isCanonicalTetiPublicId } from "../../../../../core/identity/public-id.
 import type { TetiApplicationEnvelope } from "../../../../../core/protocol/types.ts";
 import {
   DEFAULT_TASK_REQUEST_TTL_MS,
+  LONG_HORIZON_LIMITS,
   MAX_TASK_CLOCK_SKEW_MS,
   MAX_TASK_TRANSPORT_RECORDS,
   TETI_SUPPORTED_TASK_PROTOCOL_VERSIONS,
   type CollaborationTaskTransportRecord,
   type CollaborationTaskSummarySnapshot,
   type CollaborationTaskTransportSnapshot,
+  type LongHorizonAuditEvent,
+  type LongHorizonTaskState,
   type SendCollaborationTaskInput,
   type TetiTaskArtifactPayload,
   type TetiTaskAttachmentPayload,
   type TetiTaskAttachmentReceiptPayload,
   type TetiTaskCancelPayload,
+  type TetiTaskInputPayload,
+  type TetiTaskLongHorizonStatus,
   type TetiTaskReceiptPayload,
   type TetiTaskStatusPayload,
   type TetiTaskTransportStoreState
@@ -29,6 +34,7 @@ import {
 } from "../../../../../core/task/transport-validation.ts";
 import {
   MAX_TASK_INPUT_TEXT_BYTES,
+  MAX_TASK_ARTIFACT_TEXT_BYTES,
   MAX_TASK_REQUEST_TTL_MS,
   taskArtifactImages,
   taskInputText,
@@ -64,6 +70,21 @@ import type {
 } from "../../../../../core/workspace/types.ts";
 import { WORKSPACE_LIMITS } from "../../../../../core/workspace/types.ts";
 import { validateTaskWorkspaceRequest } from "../../../../../core/workspace/validation.ts";
+import {
+  createDeterministicDelegationPlan
+} from "../../../../../core/delegation/planner.ts";
+import {
+  DELEGATION_LIMITS,
+  TETI_HOST_AGGREGATION_RESOURCE_ID,
+  type DelegationAuditEvent,
+  type DelegationChildStep,
+  type DelegationTargetOption,
+  type DelegationTargetSelection
+} from "../../../../../core/delegation/types.ts";
+import {
+  isWorkspaceAccessSubset,
+  validateDelegationPlanState
+} from "../../../../../core/delegation/validation.ts";
 import type { TaskTransportStore } from "./store.ts";
 import type { StagedTaskImage, TaskAttachmentStore } from "./attachments.ts";
 import type { CollaborationWorkspaceStore } from "../workspaces/store.ts";
@@ -98,6 +119,8 @@ export interface TaskExecutionTarget {
   connectorId: string;
   childAgentId: string;
   capabilityId: string;
+  workspacePolicy?: "snapshot" | "bounded_context" | "none";
+  outputModes?: readonly ("text" | "image")[];
 }
 
 export interface TaskExecutionBridge {
@@ -106,6 +129,13 @@ export interface TaskExecutionBridge {
     capabilityId: string,
     requiredInputModes: readonly ("text" | "image")[]
   ): TaskExecutionTarget | null;
+  listTargets?(
+    offerId: string,
+    capabilityId: string,
+    requiredInputModes: readonly ("text" | "image")[]
+  ): TaskExecutionTarget[];
+  listDelegationTargets?(): DelegationTargetOption[];
+  resolveDelegationTarget?(selection: DelegationTargetSelection): DelegationTargetOption | null;
   execute(
     request: CallableAdapterTaskRequest,
     authority: ExecutionAuthority
@@ -151,7 +181,8 @@ export class TaskTransportRuntime {
 
   async list(): Promise<CollaborationTaskTransportSnapshot> {
     const state = await this.store.load();
-    const changed = await this.reconcileInterruptedExecutions(state);
+    let changed = await this.reconcileInterruptedExecutions(state);
+    changed = this.refreshLongHorizonTargets(state) || changed;
     if (expireDueRecords(state, this.now()) || changed) await this.store.save(state);
     return snapshot(state, this.now());
   }
@@ -159,6 +190,7 @@ export class TaskTransportRuntime {
   async listSummaries(): Promise<CollaborationTaskSummarySnapshot> {
     const state = await this.store.load();
     let changed = await this.reconcileInterruptedExecutions(state);
+    changed = this.refreshLongHorizonTargets(state) || changed;
     changed = await this.refreshAttachmentReadiness(state) || changed;
     changed = expireDueRecords(state, this.now()) || changed;
     if (changed) await this.store.save(state);
@@ -192,7 +224,7 @@ export class TaskTransportRuntime {
           cancelPending: record.cancelPending ?? false,
           createdAt: record.createdAt,
           updatedAt: record.updatedAt,
-          expiresAt: record.request.expiresAt,
+          expiresAt: effectiveTaskExpiry(record),
           safeErrorCode: record.safeErrorCode
         }))
         .sort(compareTaskSummaries)
@@ -206,12 +238,31 @@ export class TaskTransportRuntime {
     }
     const state = await this.store.load();
     let changed = await this.reconcileInterruptedExecutions(state);
+    changed = this.refreshLongHorizonTargets(state) || changed;
     changed = await this.refreshAttachmentReadiness(state) || changed;
     changed = expireDueRecords(state, this.now()) || changed;
     if (changed) await this.store.save(state);
     const record = state.records.find((candidate) => candidate.request.taskId === taskId);
     if (!record) throw new TaskTransportRuntimeError("TASK_NOT_FOUND", "Task was not found.");
     return structuredClone(record);
+  }
+
+  async listDelegationTargets(taskId: string): Promise<DelegationTargetOption[]> {
+    const state = await this.store.load();
+    const record = requireMutableIncomingTask(state, taskId, this.now());
+    if (record.request.executionMode !== "long_horizon" || !record.longHorizon) {
+      throw new TaskTransportRuntimeError(
+        "TASK_DELEGATION_MODE_REQUIRED",
+        "Deterministic delegation requires a long-horizon Task."
+      );
+    }
+    if (!this.executor?.listDelegationTargets) {
+      throw new TaskTransportRuntimeError("TASK_DELEGATION_UNAVAILABLE", "Delegation target discovery is unavailable.");
+    }
+    return this.executor.listDelegationTargets()
+      .filter((target) => target.inputModes.includes("text")
+        && (target.outputModes.includes("text") || target.outputModes.includes("image")))
+      .map((target) => structuredClone(target));
   }
 
   async resolveTaskImage(taskId: string, attachmentId: string): Promise<string> {
@@ -239,7 +290,9 @@ export class TaskTransportRuntime {
   async getExecutionHandle(taskId: string): Promise<ExecutionHandle | null> {
     const record = await this.get(taskId);
     if (record.direction !== "incoming") return null;
-    return structuredClone(await this.executor?.getExecutionHandle?.(taskId) ?? null);
+    return structuredClone(await this.executor?.getExecutionHandle?.(
+      currentExecutionTaskId(record) ?? taskId
+    ) ?? null);
   }
 
   async observePeerVersions(
@@ -309,6 +362,7 @@ export class TaskTransportRuntime {
       capabilityId: normalized.capabilityId,
       input: taskInputForVersion(protocolVersion, normalized.text, normalized.attachments),
       workspace: structuredClone(normalized.workspace),
+      executionMode: normalized.executionMode,
       createdAt: createdAt.toISOString(),
       expiresAt: new Date(createdAt.getTime() + normalized.ttlMs).toISOString()
     };
@@ -585,6 +639,10 @@ export class TaskTransportRuntime {
     requireOutboundTaskIdentity(input.envelope, input.connection, account.id, payload);
     const state = await this.store.load();
     const record = findTaskRecord(state, "outgoing", account.id, payload.taskId);
+    if (record && ((record.request.executionMode === "long_horizon" && payload.schemaVersion !== 2)
+      || (record.request.executionMode !== "long_horizon" && payload.schemaVersion !== 1))) {
+      throw new TaskTransportRuntimeError("TASK_STATUS_MODE_CONFLICT", "Task status mode does not match its request.");
+    }
     if (!record
       || payload.revision <= (record.statusRevision ?? 0)
       || !isRemoteTransitionAllowed(record.state, payload.state)) return;
@@ -598,6 +656,17 @@ export class TaskTransportRuntime {
         ? "approved_once"
         : record.approval;
     record.updatedAt = validTimestampOrNow(input.receivedAt, this.now()).toISOString();
+    if (payload.schemaVersion === 2
+      && payload.longHorizon
+      && record.request.executionMode === "long_horizon") {
+      record.peerLongHorizon = structuredClone(payload.longHorizon);
+      if (record.inputPending
+        && (payload.longHorizon.currentStageIndex > record.inputPending.expectedStageIndex
+          || ["completed", "failed", "canceled", "expired"].includes(payload.longHorizon.phase))) {
+        delete record.inputPending;
+        delete record.inputSentAt;
+      }
+    }
     if (payload.safeErrorCode) record.safeErrorCode = payload.safeErrorCode;
     else delete record.safeErrorCode;
     await this.store.save(state);
@@ -623,15 +692,47 @@ export class TaskTransportRuntime {
       );
     }
     if (["failed", "canceled", "rejected"].includes(record.state)) return;
+    if ((record.request.executionMode === "long_horizon" && payload.schemaVersion !== 2)
+      || (record.request.executionMode !== "long_horizon" && payload.schemaVersion !== 1)) {
+      throw new TaskTransportRuntimeError("TASK_ARTIFACT_MODE_CONFLICT", "Task Artifact mode does not match its request.");
+    }
     const imageParts = taskArtifactImages(payload.artifact);
     if (imageParts.length > 0 && record.protocolVersion < 3) {
       throw new TaskTransportRuntimeError("TASK_ARTIFACT_UNSUPPORTED", "Peer sent image output without Task v3.");
     }
-    const existing = record.artifacts?.[0];
+    const existing = record.artifacts?.find((artifact) => artifact.artifactId === payload.artifact.artifactId);
     if (existing && JSON.stringify(existing) !== JSON.stringify(payload.artifact)) {
       throw new TaskTransportRuntimeError("TASK_ARTIFACT_CONFLICT", "Task Artifact conflicts with the stored result.");
     }
-    if (!existing) record.artifacts = [structuredClone(payload.artifact)];
+    if (!existing
+      && record.request.executionMode !== "long_horizon"
+      && (record.artifacts?.length ?? 0) > 0) {
+      throw new TaskTransportRuntimeError(
+        "TASK_ARTIFACT_CONFLICT",
+        "A single-stage Task cannot publish more than one result Artifact."
+      );
+    }
+    if (!existing) record.artifacts = [...(record.artifacts ?? []), structuredClone(payload.artifact)];
+    if (payload.schemaVersion === 2) {
+      const metadata = {
+        artifactId: payload.artifact.artifactId,
+        stageIndex: payload.stageIndex!,
+        role: payload.role!,
+        createdAt: payload.createdAt
+      };
+      const existingMetadata = record.peerArtifactMetadata?.find(
+        (entry) => entry.artifactId === metadata.artifactId
+      );
+      if (existingMetadata && JSON.stringify(existingMetadata) !== JSON.stringify(metadata)) {
+        throw new TaskTransportRuntimeError(
+          "TASK_ARTIFACT_CONFLICT",
+          "Task Artifact stage metadata conflicts with the stored result."
+        );
+      }
+      if (!existingMetadata) {
+        record.peerArtifactMetadata = [...(record.peerArtifactMetadata ?? []), metadata];
+      }
+    }
     initializeAttachmentDiagnostics(record, "artifact", imageParts);
     record.artifactAttachmentsReady = await this.areArtifactAttachmentsReady(record);
     record.updatedAt = validTimestampOrNow(input.receivedAt, this.now()).toISOString();
@@ -650,13 +751,28 @@ export class TaskTransportRuntime {
     const state = await this.store.load();
     const record = findTaskRecord(state, "incoming", payload.requesterTetiId, payload.taskId);
     if (!record || isTerminalTaskState(record.state)) return;
-    this.executor?.cancel(payload.taskId);
+    this.executor?.cancel(currentExecutionTaskId(record) ?? payload.taskId);
     record.state = "canceled";
     record.approval = record.approval === "pending" ? "rejected" : record.approval;
     record.statusPending = true;
     record.statusRevision = (record.statusRevision ?? 0) + 1;
     record.updatedAt = validTimestampOrNow(input.receivedAt, this.now()).toISOString();
     record.safeErrorCode = "TASK_CANCELED_BY_REQUESTER";
+    if (record.longHorizon) {
+      record.longHorizon.phase = "canceled";
+      record.longHorizon.progress = progress(
+        "canceled",
+        null,
+        null,
+        "请求方已取消长期协作",
+        record.updatedAt
+      );
+      appendLongHorizonAudit(record.longHorizon, {
+        action: "canceled",
+        actor: "remote_peer",
+        stageIndex: record.longHorizon.currentStageIndex || null
+      }, record.updatedAt);
+    }
     await this.store.save(state);
   }
 
@@ -679,6 +795,12 @@ export class TaskTransportRuntime {
     if (!target) {
       throw new TaskTransportRuntimeError("TASK_CAPABILITY_UNAVAILABLE", "No local callable Agent can run this capability.");
     }
+    if (record.longHorizon && target.outputModes?.includes("image")) {
+      throw new TaskTransportRuntimeError(
+        "TASK_LONG_HORIZON_TEXT_ONLY",
+        "The selected Child Agent does not have a text-only long-horizon output contract."
+      );
+    }
     const imageInputs = await Promise.all(images.map(async (part) => {
       const path = await this.attachmentStore?.resolveImage({
         taskId: record.request.taskId,
@@ -692,6 +814,16 @@ export class TaskTransportRuntime {
     if (!account) throw new TaskTransportRuntimeError("TASK_ACCOUNT_REQUIRED", "A local Teti account is required.");
     const workspaceBinding = await this.resolveWorkspaceBinding(record.request, account.id);
     record.workspaceBinding = workspaceBinding;
+    if (record.longHorizon) {
+      return this.startLongHorizonStage({
+        state,
+        record,
+        target,
+        imageInputs,
+        instruction: taskInputText(record.request.input),
+        inputId: null
+      });
+    }
     const executionHandle = await this.executor.prepareExecution?.({
       taskId: record.request.taskId,
       workspaceId: workspaceBinding.workspaceId,
@@ -739,6 +871,313 @@ export class TaskTransportRuntime {
     return structuredClone(record);
   }
 
+  async approveDelegation(
+    taskId: string,
+    selections: DelegationTargetSelection[]
+  ): Promise<CollaborationTaskTransportRecord> {
+    const state = await this.store.load();
+    const record = requireMutableIncomingTask(state, taskId, this.now());
+    if (record.request.executionMode !== "long_horizon" || !record.longHorizon) {
+      throw new TaskTransportRuntimeError(
+        "TASK_DELEGATION_MODE_REQUIRED",
+        "Deterministic delegation requires a long-horizon Task."
+      );
+    }
+    if (record.delegationPlan) {
+      throw new TaskTransportRuntimeError("TASK_DELEGATION_EXISTS", "This Task already has a frozen Delegation Plan.");
+    }
+    if (!Array.isArray(selections)
+      || selections.length < 1
+      || selections.length > DELEGATION_LIMITS.maximumChildSteps) {
+      throw new TaskTransportRuntimeError("TASK_DELEGATION_STEP_LIMIT", "Select one to four Child Agent steps.");
+    }
+    if (!this.executor?.resolveDelegationTarget || !this.executor.prepareExecution) {
+      throw new TaskTransportRuntimeError("TASK_DELEGATION_UNAVAILABLE", "Delegation execution is unavailable.");
+    }
+    record.attachmentsReady = await this.areInputAttachmentsReady(record);
+    if (!record.attachmentsReady) {
+      throw new TaskTransportRuntimeError("TASK_ATTACHMENTS_PENDING", "Task images have not finished downloading.");
+    }
+    const targets = selections.map((selection) => {
+      const target = this.executor!.resolveDelegationTarget!(selection);
+      if (!target || !target.inputModes.includes("text")) {
+        throw new TaskTransportRuntimeError(
+          "TASK_DELEGATION_TARGET_INVALID",
+          "A selected Child Agent target is unavailable or does not accept text."
+        );
+      }
+      return target;
+    });
+    const account = await this.accountStorage.load();
+    if (!account) throw new TaskTransportRuntimeError("TASK_ACCOUNT_REQUIRED", "A local Teti account is required.");
+    const workspaceBinding = await this.resolveWorkspaceBinding(record.request, account.id);
+    record.workspaceBinding = workspaceBinding;
+    record.delegationPlan = createDeterministicDelegationPlan({
+      taskId: record.request.taskId,
+      workspaceRevision: workspaceBinding.workspaceRevision,
+      workspaceAccess: workspaceBinding.access,
+      targets,
+      now: this.now(),
+      idFactory: this.taskIdFactory
+    });
+    const approvedAt = this.now().toISOString();
+    appendDelegationAudit(record.delegationPlan, {
+      action: "plan_approved",
+      actor: "local_user",
+      stepId: null
+    }, approvedAt, this.taskIdFactory);
+    record.delegationPlan.updatedAt = approvedAt;
+    validateDelegationPlanState(record.delegationPlan);
+    const firstStep = record.delegationPlan.steps[0];
+    if (!firstStep || firstStep.kind !== "child_execution") {
+      throw new TaskTransportRuntimeError("TASK_DELEGATION_INVALID", "Delegation Plan has no executable Child step.");
+    }
+    return this.startDelegationStep(state, record, firstStep);
+  }
+
+  private async startDelegationStep(
+    state: TetiTaskTransportStoreState,
+    record: CollaborationTaskTransportRecord,
+    step: DelegationChildStep
+  ): Promise<CollaborationTaskTransportRecord> {
+    const plan = record.delegationPlan;
+    const workspace = record.workspaceBinding;
+    const target = this.executor?.resolveDelegationTarget?.({
+      childAgentId: step.childAgentId,
+      connectorId: step.connectorId,
+      capabilityId: step.capabilityId
+    });
+    if (!plan || !workspace || !target
+      || target.resourceBindingId !== step.resourceBindingId
+      || target.timeoutMs < step.budget.timeoutMs
+      || target.maxOutputBytes < step.budget.maxOutputBytes
+      || !isWorkspaceAccessSubset(step.workspaceAccess, workspace.access)) {
+      throw new TaskTransportRuntimeError(
+        "TASK_DELEGATION_TARGET_CHANGED",
+        "A frozen Delegation target or its authority changed before execution."
+      );
+    }
+    const imageInputs = target.inputModes.includes("image")
+      ? await this.resolveInputImages(record)
+      : [];
+    step.workspaceRevision = workspace.workspaceRevision;
+    return this.startLongHorizonStage({
+      state,
+      record,
+      target,
+      imageInputs,
+      instruction: delegationInstruction(record, step),
+      inputId: null,
+      delegationStep: step
+    });
+  }
+
+  private async startLongHorizonStage(input: {
+    state: TetiTaskTransportStoreState;
+    record: CollaborationTaskTransportRecord;
+    target: TaskExecutionTarget;
+    imageInputs: Array<{ attachmentId: string; mimeType: "image/jpeg" | "image/png"; path: string }>;
+    instruction: string;
+    inputId: string | null;
+    delegationStep?: DelegationChildStep;
+  }): Promise<CollaborationTaskTransportRecord> {
+    const { state, record, target, imageInputs } = input;
+    const session = record.longHorizon;
+    const workspace = record.workspaceBinding;
+    if (!session || !workspace || !this.executor?.prepareExecution) {
+      throw new TaskTransportRuntimeError("TASK_STAGE_UNAVAILABLE", "Long-horizon stage execution is unavailable.");
+    }
+    if (Date.parse(session.continuationExpiresAt) <= this.now().getTime()) {
+      expireRecord(record, this.now().toISOString());
+      await this.store.save(state);
+      throw new TaskTransportRuntimeError("TASK_EXPIRED", "The collaboration continuation lease has expired.");
+    }
+    if (session.stages.length >= LONG_HORIZON_LIMITS.maximumStages) {
+      throw new TaskTransportRuntimeError("TASK_STAGE_LIMIT", "The collaboration reached its bounded stage limit.");
+    }
+    this.refreshLongHorizonTargets(state);
+    const delegationTargetMatches = input.delegationStep
+      && record.delegationPlan
+      && input.delegationStep.stepIndex === session.stages.length + 1
+      && input.delegationStep.childAgentId === target.childAgentId
+      && input.delegationStep.connectorId === target.connectorId
+      && input.delegationStep.capabilityId === target.capabilityId;
+    if (!delegationTargetMatches && !session.availableChildAgents.some((candidate) =>
+      candidate.childAgentId === target.childAgentId
+      && candidate.connectorId === target.connectorId)) {
+      throw new TaskTransportRuntimeError("TASK_CHILD_UNAVAILABLE", "The selected Child Agent is unavailable.");
+    }
+    const stageIndex = session.stages.length + 1;
+    const executionTaskId = longHorizonExecutionTaskId(record.request.taskId, stageIndex);
+    const stageInstruction = boundedStageInstruction(record, input.instruction, stageIndex);
+    const execution: CallableAdapterTaskRequest = {
+      schemaVersion: 2,
+      taskId: executionTaskId,
+      adapterId: target.connectorId,
+      agentId: target.childAgentId,
+      capabilityId: target.capabilityId,
+      input: {
+        kind: imageInputs.length > 0 ? "parts" : "text",
+        text: stageInstruction,
+        images: imageInputs
+      },
+      createdAt: this.now().toISOString()
+    };
+    const handle = await this.executor.prepareExecution({
+      taskId: executionTaskId,
+      workspaceId: workspace.workspaceId,
+      childAgentId: target.childAgentId,
+      connectorId: target.connectorId,
+      resume: false
+    });
+    const now = this.now().toISOString();
+    if (input.delegationStep && record.delegationPlan) {
+      input.delegationStep.state = "working";
+      input.delegationStep.executionTaskId = executionTaskId;
+      input.delegationStep.startedAt = now;
+      record.delegationPlan.phase = "working";
+      record.delegationPlan.currentStepIndex = input.delegationStep.stepIndex;
+      record.delegationPlan.updatedAt = now;
+      appendDelegationAudit(record.delegationPlan, {
+        action: "step_started",
+        actor: "host",
+        stepId: input.delegationStep.stepId
+      }, now, this.taskIdFactory);
+    }
+    if (session.pendingInput && session.pendingInput.inputId === input.inputId) {
+      session.pendingInput.consumedAt = now;
+    }
+    session.currentStageIndex = stageIndex;
+    session.workspaceRevision = workspace.workspaceRevision;
+    session.phase = "working";
+    session.pauseRequested = false;
+    session.pendingInput = null;
+    session.inputRequest = null;
+    session.progress = progress("running", stageIndex - 1, LONG_HORIZON_LIMITS.maximumStages, `阶段 ${stageIndex} 正在执行`, now);
+    session.stages.push({
+      stageId: `stage:${stageIndex}`,
+      stageIndex,
+      executionTaskId,
+      childAgentId: target.childAgentId,
+      connectorId: target.connectorId,
+      state: "working",
+      workspaceRevision: workspace.workspaceRevision,
+      workspaceMutation: target.workspacePolicy === "snapshot"
+        && !workspace.workspaceId.startsWith("workspace:none.")
+        && workspace.access.some((access) => access === "write" || access === "create_artifact")
+        ? "snapshot_commit"
+        : "none",
+      inputId: input.inputId,
+      instructionDigest: digest(input.instruction),
+      progress: structuredClone(session.progress),
+      artifactIds: [],
+      checkpointAvailable: false,
+      startedAt: now,
+      updatedAt: now
+    });
+    const previousChildAgentId = session.stages.at(-2)?.childAgentId;
+    if (stageIndex === 1 || previousChildAgentId !== target.childAgentId) {
+      appendLongHorizonAudit(session, {
+        action: "child_selected",
+        actor: "local_user",
+        stageIndex,
+        childAgentId: target.childAgentId,
+        workspaceRevision: workspace.workspaceRevision
+      }, now);
+    }
+    if (stageIndex > 1) {
+      appendLongHorizonAudit(session, {
+        action: "resumed",
+        actor: "local_user",
+        stageIndex,
+        childAgentId: target.childAgentId,
+        workspaceRevision: workspace.workspaceRevision
+      }, now);
+    }
+    appendLongHorizonAudit(session, {
+      action: "stage_started",
+      actor: "host",
+      stageIndex,
+      childAgentId: target.childAgentId,
+      workspaceRevision: workspace.workspaceRevision
+    }, now);
+    record.state = "working";
+    record.approval = "consumed";
+    record.statusRevision = (record.statusRevision ?? 0) + 1;
+    record.statusPending = true;
+    record.updatedAt = now;
+    delete record.safeErrorCode;
+    await this.store.save(state);
+    await this.trySendPendingForRecord(state, record);
+
+    const grant = createExecutionGrant(
+      record.request,
+      target,
+      workspace,
+      this.now(),
+      execution,
+      input.delegationStep?.workspaceAccess
+    );
+    const delegationDeadline = input.delegationStep
+      ? new Date(Math.min(
+          Date.parse(session.continuationExpiresAt),
+          this.now().getTime() + input.delegationStep.budget.timeoutMs
+        )).toISOString()
+      : session.continuationExpiresAt;
+    const authority = createExecutionAuthority(
+      grant,
+      execution,
+      target,
+      handle.executionEpoch,
+      delegationDeadline
+    );
+    void this.executor.execute(execution, authority).then(
+      (result) => this.enqueueOperation(() => this.finishExecution(
+        record.request.taskId,
+        result,
+        handle.executionEpoch,
+        executionTaskId
+      )),
+      () => this.enqueueOperation(() => this.finishExecution(
+        record.request.taskId,
+        null,
+        handle.executionEpoch,
+        executionTaskId
+      ))
+    ).catch(() => undefined);
+    return structuredClone(record);
+  }
+
+  private refreshLongHorizonTargets(state: TetiTaskTransportStoreState): boolean {
+    let changed = false;
+    for (const record of state.records) {
+      const session = record.longHorizon;
+      if (!session || record.direction !== "incoming" || isTerminalTaskState(record.state)) continue;
+      const requiredModes = taskInputImages(record.request.input).length > 0
+        ? ["text", "image"] as const
+        : ["text"] as const;
+      const targets = this.executor?.listTargets?.(
+        record.request.offerId,
+        record.request.capabilityId,
+        requiredModes
+      ) ?? (() => {
+        const target = this.executor?.resolveTarget(
+          record.request.offerId,
+          record.request.capabilityId,
+          requiredModes
+        );
+        return target ? [target] : [];
+      })();
+      const next = targets.map(({ childAgentId, connectorId }) => ({ childAgentId, connectorId }));
+      if (JSON.stringify(next) !== JSON.stringify(session.availableChildAgents)) {
+        session.availableChildAgents = next;
+        session.updatedAt = this.now().toISOString();
+        changed = true;
+      }
+    }
+    return changed;
+  }
+
   private async resolveWorkspaceBinding(
     request: CollaborationTaskRequest,
     localTetiId: string
@@ -763,7 +1202,7 @@ export class TaskTransportRuntime {
       return {
         workspaceId: `workspace:${request.taskId}`,
         workspaceRevision: 1,
-        mode: "ephemeral_task",
+        mode: request.executionMode === "long_horizon" ? "durable_collaboration" : "ephemeral_task",
         access: [...(request.workspace?.access ?? ["read", "write", "create_artifact"])]
       };
     }
@@ -772,6 +1211,20 @@ export class TaskTransportRuntime {
       access: ["read", "write", "create_artifact"] as const
     };
     if (workspaceRequest.kind === "temporary") {
+      if (request.executionMode === "long_horizon") {
+        const workspace = await this.workspaceStore.create({
+          ownerTetiId: localTetiId,
+          participantTetiIds: [request.requesterTetiId],
+          mode: "durable_collaboration",
+          retentionPolicy: { kind: "retain" }
+        });
+        return {
+          workspaceId: workspace.workspaceId,
+          workspaceRevision: workspace.revision,
+          mode: workspace.mode,
+          access: [...workspaceRequest.access]
+        };
+      }
       const maximumExpiry = this.now().getTime() + WORKSPACE_LIMITS.maximumEphemeralTtlMs;
       const workspace = await this.workspaceStore.create({
         ownerTetiId: localTetiId,
@@ -820,6 +1273,16 @@ export class TaskTransportRuntime {
     record.statusPending = true;
     record.safeErrorCode = "TASK_REJECTED_BY_USER";
     record.updatedAt = this.now().toISOString();
+    if (record.longHorizon) {
+      record.longHorizon.phase = "canceled";
+      record.longHorizon.progress = progress("canceled", null, null, "接收端已拒绝长期协作", record.updatedAt);
+      appendLongHorizonAudit(record.longHorizon, {
+        action: "canceled",
+        actor: "local_user",
+        stageIndex: null,
+        safeErrorCode: record.safeErrorCode
+      }, record.updatedAt);
+    }
     await this.store.save(state);
     await this.trySendPendingForRecord(state, record);
     return structuredClone(record);
@@ -830,16 +1293,302 @@ export class TaskTransportRuntime {
     const record = state.records.find((candidate) => candidate.request.taskId === taskId);
     if (!record) throw new TaskTransportRuntimeError("TASK_NOT_FOUND", "Task was not found.");
     if (isTerminalTaskState(record.state)) return structuredClone(record);
+    const canceledAt = this.now().toISOString();
     if (record.direction === "incoming") {
-      this.executor?.cancel(taskId);
+      this.executor?.cancel(currentExecutionTaskId(record) ?? taskId);
       record.state = "canceled";
       record.statusRevision = (record.statusRevision ?? 0) + 1;
       record.statusPending = true;
       record.safeErrorCode = "TASK_CANCELED_BY_USER";
+      if (record.longHorizon) {
+        record.longHorizon.phase = "canceled";
+        record.longHorizon.progress = progress("canceled", null, null, "协作任务已取消", canceledAt);
+        appendLongHorizonAudit(record.longHorizon, {
+          action: "canceled",
+          actor: "local_user",
+          stageIndex: record.longHorizon.currentStageIndex || null
+        }, canceledAt);
+      }
+      if (record.delegationPlan) {
+        record.delegationPlan.phase = "canceled";
+        record.delegationPlan.updatedAt = canceledAt;
+        const activeStep = record.delegationPlan.steps.find((step) => step.state === "working");
+        if (activeStep) {
+          activeStep.state = "canceled";
+          activeStep.completedAt = canceledAt;
+          activeStep.safeErrorCode = "TASK_CANCELED_BY_USER";
+        }
+        appendDelegationAudit(record.delegationPlan, {
+          action: "plan_canceled",
+          actor: "local_user",
+          stepId: activeStep?.stepId ?? null,
+          safeErrorCode: "TASK_CANCELED_BY_USER"
+        }, canceledAt, this.taskIdFactory);
+      }
     } else {
       record.cancelPending = true;
     }
-    record.updatedAt = this.now().toISOString();
+    record.updatedAt = canceledAt;
+    await this.store.save(state);
+    await this.trySendPendingForRecord(state, record);
+    return structuredClone(record);
+  }
+
+  async submitLongHorizonInput(
+    taskId: string,
+    instruction: string
+  ): Promise<CollaborationTaskTransportRecord> {
+    const state = await this.store.load();
+    const record = state.records.find((candidate) =>
+      candidate.direction === "outgoing" && candidate.request.taskId === taskId
+    );
+    if (!record?.peerLongHorizon || record.state !== "input_required") {
+      throw new TaskTransportRuntimeError("TASK_INPUT_NOT_REQUIRED", "The collaboration is not waiting for input.");
+    }
+    const text = instruction.trim();
+    if (!text || new TextEncoder().encode(text).byteLength > LONG_HORIZON_LIMITS.maximumInstructionBytes) {
+      throw new TaskTransportRuntimeError("TASK_INPUT_INVALID", "Supplemental instruction is invalid or too large.");
+    }
+    if (Date.parse(record.peerLongHorizon.continuationExpiresAt) <= this.now().getTime()) {
+      expireRecord(record, this.now().toISOString());
+      await this.store.save(state);
+      throw new TaskTransportRuntimeError("TASK_EXPIRED", "The collaboration continuation lease has expired.");
+    }
+    if (record.inputPending) {
+      throw new TaskTransportRuntimeError("TASK_INPUT_PENDING", "A supplemental instruction is already pending delivery.");
+    }
+    const createdAt = this.now().toISOString();
+    const payload: TetiTaskInputPayload = {
+      schemaVersion: 1,
+      taskId,
+      requesterTetiId: record.request.requesterTetiId,
+      targetTetiId: record.request.targetTetiId,
+      inputId: randomUUID(),
+      expectedStageIndex: record.peerLongHorizon.currentStageIndex,
+      instruction: text,
+      createdAt
+    };
+    record.inputPending = payload;
+    delete record.inputSentAt;
+    record.updatedAt = createdAt;
+    await this.store.save(state);
+    await this.trySendPendingForRecord(state, record);
+    return structuredClone(record);
+  }
+
+  async receiveLongHorizonInput(input: {
+    envelope: TetiApplicationEnvelope<TetiTaskInputPayload>;
+    connection: TetiConnectionRecord;
+    receivedAt?: string;
+  }): Promise<void> {
+    const account = await this.accountStorage.load();
+    if (!account) throw new TaskTransportRuntimeError("TASK_ACCOUNT_REQUIRED", "A local Teti account is required.");
+    const payload = input.envelope.payload;
+    requireInboundTaskIdentity(input.envelope, input.connection, account.id, payload);
+    const state = await this.store.load();
+    const record = findTaskRecord(state, "incoming", payload.requesterTetiId, payload.taskId);
+    const session = record?.longHorizon;
+    if (session?.audit.some((event) => event.action === "input_received" && event.inputId === payload.inputId)) {
+      return;
+    }
+    if (!record || !session || record.state !== "input_required"
+      || !["input_required", "paused"].includes(session.phase)) {
+      throw new TaskTransportRuntimeError("TASK_INPUT_NOT_REQUIRED", "The collaboration is not waiting for input.");
+    }
+    if (Date.parse(session.continuationExpiresAt) <= this.now().getTime()) {
+      expireRecord(record, this.now().toISOString());
+      await this.store.save(state);
+      return;
+    }
+    if (payload.expectedStageIndex !== session.currentStageIndex) {
+      throw new TaskTransportRuntimeError("TASK_INPUT_STAGE_CONFLICT", "Supplemental input targets a stale stage.");
+    }
+    if (session.pendingInput?.inputId === payload.inputId) return;
+    if (session.pendingInput) {
+      throw new TaskTransportRuntimeError("TASK_INPUT_CONFLICT", "Another supplemental input is already pending.");
+    }
+    const receivedAt = validTimestampOrNow(input.receivedAt, this.now()).toISOString();
+    session.pendingInput = {
+      inputId: payload.inputId,
+      instruction: payload.instruction,
+      instructionDigest: digest(payload.instruction),
+      source: "remote_requester",
+      createdAt: payload.createdAt
+    };
+    appendLongHorizonAudit(session, {
+      action: "input_received",
+      actor: "remote_peer",
+      stageIndex: session.currentStageIndex,
+      inputId: payload.inputId
+    }, receivedAt);
+    session.updatedAt = receivedAt;
+    record.updatedAt = receivedAt;
+    await this.store.save(state);
+  }
+
+  async pauseLongHorizon(taskId: string): Promise<CollaborationTaskTransportRecord> {
+    const state = await this.store.load();
+    const record = requireIncomingLongHorizon(state, taskId, this.now());
+    const session = record.longHorizon!;
+    const now = this.now().toISOString();
+    if (session.phase === "working") {
+      session.pauseRequested = true;
+      appendLongHorizonAudit(session, {
+        action: "pause_requested",
+        actor: "local_user",
+        stageIndex: session.currentStageIndex
+      }, now);
+    } else if (session.phase === "input_required") {
+      session.phase = "paused";
+      appendLongHorizonAudit(session, {
+        action: "paused",
+        actor: "local_user",
+        stageIndex: session.currentStageIndex
+      }, now);
+    } else if (session.phase !== "paused") {
+      throw new TaskTransportRuntimeError("TASK_PAUSE_UNAVAILABLE", "The collaboration cannot be paused now.");
+    }
+    session.updatedAt = now;
+    record.statusRevision = (record.statusRevision ?? 0) + 1;
+    record.statusPending = true;
+    record.updatedAt = now;
+    await this.store.save(state);
+    await this.trySendPendingForRecord(state, record);
+    return structuredClone(record);
+  }
+
+  async continueLongHorizon(
+    taskId: string,
+    childAgentId?: string
+  ): Promise<CollaborationTaskTransportRecord> {
+    const state = await this.store.load();
+    const record = requireIncomingLongHorizon(state, taskId, this.now());
+    const session = record.longHorizon!;
+    if (!session.pendingInput || !["input_required", "paused"].includes(session.phase)) {
+      throw new TaskTransportRuntimeError("TASK_INPUT_REQUIRED", "A requester instruction is required before the next stage.");
+    }
+    this.refreshLongHorizonTargets(state);
+    const candidates = session.availableChildAgents;
+    const previousStage = session.stages.at(-1);
+    const selected = childAgentId
+      ? candidates.find((candidate) => candidate.childAgentId === childAgentId)
+      : candidates.find((candidate) =>
+          candidate.childAgentId === previousStage?.childAgentId
+          && candidate.connectorId === previousStage.connectorId
+        );
+    if (!childAgentId && previousStage && !selected) {
+      throw new TaskTransportRuntimeError(
+        "TASK_CHILD_SELECTION_REQUIRED",
+        "The previous Child Agent is unavailable; explicitly select another Child Agent."
+      );
+    }
+    if (!selected) throw new TaskTransportRuntimeError("TASK_CHILD_UNAVAILABLE", "No Child Agent is available.");
+    const resolvedTargets = this.executor?.listTargets?.(
+      record.request.offerId,
+      record.request.capabilityId,
+      ["text"]
+    ) ?? (() => {
+      const resolved = this.executor?.resolveTarget(
+        record.request.offerId,
+        record.request.capabilityId,
+        ["text"]
+      );
+      return resolved ? [resolved] : [];
+    })();
+    const target = resolvedTargets.find((candidate) =>
+      candidate.childAgentId === selected.childAgentId
+      && candidate.connectorId === selected.connectorId
+    );
+    if (!target) {
+      throw new TaskTransportRuntimeError("TASK_CHILD_UNAVAILABLE", "The selected Child Agent is no longer ready.");
+    }
+    const workspace = record.workspaceBinding;
+    if (!workspace) throw new TaskTransportRuntimeError("TASK_WORKSPACE_UNAVAILABLE", "Task Workspace is unavailable.");
+    if (this.workspaceStore && !workspace.workspaceId.startsWith("workspace:none.")) {
+      const current = await this.workspaceStore.get(workspace.workspaceId);
+      if (!current || current.revision !== workspace.workspaceRevision
+        || current.revision !== session.workspaceRevision) {
+        throw new TaskTransportRuntimeError("TASK_WORKSPACE_REVISION_CONFLICT", "Workspace revision changed before continuation.");
+      }
+    }
+    const images = taskInputImages(record.request.input);
+    const imageInputs = await Promise.all(images.map(async (part) => {
+      const path = await this.attachmentStore?.resolveImage({ taskId, purpose: "input", part });
+      if (!path) throw new TaskTransportRuntimeError("TASK_ATTACHMENTS_PENDING", "Task images are unavailable.");
+      return { attachmentId: part.attachmentId, mimeType: part.mimeType, path };
+    }));
+    return this.startLongHorizonStage({
+      state,
+      record,
+      target,
+      imageInputs,
+      instruction: session.pendingInput.instruction,
+      inputId: session.pendingInput.inputId
+    });
+  }
+
+  async completeLongHorizon(taskId: string): Promise<CollaborationTaskTransportRecord> {
+    const state = await this.store.load();
+    const record = requireIncomingLongHorizon(state, taskId, this.now());
+    const session = record.longHorizon!;
+    if (!["input_required", "paused"].includes(session.phase)
+      || session.pendingInput
+      || session.artifacts.length === 0) {
+      throw new TaskTransportRuntimeError("TASK_COMPLETE_UNAVAILABLE", "The collaboration cannot be completed now.");
+    }
+    const now = this.now().toISOString();
+    const final = session.artifacts.at(-1)!;
+    final.role = "final";
+    session.phase = "completed";
+    session.inputRequest = null;
+    session.progress = progress("completed", session.currentStageIndex, session.currentStageIndex, "长期协作已完成", now);
+    appendLongHorizonAudit(session, {
+      action: "completed",
+      actor: "local_user",
+      stageIndex: session.currentStageIndex,
+      artifactId: final.artifactId,
+      workspaceRevision: session.workspaceRevision
+    }, now);
+    record.state = "completed";
+    record.statusRevision = (record.statusRevision ?? 0) + 1;
+    record.statusPending = true;
+    record.updatedAt = now;
+    delete record.safeErrorCode;
+    await this.store.save(state);
+    await this.trySendPendingForRecord(state, record);
+    return structuredClone(record);
+  }
+
+  async renewLongHorizon(taskId: string, ttlMs: number): Promise<CollaborationTaskTransportRecord> {
+    const state = await this.store.load();
+    const record = requireIncomingLongHorizon(state, taskId, this.now());
+    const session = record.longHorizon!;
+    if (!["input_required", "paused"].includes(session.phase)) {
+      throw new TaskTransportRuntimeError(
+        "TASK_RENEWAL_UNAVAILABLE",
+        "A collaboration can be renewed only at a stage boundary."
+      );
+    }
+    if (!Number.isSafeInteger(ttlMs) || ttlMs < 60_000 || ttlMs > LONG_HORIZON_LIMITS.maximumRenewalMs
+      || session.renewalCount >= LONG_HORIZON_LIMITS.maximumRenewals) {
+      throw new TaskTransportRuntimeError("TASK_RENEWAL_LIMIT", "Task renewal exceeds the bounded policy.");
+    }
+    const absoluteLimit = Date.parse(record.request.createdAt) + LONG_HORIZON_LIMITS.maximumLifetimeMs;
+    const nextExpiry = Math.min(this.now().getTime() + ttlMs, absoluteLimit);
+    if (nextExpiry <= Date.parse(session.continuationExpiresAt)) {
+      throw new TaskTransportRuntimeError("TASK_RENEWAL_LIMIT", "Task renewal does not extend the current lease.");
+    }
+    const now = this.now().toISOString();
+    session.continuationExpiresAt = new Date(nextExpiry).toISOString();
+    session.renewalCount += 1;
+    appendLongHorizonAudit(session, {
+      action: "renewed",
+      actor: "local_user",
+      stageIndex: session.currentStageIndex || null
+    }, now);
+    record.statusRevision = (record.statusRevision ?? 0) + 1;
+    record.statusPending = true;
+    record.updatedAt = now;
     await this.store.save(state);
     await this.trySendPendingForRecord(state, record);
     return structuredClone(record);
@@ -990,6 +1739,20 @@ export class TaskTransportRuntime {
     return changed;
   }
 
+  private async resolveInputImages(
+    record: CollaborationTaskTransportRecord
+  ): Promise<Array<{ attachmentId: string; mimeType: "image/jpeg" | "image/png"; path: string }>> {
+    return Promise.all(taskInputImages(record.request.input).map(async (part) => {
+      const path = await this.attachmentStore?.resolveImage({
+        taskId: record.request.taskId,
+        purpose: "input",
+        part
+      });
+      if (!path) throw new TaskTransportRuntimeError("TASK_ATTACHMENTS_PENDING", "Task images are unavailable.");
+      return { attachmentId: part.attachmentId, mimeType: part.mimeType, path };
+    }));
+  }
+
   private async reconcileInterruptedExecutions(state: TetiTaskTransportStoreState): Promise<boolean> {
     await this.executor?.reconcileExecutionHandles?.();
     let changed = false;
@@ -1009,8 +1772,19 @@ export class TaskTransportRuntime {
         continue;
       }
       if (record.direction !== "incoming" || record.state !== "working") continue;
-      if (this.executor?.getTask(record.request.taskId)?.state === "working") continue;
-      const handle = await this.executor?.getExecutionHandle?.(record.request.taskId);
+      const executionTaskId = currentExecutionTaskId(record) ?? record.request.taskId;
+      const handle = await this.executor?.getExecutionHandle?.(executionTaskId);
+      if (this.executor?.getTask(executionTaskId)?.state === "working") {
+        if (record.longHorizon && handle && updateLongHorizonProgress(record, handle, this.now())) {
+          changed = true;
+        }
+        continue;
+      }
+      if (record.longHorizon) {
+        await this.finishLongHorizonStage(state, record, null, handle, executionTaskId);
+        changed = true;
+        continue;
+      }
       const resumable = handle?.progress.state === "interrupted"
         && handle.resumeCapability === "checkpoint_restart";
       record.state = resumable ? "input_required" : "failed";
@@ -1067,7 +1841,10 @@ export class TaskTransportRuntime {
     if (!connection) return;
     if (record.direction === "incoming" && record.artifacts?.length
       && (record.artifactPending || record.protocolVersion >= 4)) {
-      const artifact = record.artifacts.at(-1)!;
+      const pendingArtifacts = record.artifacts.filter(
+        (artifact) => !record.sentArtifactIds?.includes(artifact.artifactId)
+      );
+      for (const artifact of pendingArtifacts) {
       for (const part of taskArtifactImages(artifact)) {
         if (!shouldSendAttachment(record, part.attachmentId, "artifact", this.now())) continue;
         if (!this.attachmentStore || record.protocolVersion < 3) return;
@@ -1087,7 +1864,9 @@ export class TaskTransportRuntime {
           artifactId: artifact.artifactId,
           part: structuredClone(part),
           createdAt,
-          expiresAt: new Date(Date.parse(createdAt) + DEFAULT_TASK_REQUEST_TTL_MS).toISOString(),
+          expiresAt: record.longHorizon
+            ? record.longHorizon.continuationExpiresAt
+            : new Date(Date.parse(createdAt) + DEFAULT_TASK_REQUEST_TTL_MS).toISOString(),
           ...(record.protocolVersion >= 4 ? { deliveryReceiptRequested: true as const } : {})
         };
         try {
@@ -1109,8 +1888,19 @@ export class TaskTransportRuntime {
           return;
         }
       }
-      if (record.artifactPending) {
-        const payload: TetiTaskArtifactPayload = {
+        const stageEntry = record.longHorizon?.artifacts.find(
+          (entry) => entry.artifactId === artifact.artifactId
+        );
+        const payload: TetiTaskArtifactPayload = stageEntry ? {
+          schemaVersion: 2,
+          taskId: record.request.taskId,
+          requesterTetiId: record.request.requesterTetiId,
+          targetTetiId: record.request.targetTetiId,
+          artifact: structuredClone(artifact),
+          createdAt: artifact.createdAt,
+          stageIndex: stageEntry.stageIndex,
+          role: stageEntry.role
+        } : {
           schemaVersion: 1,
           taskId: record.request.taskId,
           requesterTetiId: record.request.requesterTetiId,
@@ -1120,7 +1910,10 @@ export class TaskTransportRuntime {
         };
         try {
           await this.applicationManager.sendTaskArtifact(connection.requestId, payload);
-          record.artifactPending = false;
+          record.sentArtifactIds = appendUnique(record.sentArtifactIds, artifact.artifactId);
+          record.artifactPending = record.artifacts.some(
+            (candidate) => !record.sentArtifactIds?.includes(candidate.artifactId)
+          );
           await this.store.save(state);
         } catch {
           return;
@@ -1128,7 +1921,17 @@ export class TaskTransportRuntime {
       }
     }
     if (record.direction === "incoming" && record.statusPending && record.statusRevision) {
-      const payload: TetiTaskStatusPayload = {
+      const payload: TetiTaskStatusPayload = record.longHorizon ? {
+        schemaVersion: 2,
+        taskId: record.request.taskId,
+        requesterTetiId: record.request.requesterTetiId,
+        targetTetiId: record.request.targetTetiId,
+        revision: record.statusRevision,
+        state: networkTaskState(record.state),
+        updatedAt: record.updatedAt,
+        longHorizon: peerLongHorizonStatus(record.longHorizon),
+        ...(record.safeErrorCode ? { safeErrorCode: record.safeErrorCode } : {})
+      } : {
         schemaVersion: 1,
         taskId: record.request.taskId,
         requesterTetiId: record.request.requesterTetiId,
@@ -1141,6 +1944,16 @@ export class TaskTransportRuntime {
       try {
         await this.applicationManager.sendTaskStatus(connection.requestId, payload);
         record.statusPending = false;
+        await this.store.save(state);
+      } catch {
+        return;
+      }
+    }
+    if (record.direction === "outgoing" && record.inputPending && !record.inputSentAt) {
+      try {
+        await this.applicationManager.sendTaskInput(connection.requestId, record.inputPending);
+        record.inputSentAt = this.now().toISOString();
+        record.updatedAt = record.inputSentAt;
         await this.store.save(state);
       } catch {
         return;
@@ -1168,15 +1981,20 @@ export class TaskTransportRuntime {
   private async finishExecution(
     taskId: string,
     result: CallableAdapterTaskSnapshot | null,
-    executionEpoch = 1
+    executionEpoch = 1,
+    executionTaskId = taskId
   ): Promise<void> {
     const state = await this.store.load();
     const record = state.records.find((candidate) =>
       candidate.direction === "incoming" && candidate.request.taskId === taskId
     );
     if (!record || isTerminalTaskState(record.state)) return;
-    const handle = await this.executor?.getExecutionHandle?.(taskId);
+    const handle = await this.executor?.getExecutionHandle?.(executionTaskId);
     if (handle && handle.executionEpoch !== executionEpoch) return;
+    if (record.longHorizon) {
+      await this.finishLongHorizonStage(state, record, result, handle, executionTaskId);
+      return;
+    }
     const completedAt = this.now().toISOString();
     if (result?.state === "completed" && result.artifact) {
       const resultImages = result.artifact.kind === "parts" ? result.artifact.images : [];
@@ -1242,6 +2060,448 @@ export class TaskTransportRuntime {
     record.statusRevision = (record.statusRevision ?? 0) + 1;
     record.statusPending = true;
     record.updatedAt = completedAt;
+    await this.store.save(state);
+    await this.trySendPendingForRecord(state, record);
+  }
+
+  private async finishLongHorizonStage(
+    state: TetiTaskTransportStoreState,
+    record: CollaborationTaskTransportRecord,
+    result: CallableAdapterTaskSnapshot | null,
+    handle: ExecutionHandle | null | undefined,
+    executionTaskId: string
+  ): Promise<void> {
+    const session = record.longHorizon!;
+    const stage = session.stages.find((candidate) => candidate.executionTaskId === executionTaskId);
+    if (!stage || stage.stageIndex !== session.currentStageIndex || stage.state !== "working") return;
+    const completedAt = this.now().toISOString();
+    if (Date.parse(session.continuationExpiresAt) <= this.now().getTime()
+      || result?.safeErrorCode === "ADAPTER_TASK_EXPIRED") {
+      expireRecord(record, completedAt);
+      stage.state = "canceled";
+      stage.safeErrorCode = "TASK_EXPIRED";
+      stage.updatedAt = completedAt;
+      stage.completedAt = completedAt;
+      await this.store.save(state);
+      await this.trySendPendingForRecord(state, record);
+      return;
+    }
+
+    const delegationStep = record.delegationPlan?.steps.find((candidate) =>
+      candidate.kind === "child_execution" && candidate.executionTaskId === executionTaskId
+    );
+    const unsupportedImageArtifact = !record.delegationPlan
+      && result?.artifact?.kind === "parts"
+      && result.artifact.images.length > 0;
+    const delegationOutputExceeded = delegationStep?.kind === "child_execution"
+      && result?.artifact
+      && new TextEncoder().encode(result.artifact.text).byteLength > delegationStep.budget.maxOutputBytes;
+    if (result?.state === "completed" && result.artifact
+      && !unsupportedImageArtifact && !delegationOutputExceeded) {
+      const resultImages = record.delegationPlan && result.artifact.kind === "parts"
+        ? result.artifact.images
+        : [];
+      const artifact: CollaborationTaskArtifact = {
+        schemaVersion: 2,
+        taskId: record.request.taskId,
+        artifactId: randomUUID(),
+        parts: [
+          { kind: "text", text: result.artifact.text },
+          ...structuredClone(resultImages)
+        ],
+        createdAt: completedAt
+      };
+      validateTaskArtifact(artifact);
+      record.artifacts = [...(record.artifacts ?? []), artifact];
+      stage.artifactIds.push(artifact.artifactId);
+      stage.state = "completed";
+      stage.progress = progress("completed", 1, 1, `阶段 ${stage.stageIndex} 已完成`, completedAt);
+      stage.updatedAt = completedAt;
+      stage.completedAt = completedAt;
+      if (record.workspaceBinding && this.workspaceStore
+        && !record.workspaceBinding.workspaceId.startsWith("workspace:none.")) {
+        const workspace = await this.workspaceStore.get(record.workspaceBinding.workspaceId);
+        const expectedRevision = stage.workspaceRevision
+          + (stage.workspaceMutation === "snapshot_commit" ? 1 : 0);
+        if (!workspace || workspace.revision !== expectedRevision) {
+          record.artifacts = record.artifacts.filter((candidate) => candidate.artifactId !== artifact.artifactId);
+          stage.artifactIds = [];
+          stage.state = "failed";
+          stage.safeErrorCode = "TASK_WORKSPACE_REVISION_CONFLICT";
+          stage.progress = progress("failed", null, null, "Workspace revision 冲突", completedAt);
+          session.phase = "input_required";
+          session.pauseRequested = false;
+          session.inputRequest = {
+            requestId: randomUUID(),
+            prompt: "Workspace 版本发生冲突，请检查后补充指令并选择 Child Agent 继续。",
+            createdAt: completedAt
+          };
+          session.progress = progress(
+            "failed",
+            stage.stageIndex - 1,
+            LONG_HORIZON_LIMITS.maximumStages,
+            "Workspace revision 冲突；阶段结果未发布",
+            completedAt
+          );
+          appendLongHorizonAudit(session, {
+            action: "stage_failed",
+            actor: "host",
+            stageIndex: stage.stageIndex,
+            childAgentId: stage.childAgentId,
+            workspaceRevision: stage.workspaceRevision,
+            safeErrorCode: stage.safeErrorCode
+          }, completedAt);
+          if (record.delegationPlan && delegationStep?.kind === "child_execution") {
+            delegationStep.state = "failed";
+            delegationStep.completedAt = completedAt;
+            delegationStep.safeErrorCode = stage.safeErrorCode;
+            record.delegationPlan.phase = "failed";
+            record.delegationPlan.updatedAt = completedAt;
+            appendDelegationAudit(record.delegationPlan, {
+              action: "step_failed",
+              actor: "host",
+              stepId: delegationStep.stepId,
+              safeErrorCode: stage.safeErrorCode
+            }, completedAt, this.taskIdFactory);
+          }
+          record.state = record.delegationPlan ? "failed" : "input_required";
+          record.safeErrorCode = stage.safeErrorCode;
+          record.statusRevision = (record.statusRevision ?? 0) + 1;
+          record.statusPending = true;
+          record.updatedAt = completedAt;
+          await this.store.save(state);
+          await this.trySendPendingForRecord(state, record);
+          return;
+        } else {
+          record.workspaceBinding.workspaceRevision = workspace.revision;
+          session.workspaceRevision = workspace.revision;
+        }
+      }
+      session.artifacts.push({
+        artifactId: artifact.artifactId,
+        stageIndex: stage.stageIndex,
+        role: "intermediate",
+        createdAt: completedAt
+      });
+      const checkpoint = {
+        checkpointId: randomUUID(),
+        stageIndex: stage.stageIndex,
+        workspaceRevision: session.workspaceRevision,
+        artifactIds: [...stage.artifactIds],
+        digest: digest(JSON.stringify({
+          taskId: record.request.taskId,
+          stageIndex: stage.stageIndex,
+          workspaceRevision: session.workspaceRevision,
+          artifactIds: stage.artifactIds
+        })),
+        createdAt: completedAt
+      };
+      session.checkpoints.push(checkpoint);
+      stage.checkpointAvailable = true;
+      if (record.delegationPlan && delegationStep?.kind === "child_execution") {
+        delegationStep.state = "completed";
+        delegationStep.completedAt = completedAt;
+        delegationStep.artifactIds = [artifact.artifactId];
+        record.delegationPlan.artifacts.push({
+          artifactId: artifact.artifactId,
+          stepId: delegationStep.stepId,
+          producer: {
+            kind: "child_agent",
+            childAgentId: delegationStep.childAgentId,
+            connectorId: delegationStep.connectorId,
+            resourceBindingId: delegationStep.resourceBindingId
+          },
+          workspaceRevision: session.workspaceRevision,
+          role: "intermediate",
+          createdAt: completedAt
+        });
+        appendDelegationAudit(record.delegationPlan, {
+          action: "artifact_recorded",
+          actor: "child_agent",
+          stepId: delegationStep.stepId,
+          artifactId: artifact.artifactId
+        }, completedAt, this.taskIdFactory);
+        appendDelegationAudit(record.delegationPlan, {
+          action: "step_completed",
+          actor: "host",
+          stepId: delegationStep.stepId
+        }, completedAt, this.taskIdFactory);
+        record.delegationPlan.updatedAt = completedAt;
+        appendLongHorizonAudit(session, {
+          action: "artifact_published",
+          actor: "child_agent",
+          stageIndex: stage.stageIndex,
+          artifactId: artifact.artifactId,
+          childAgentId: stage.childAgentId
+        }, completedAt);
+        appendLongHorizonAudit(session, {
+          action: "checkpoint_created",
+          actor: "host",
+          stageIndex: stage.stageIndex,
+          artifactId: artifact.artifactId,
+          workspaceRevision: session.workspaceRevision
+        }, completedAt);
+        record.artifactPending = true;
+        record.artifactAttachmentsReady = true;
+        record.updatedAt = completedAt;
+        session.updatedAt = completedAt;
+        const nextStep = record.delegationPlan.steps.find((candidate) =>
+          candidate.kind === "child_execution" && candidate.state === "pending"
+        );
+        if (nextStep?.kind === "child_execution") {
+          try {
+            await this.startDelegationStep(state, record, nextStep);
+          } catch (error) {
+            const safeErrorCode = error instanceof TaskTransportRuntimeError
+              ? error.code
+              : "TASK_DELEGATION_TARGET_CHANGED";
+            nextStep.state = "failed";
+            nextStep.completedAt = completedAt;
+            nextStep.safeErrorCode = safeErrorCode;
+            record.delegationPlan.phase = "failed";
+            record.delegationPlan.currentStepIndex = nextStep.stepIndex;
+            record.delegationPlan.updatedAt = completedAt;
+            appendDelegationAudit(record.delegationPlan, {
+              action: "step_failed",
+              actor: "host",
+              stepId: nextStep.stepId,
+              safeErrorCode
+            }, completedAt, this.taskIdFactory);
+            session.phase = "failed";
+            session.inputRequest = null;
+            session.pendingInput = null;
+            session.progress = progress(
+              "failed",
+              nextStep.stepIndex - 1,
+              record.delegationPlan.maximumChildCalls,
+              "下一委派目标或权限已改变；计划已停止",
+              completedAt
+            );
+            record.state = "failed";
+            record.safeErrorCode = safeErrorCode;
+            record.statusRevision = (record.statusRevision ?? 0) + 1;
+            record.statusPending = true;
+            record.updatedAt = completedAt;
+            validateDelegationPlanState(record.delegationPlan);
+            await this.store.save(state);
+            await this.trySendPendingForRecord(state, record);
+          }
+          return;
+        }
+        await this.completeDelegation(state, record, completedAt);
+        return;
+      }
+      session.phase = session.pauseRequested ? "paused" : "input_required";
+      session.pauseRequested = false;
+      session.inputRequest = {
+        requestId: randomUUID(),
+        prompt: "请补充下一阶段指令，或确认当前结果为最终结果。",
+        createdAt: completedAt
+      };
+      session.progress = progress(
+        session.phase === "paused" ? "paused" : "interrupted",
+        stage.stageIndex,
+        LONG_HORIZON_LIMITS.maximumStages,
+        session.phase === "paused" ? "已在阶段边界暂停" : "等待用户补充下一阶段指令",
+        completedAt
+      );
+      appendLongHorizonAudit(session, {
+        action: "artifact_published",
+        actor: "child_agent",
+        stageIndex: stage.stageIndex,
+        artifactId: artifact.artifactId,
+        childAgentId: stage.childAgentId
+      }, completedAt);
+      appendLongHorizonAudit(session, {
+        action: "checkpoint_created",
+        actor: "host",
+        stageIndex: stage.stageIndex,
+        artifactId: artifact.artifactId,
+        workspaceRevision: session.workspaceRevision
+      }, completedAt);
+      appendLongHorizonAudit(session, {
+        action: session.phase === "paused" ? "paused" : "input_requested",
+        actor: "host",
+        stageIndex: stage.stageIndex
+      }, completedAt);
+      record.artifactPending = true;
+      record.artifactAttachmentsReady = true;
+      record.state = "input_required";
+      delete record.safeErrorCode;
+    } else {
+      const interrupted = handle?.progress.state === "interrupted";
+      stage.state = result?.state === "canceled" ? "canceled" : interrupted ? "interrupted" : "failed";
+      stage.safeErrorCode = unsupportedImageArtifact
+        ? "TASK_LONG_HORIZON_TEXT_ONLY"
+        : delegationOutputExceeded
+          ? "TASK_DELEGATION_OUTPUT_BUDGET"
+        : result?.safeErrorCode ?? (interrupted
+        ? "TASK_EXECUTION_INTERRUPTED"
+        : "ADAPTER_INTERNAL_ERROR");
+      stage.checkpointAvailable = handle?.resumeCapability === "checkpoint_restart";
+      stage.progress = progress("failed", null, null, "阶段执行失败，等待用户选择如何继续", completedAt);
+      stage.updatedAt = completedAt;
+      stage.completedAt = completedAt;
+      session.phase = session.pauseRequested ? "paused" : "input_required";
+      session.pauseRequested = false;
+      session.inputRequest = {
+        requestId: randomUUID(),
+        prompt: "本阶段失败。可补充指令并显式选择原 Child 或其他 Child 继续。",
+        createdAt: completedAt
+      };
+      session.progress = progress(
+        session.phase === "paused" ? "paused" : "failed",
+        stage.stageIndex - 1,
+        LONG_HORIZON_LIMITS.maximumStages,
+        "阶段失败，未自动切换 Child Agent",
+        completedAt
+      );
+      appendLongHorizonAudit(session, {
+        action: interrupted ? "restart_reconciled" : "stage_failed",
+        actor: "host",
+        stageIndex: stage.stageIndex,
+        childAgentId: stage.childAgentId,
+        safeErrorCode: stage.safeErrorCode
+      }, completedAt);
+      record.state = "input_required";
+      record.safeErrorCode = stage.safeErrorCode;
+      if (record.delegationPlan && delegationStep?.kind === "child_execution") {
+        delegationStep.state = interrupted ? "interrupted" : result?.state === "canceled" ? "canceled" : "failed";
+        delegationStep.completedAt = completedAt;
+        delegationStep.safeErrorCode = stage.safeErrorCode;
+        record.delegationPlan.phase = interrupted ? "interrupted" : "failed";
+        record.delegationPlan.updatedAt = completedAt;
+        appendDelegationAudit(record.delegationPlan, {
+          action: interrupted ? "restart_reconciled" : "step_failed",
+          actor: "host",
+          stepId: delegationStep.stepId,
+          safeErrorCode: stage.safeErrorCode
+        }, completedAt, this.taskIdFactory);
+        session.phase = "failed";
+        session.inputRequest = null;
+        session.pendingInput = null;
+        session.progress = progress(
+          "failed",
+          delegationStep.stepIndex - 1,
+          record.delegationPlan.maximumChildCalls,
+          "委派步骤失败；计划已停止且未自动切换 Child Agent",
+          completedAt
+        );
+        record.state = "failed";
+      }
+    }
+    session.updatedAt = completedAt;
+    record.statusRevision = (record.statusRevision ?? 0) + 1;
+    record.statusPending = true;
+    record.updatedAt = completedAt;
+    await this.store.save(state);
+    await this.trySendPendingForRecord(state, record);
+  }
+
+  private async completeDelegation(
+    state: TetiTaskTransportStoreState,
+    record: CollaborationTaskTransportRecord,
+    completedAt: string
+  ): Promise<void> {
+    const plan = record.delegationPlan;
+    const session = record.longHorizon;
+    const aggregation = plan?.steps.at(-1);
+    if (!plan || !session || !aggregation || aggregation.kind !== "artifact_aggregation") {
+      throw new TaskTransportRuntimeError("TASK_DELEGATION_INVALID", "Delegation aggregation is unavailable.");
+    }
+    plan.phase = "aggregating";
+    plan.currentStepIndex = aggregation.stepIndex;
+    plan.updatedAt = completedAt;
+    aggregation.state = "working";
+    aggregation.startedAt = completedAt;
+    appendDelegationAudit(plan, {
+      action: "aggregation_started",
+      actor: "host",
+      stepId: aggregation.stepId
+    }, completedAt, this.taskIdFactory);
+    const intermediateIds = new Set(plan.artifacts
+      .filter((entry) => entry.role === "intermediate")
+      .map((entry) => entry.artifactId));
+    const intermediateArtifacts = (record.artifacts ?? []).filter((artifact) =>
+      intermediateIds.has(artifact.artifactId)
+    );
+    const finalArtifact: CollaborationTaskArtifact = {
+      schemaVersion: 2,
+      taskId: record.request.taskId,
+      artifactId: randomUUID(),
+      parts: [
+        {
+          kind: "text",
+          text: aggregateDelegationText(intermediateArtifacts, MAX_TASK_ARTIFACT_TEXT_BYTES)
+        },
+        ...uniqueDelegationImages(intermediateArtifacts).slice(0, 4)
+      ],
+      createdAt: completedAt
+    };
+    validateTaskArtifact(finalArtifact);
+    record.artifacts = [...(record.artifacts ?? []), finalArtifact];
+    initializeAttachmentDiagnostics(record, "artifact", taskArtifactImages(finalArtifact));
+    aggregation.state = "completed";
+    aggregation.artifactId = finalArtifact.artifactId;
+    aggregation.completedAt = completedAt;
+    plan.artifacts.push({
+      artifactId: finalArtifact.artifactId,
+      stepId: aggregation.stepId,
+      producer: {
+        kind: "teti_host",
+        resourceId: TETI_HOST_AGGREGATION_RESOURCE_ID
+      },
+      workspaceRevision: session.workspaceRevision,
+      role: "final",
+      createdAt: completedAt
+    });
+    plan.phase = "completed";
+    plan.updatedAt = completedAt;
+    appendDelegationAudit(plan, {
+      action: "artifact_recorded",
+      actor: "host",
+      stepId: aggregation.stepId,
+      artifactId: finalArtifact.artifactId
+    }, completedAt, this.taskIdFactory);
+    appendDelegationAudit(plan, {
+      action: "plan_completed",
+      actor: "host",
+      stepId: aggregation.stepId,
+      artifactId: finalArtifact.artifactId
+    }, completedAt, this.taskIdFactory);
+    session.artifacts.push({
+      artifactId: finalArtifact.artifactId,
+      stageIndex: session.currentStageIndex,
+      role: "final",
+      createdAt: completedAt
+    });
+    session.phase = "completed";
+    session.inputRequest = null;
+    session.pendingInput = null;
+    session.progress = progress(
+      "completed",
+      plan.maximumChildCalls,
+      plan.maximumChildCalls,
+      "Teti Host 已完成委派与 Artifact 汇总",
+      completedAt
+    );
+    session.updatedAt = completedAt;
+    appendLongHorizonAudit(session, {
+      action: "completed",
+      actor: "host",
+      stageIndex: session.currentStageIndex,
+      artifactId: finalArtifact.artifactId,
+      workspaceRevision: session.workspaceRevision
+    }, completedAt);
+    record.state = "completed";
+    record.approval = "consumed";
+    record.artifactPending = true;
+    record.artifactAttachmentsReady = true;
+    record.statusRevision = (record.statusRevision ?? 0) + 1;
+    record.statusPending = true;
+    record.updatedAt = completedAt;
+    delete record.safeErrorCode;
+    validateDelegationPlanState(plan);
     await this.store.save(state);
     await this.trySendPendingForRecord(state, record);
   }
@@ -1355,7 +2615,7 @@ export class TaskTransportRuntime {
 
 function validateSendInput(input: SendCollaborationTaskInput): Required<Pick<
   SendCollaborationTaskInput,
-  "connectionRequestId" | "capabilityId" | "text" | "ttlMs" | "attachments" | "workspace"
+  "connectionRequestId" | "capabilityId" | "text" | "ttlMs" | "attachments" | "workspace" | "executionMode"
 >> & Pick<SendCollaborationTaskInput, "taskId" | "offerId"> {
   if (typeof input !== "object" || input === null) {
     throw new TaskTransportRuntimeError("TASK_INPUT_INVALID", "Task input is invalid.");
@@ -1403,6 +2663,17 @@ function validateSendInput(input: SendCollaborationTaskInput): Required<Pick<
     kind: "temporary",
     access: ["read", "write", "create_artifact"]
   };
+  const executionMode = input.executionMode ?? "single_stage";
+  if (executionMode !== "single_stage" && executionMode !== "long_horizon") {
+    throw new TaskTransportRuntimeError("TASK_INPUT_INVALID", "Task execution mode is invalid.");
+  }
+  if (executionMode === "long_horizon"
+    && (attachments.length > 0 || input.capabilityId === "image-editing")) {
+    throw new TaskTransportRuntimeError(
+      "TASK_LONG_HORIZON_TEXT_ONLY",
+      "Long-horizon collaboration accepts text-only capabilities in Beta 0.2.8."
+    );
+  }
   try {
     validateTaskWorkspaceRequest(workspace);
   } catch {
@@ -1415,6 +2686,7 @@ function validateSendInput(input: SendCollaborationTaskInput): Required<Pick<
     attachments: structuredClone(attachments),
     workspace: structuredClone(workspace),
     ttlMs,
+    executionMode,
     ...(input.taskId === undefined ? {} : { taskId: input.taskId }),
     ...(input.offerId === undefined ? {} : { offerId: input.offerId })
   };
@@ -1430,6 +2702,7 @@ function requireMatchingRetry(
     || taskInputText(record.request.input) !== input.text
     || JSON.stringify(taskInputImages(record.request.input)) !== JSON.stringify(input.attachments)
     || JSON.stringify(record.request.workspace) !== JSON.stringify(input.workspace)
+    || record.request.executionMode !== input.executionMode
     || Date.parse(record.request.expiresAt) - Date.parse(record.request.createdAt) !== input.ttlMs
     || (input.offerId !== undefined && record.request.offerId !== input.offerId)) {
     throw new TaskTransportRuntimeError(
@@ -1440,7 +2713,7 @@ function requireMatchingRetry(
 }
 
 function taskInputForVersion(
-  version: 1 | 2 | 3 | 4 | 5,
+  version: 1 | 2 | 3 | 4 | 5 | 6,
   text: string,
   attachments: readonly TaskImagePart[]
 ): CollaborationTaskInput {
@@ -1540,7 +2813,7 @@ function incomingRecord(
   receivedAt: string,
   delivery: "received" | "expired" | "rejected"
 ): CollaborationTaskTransportRecord {
-  return {
+  const record: CollaborationTaskTransportRecord = {
     schemaVersion: 1,
     direction: "incoming",
     peerTetiId: input.connection.remoteTetiId,
@@ -1564,6 +2837,10 @@ function incomingRecord(
         ? { safeErrorCode: "TASK_CREATED_AT_FUTURE" }
         : {})
   };
+  if (input.envelope.payload.executionMode === "long_horizon") {
+    record.longHorizon = createLongHorizonState(input.envelope.payload, new Date(receivedAt));
+  }
+  return record;
 }
 
 function createReceipt(
@@ -1651,7 +2928,7 @@ function expireDueRecords(state: TetiTaskTransportStoreState, now: Date): boolea
     if ((!isTerminalTaskState(record.state)
       || record.delivery === "queued"
       || record.delivery === "send_failed")
-      && Date.parse(record.request.expiresAt) <= now.getTime()) {
+      && Date.parse(effectiveTaskExpiry(record)) <= now.getTime()) {
       expireRecord(record, now.toISOString());
       changed = true;
     }
@@ -1664,6 +2941,36 @@ function expireRecord(record: CollaborationTaskTransportRecord, timestamp: strin
   record.state = "rejected";
   record.approval = "expired";
   record.safeErrorCode = "TASK_EXPIRED";
+  if (record.longHorizon && record.longHorizon.phase !== "expired") {
+    record.longHorizon.phase = "expired";
+    record.longHorizon.pauseRequested = false;
+    record.longHorizon.inputRequest = null;
+    record.longHorizon.pendingInput = null;
+    record.longHorizon.progress = progress("canceled", null, null, "长期协作续期已过期", timestamp);
+    appendLongHorizonAudit(record.longHorizon, {
+      action: "expired",
+      actor: "host",
+      stageIndex: record.longHorizon.currentStageIndex || null,
+      safeErrorCode: "TASK_EXPIRED"
+    }, timestamp);
+  }
+  if (record.delegationPlan
+    && !["completed", "failed", "canceled"].includes(record.delegationPlan.phase)) {
+    record.delegationPlan.phase = "canceled";
+    record.delegationPlan.updatedAt = timestamp;
+    const activeStep = record.delegationPlan.steps.find((step) => step.state === "working");
+    if (activeStep) {
+      activeStep.state = "canceled";
+      activeStep.completedAt = timestamp;
+      activeStep.safeErrorCode = "TASK_EXPIRED";
+    }
+    appendDelegationAudit(record.delegationPlan, {
+      action: "plan_canceled",
+      actor: "host",
+      stepId: activeStep?.stepId ?? null,
+      safeErrorCode: "TASK_EXPIRED"
+    }, timestamp, randomUUID);
+  }
   record.receiptPending = false;
   for (const diagnostic of record.attachmentDiagnostics ?? []) {
     if (diagnostic.state === "acknowledged" || diagnostic.state === "stored") continue;
@@ -1922,7 +3229,7 @@ function isRemoteTransitionAllowed(
       .includes(next);
   }
   if (current === "working" || current === "auth_required" || current === "input_required") {
-    return ["working", "completed", "failed", "canceled", "auth_required", "input_required"]
+    return ["working", "completed", "failed", "canceled", "rejected", "auth_required", "input_required"]
       .includes(next);
   }
   return false;
@@ -1939,24 +3246,28 @@ function createExecutionGrant(
   request: CollaborationTaskRequest,
   target: TaskExecutionTarget,
   workspace: TaskWorkspaceBinding,
-  now: Date
+  now: Date,
+  execution?: CallableAdapterTaskRequest,
+  workspaceAccess: TaskWorkspaceBinding["access"] = workspace.access
 ): ExecutionGrant {
   const issuedAt = now.toISOString();
   return {
     schemaVersion: 2,
     grantId: randomUUID(),
-    taskId: request.taskId,
+    taskId: execution?.taskId ?? request.taskId,
     requesterTetiId: request.requesterTetiId,
-    capabilityId: request.capabilityId,
+    capabilityId: execution?.capabilityId ?? request.capabilityId,
     agentId: target.childAgentId,
     adapterId: target.connectorId,
-    inputDigest: `sha256:${createHash("sha256").update(canonicalTaskRequestJson(request)).digest("hex")}`,
+    inputDigest: execution
+      ? digest(JSON.stringify(execution.input))
+      : `sha256:${createHash("sha256").update(canonicalTaskRequestJson(request)).digest("hex")}`,
     issuedAt,
     expiresAt: new Date(now.getTime() + 2 * 60 * 1_000).toISOString(),
     singleUse: true,
     workspaceId: workspace.workspaceId,
     workspaceRevision: workspace.workspaceRevision,
-    workspaceAccess: [...workspace.access],
+    workspaceAccess: [...workspaceAccess],
     userFileAccess: "none",
     commandPolicy: "fixed_adapter_entrypoint",
     networkPolicy: "agent_managed"
@@ -1967,7 +3278,8 @@ function createExecutionAuthority(
   grant: ExecutionGrant,
   request: CallableAdapterTaskRequest,
   target: TaskExecutionTarget,
-  executionEpoch: number
+  executionEpoch: number,
+  executionDeadlineAt?: string
 ): ExecutionAuthority {
   if (request.adapterId !== target.connectorId
     || request.agentId !== target.childAgentId
@@ -1981,6 +3293,251 @@ function createExecutionAuthority(
     workspaceId: grant.workspaceId,
     workspaceRevision: grant.workspaceRevision,
     workspaceAccess: grant.workspaceAccess,
-    executionEpoch
+    executionEpoch,
+    ...(executionDeadlineAt ? { executionDeadlineAt } : {})
   });
+}
+
+function createLongHorizonState(
+  request: CollaborationTaskRequest,
+  now: Date
+): LongHorizonTaskState {
+  const timestamp = now.toISOString();
+  const session: LongHorizonTaskState = {
+    schemaVersion: 1,
+    phase: "pending_approval",
+    currentStageIndex: 0,
+    workspaceRevision: 1,
+    progress: progress("queued", 0, LONG_HORIZON_LIMITS.maximumStages, "等待接收端批准", timestamp),
+    continuationExpiresAt: request.expiresAt,
+    renewalCount: 0,
+    pauseRequested: false,
+    pendingInput: null,
+    inputRequest: null,
+    availableChildAgents: [],
+    stages: [],
+    checkpoints: [],
+    artifacts: [],
+    audit: [],
+    updatedAt: timestamp
+  };
+  appendLongHorizonAudit(session, {
+    action: "session_created",
+    actor: "host",
+    stageIndex: null,
+    workspaceRevision: 1
+  }, timestamp);
+  return session;
+}
+
+function appendLongHorizonAudit(
+  session: LongHorizonTaskState,
+  event: Omit<LongHorizonAuditEvent, "eventId" | "sequence" | "timestamp">,
+  timestamp: string
+): void {
+  if (session.audit.length >= LONG_HORIZON_LIMITS.maximumAuditEvents) {
+    throw new TaskTransportRuntimeError("TASK_AUDIT_LIMIT", "Long-horizon audit capacity was reached.");
+  }
+  session.audit.push({
+    eventId: randomUUID(),
+    sequence: session.audit.length + 1,
+    ...event,
+    timestamp
+  });
+  session.updatedAt = timestamp;
+}
+
+function appendDelegationAudit(
+  plan: NonNullable<CollaborationTaskTransportRecord["delegationPlan"]>,
+  event: Omit<DelegationAuditEvent, "eventId" | "sequence" | "timestamp">,
+  timestamp: string,
+  idFactory: () => string
+): void {
+  if (plan.audit.length >= DELEGATION_LIMITS.maximumAuditEvents) {
+    throw new TaskTransportRuntimeError("TASK_DELEGATION_AUDIT_LIMIT", "Delegation audit capacity was reached.");
+  }
+  plan.audit.push({
+    eventId: idFactory(),
+    sequence: plan.audit.length + 1,
+    ...event,
+    timestamp
+  });
+  plan.updatedAt = timestamp;
+}
+
+function progress(
+  state: "queued" | "running" | "paused" | "interrupted" | "canceling" | "canceled" | "completed" | "failed",
+  completedUnits: number | null,
+  totalUnits: number | null,
+  message: string | null,
+  updatedAt: string
+) {
+  return { state, completedUnits, totalUnits, message, updatedAt } as const;
+}
+
+function digest(value: string): string {
+  return `sha256:${createHash("sha256").update(value).digest("hex")}`;
+}
+
+function effectiveTaskExpiry(record: CollaborationTaskTransportRecord): string {
+  return record.longHorizon?.continuationExpiresAt
+    ?? record.peerLongHorizon?.continuationExpiresAt
+    ?? record.request.expiresAt;
+}
+
+function currentExecutionTaskId(record: CollaborationTaskTransportRecord): string | null {
+  const session = record.longHorizon;
+  if (!session || session.currentStageIndex === 0) return null;
+  return session.stages.find((stage) => stage.stageIndex === session.currentStageIndex)?.executionTaskId ?? null;
+}
+
+function updateLongHorizonProgress(
+  record: CollaborationTaskTransportRecord,
+  handle: ExecutionHandle,
+  now: Date
+): boolean {
+  const session = record.longHorizon;
+  const stage = session?.stages.find((candidate) => candidate.executionTaskId === handle.taskId);
+  if (!session || !stage || stage.state !== "working") return false;
+  const previous = stage.progress;
+  const next = handle.progress;
+  if (previous.state === next.state
+    && previous.completedUnits === next.completedUnits
+    && previous.totalUnits === next.totalUnits
+    && previous.message === next.message) return false;
+  const timestamp = now.toISOString();
+  stage.progress = { ...structuredClone(next), updatedAt: timestamp };
+  stage.updatedAt = timestamp;
+  session.progress = structuredClone(stage.progress);
+  appendLongHorizonAudit(session, {
+    action: "progress_updated",
+    actor: "child_agent",
+    stageIndex: stage.stageIndex,
+    childAgentId: stage.childAgentId,
+    workspaceRevision: stage.workspaceRevision
+  }, timestamp);
+  record.statusRevision = (record.statusRevision ?? 0) + 1;
+  record.statusPending = true;
+  record.updatedAt = timestamp;
+  return true;
+}
+
+function longHorizonExecutionTaskId(taskId: string, stageIndex: number): string {
+  const taskDigest = createHash("sha256").update(taskId).digest("hex").slice(0, 24);
+  return `lh_${taskDigest}_${stageIndex}`;
+}
+
+function boundedStageInstruction(
+  record: CollaborationTaskTransportRecord,
+  instruction: string,
+  stageIndex: number
+): string {
+  if (stageIndex === 1) return truncateUtf8(instruction, MAX_TASK_INPUT_TEXT_BYTES);
+  const priorArtifacts = (record.artifacts ?? [])
+    .map((artifact, index) => `阶段 ${index + 1} 中间结果:\n${taskArtifactText(artifact)}`)
+    .join("\n\n");
+  return truncateUtf8([
+    `长期协作原始目标:\n${taskInputText(record.request.input)}`,
+    priorArtifacts ? `已保留的中间结果:\n${priorArtifacts}` : "",
+    `本阶段补充指令:\n${instruction}`,
+    "仅完成当前阶段；是否继续由 Teti Host 在阶段边界决定。"
+  ].filter(Boolean).join("\n\n"), MAX_TASK_INPUT_TEXT_BYTES);
+}
+
+function delegationInstruction(
+  record: CollaborationTaskTransportRecord,
+  step: DelegationChildStep
+): string {
+  if (step.stepIndex === 1) return taskInputText(record.request.input);
+  return [
+    `执行确定性委派计划的第 ${step.stepIndex} 步。`,
+    `本步骤能力：${step.capabilityId}。`,
+    "使用前序 Artifact 作为有界上下文，但不要联系任何远端 Teti 或再次委派。",
+    "只返回当前步骤的结果，最终汇总由 Teti Host 完成。"
+  ].join("\n");
+}
+
+function aggregateDelegationText(
+  artifacts: readonly CollaborationTaskArtifact[],
+  maximumBytes: number
+): string {
+  const sections = artifacts.map((artifact, index) =>
+    `步骤 ${index + 1} 结果：\n${taskArtifactText(artifact)}`
+  );
+  return truncateUtf8([
+    `Teti Host 已按冻结顺序完成 ${artifacts.length} 个 Child Agent 步骤。`,
+    ...sections
+  ].join("\n\n"), maximumBytes);
+}
+
+function uniqueDelegationImages(
+  artifacts: readonly CollaborationTaskArtifact[]
+): TaskImagePart[] {
+  const images = new Map<string, TaskImagePart>();
+  for (const artifact of artifacts) {
+    for (const image of taskArtifactImages(artifact)) {
+      if (!images.has(image.attachmentId)) images.set(image.attachmentId, structuredClone(image));
+    }
+  }
+  return [...images.values()];
+}
+
+function truncateUtf8(value: string, maximumBytes: number): string {
+  if (new TextEncoder().encode(value).byteLength <= maximumBytes) return value;
+  const characters = Array.from(value);
+  let low = 0;
+  let high = characters.length;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    if (new TextEncoder().encode(characters.slice(0, middle).join("")).byteLength <= maximumBytes) low = middle;
+    else high = middle - 1;
+  }
+  return characters.slice(0, low).join("");
+}
+
+function taskArtifactText(artifact: CollaborationTaskArtifact): string {
+  return artifact.schemaVersion === 1
+    ? artifact.text
+    : artifact.parts.find((part) => part.kind === "text")?.text ?? "";
+}
+
+function requireIncomingLongHorizon(
+  state: TetiTaskTransportStoreState,
+  taskId: string,
+  now: Date
+): CollaborationTaskTransportRecord {
+  if (!SAFE_ID_PATTERN.test(taskId)) {
+    throw new TaskTransportRuntimeError("TASK_INPUT_INVALID", "Task ID is invalid.");
+  }
+  const record = state.records.find((candidate) =>
+    candidate.direction === "incoming" && candidate.request.taskId === taskId
+  );
+  if (!record?.longHorizon) {
+    throw new TaskTransportRuntimeError("TASK_NOT_FOUND", "Long-horizon collaboration was not found.");
+  }
+  if (Date.parse(record.longHorizon.continuationExpiresAt) <= now.getTime()) {
+    expireRecord(record, now.toISOString());
+    throw new TaskTransportRuntimeError("TASK_EXPIRED", "The collaboration continuation lease has expired.");
+  }
+  if (["completed", "failed", "canceled", "expired"].includes(record.longHorizon.phase)) {
+    throw new TaskTransportRuntimeError("TASK_TERMINAL", "Long-horizon collaboration is already terminal.");
+  }
+  return record;
+}
+
+function peerLongHorizonStatus(session: LongHorizonTaskState): TetiTaskLongHorizonStatus {
+  const phase = session.phase === "pending_approval" ? "failed" : session.phase;
+  const finalArtifactId = session.artifacts.find((artifact) => artifact.role === "final")?.artifactId;
+  return {
+    schemaVersion: 1,
+    phase,
+    currentStageIndex: session.currentStageIndex,
+    workspaceRevision: session.workspaceRevision,
+    completedUnits: session.progress.completedUnits,
+    totalUnits: session.progress.totalUnits,
+    progressMessage: session.progress.message,
+    continuationExpiresAt: session.continuationExpiresAt,
+    ...(session.inputRequest ? { inputRequestId: session.inputRequest.requestId } : {}),
+    ...(finalArtifactId ? { finalArtifactId } : {})
+  };
 }

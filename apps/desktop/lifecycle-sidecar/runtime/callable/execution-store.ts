@@ -5,8 +5,10 @@ import {
   readFile,
   realpath,
   rename,
+  rm,
   writeFile
 } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
 import { basename, dirname, extname, join, relative, resolve } from "node:path";
 import {
   TETI_EXECUTION_HANDLE_SCHEMA_VERSION,
@@ -21,12 +23,20 @@ import {
   type PrepareExecutionHandleInput
 } from "../../../../../core/callability/execution.ts";
 
-const EXECUTION_STORE_SCHEMA_VERSION = 1;
+const EXECUTION_STORE_SCHEMA_VERSION = 2;
 const MAX_EXECUTION_HANDLES = 512;
 
+interface CheckpointIntegrityRecord {
+  taskId: string;
+  capturedExecutionEpoch: number;
+  checkpointRef: string;
+  sha256: string;
+}
+
 interface ExecutionHandleStoreState {
-  schemaVersion: 1;
+  schemaVersion: 2;
   handles: ExecutionHandle[];
+  checkpointIntegrity: CheckpointIntegrityRecord[];
 }
 
 export interface ExecutionHandleStore {
@@ -43,7 +53,9 @@ export class FileExecutionHandleStore implements ExecutionHandleStore {
 
   async load(): Promise<ExecutionHandleStoreState> {
     try {
-      const value = JSON.parse(await readFile(this.path, "utf8")) as unknown;
+      const value = migrateExecutionHandleStoreState(
+        JSON.parse(await readFile(this.path, "utf8")) as unknown
+      );
       validateExecutionHandleStoreState(value);
       return structuredClone(value);
     } catch (error) {
@@ -69,8 +81,9 @@ export class MemoryExecutionHandleStore implements ExecutionHandleStore {
   private state: ExecutionHandleStoreState;
 
   constructor(state: ExecutionHandleStoreState = emptyExecutionHandleStoreState()) {
-    validateExecutionHandleStoreState(state);
-    this.state = structuredClone(state);
+    const migrated = migrateExecutionHandleStoreState(state);
+    validateExecutionHandleStoreState(migrated);
+    this.state = structuredClone(migrated);
   }
 
   async load(): Promise<ExecutionHandleStoreState> {
@@ -105,12 +118,14 @@ export class DurableExecutionRegistry implements ExecutionHandleRegistry {
     }
   }
 
-  prepare(
+  async prepare(
     input: PrepareExecutionHandleInput,
     capabilities: ConnectorExecutionCapabilities,
     semantics: ExecutionSemantics
   ): Promise<ExecutionHandle> {
-    return this.mutate(async (state) => {
+    const outcome = await this.mutate(async (state): Promise<
+      { handle: ExecutionHandle; error?: never } | { handle?: never; error: string }
+    > => {
       const previous = state.handles.find((item) => item.taskId === input.taskId);
       if (input.resume) {
         if (!previous
@@ -121,6 +136,20 @@ export class DurableExecutionRegistry implements ExecutionHandleRegistry {
           || !capabilities.supportsCheckpoint
           || semantics !== "workspace_pure_compute") {
           throw new Error("EXECUTION_RESUME_UNAVAILABLE");
+        }
+        if (!(await this.isCheckpointIntact(state, previous))) {
+          const now = this.now().toISOString();
+          previous.checkpointRef = null;
+          previous.resumeCapability = "none";
+          previous.progress = {
+            ...previous.progress,
+            message: "检查点完整性验证失败，已禁止恢复",
+            updatedAt: now
+          };
+          state.checkpointIntegrity = state.checkpointIntegrity.filter(
+            (record) => record.taskId !== previous.taskId
+          );
+          return { error: "EXECUTION_CHECKPOINT_INTEGRITY_FAILED" };
         }
       } else if (previous) {
         throw new Error("EXECUTION_HANDLE_EXISTS");
@@ -149,8 +178,10 @@ export class DurableExecutionRegistry implements ExecutionHandleRegistry {
       if (previous) state.handles.splice(state.handles.indexOf(previous), 1, handle);
       else state.handles.push(handle);
       pruneHandles(state);
-      return structuredClone(handle);
+      return { handle: structuredClone(handle) };
     });
+    if ("error" in outcome) throw new Error(outcome.error);
+    return outcome.handle;
   }
 
   get(taskId: string): Promise<ExecutionHandle | null> {
@@ -202,13 +233,32 @@ export class DurableExecutionRegistry implements ExecutionHandleRegistry {
     );
     await mkdir(directory, { recursive: true, mode: 0o700 });
     const destination = join(directory, `checkpoint${extension}`);
-    await copyFile(source, destination);
-    await chmod(destination, 0o600);
+    const temporary = join(directory, `.checkpoint-${randomUUID()}.tmp`);
+    let checkpointDigest: string;
+    try {
+      await copyFile(source, temporary);
+      await chmod(temporary, 0o600);
+      checkpointDigest = await sha256File(temporary);
+      await rename(temporary, destination);
+      await chmod(destination, 0o600);
+    } catch (error) {
+      await rm(temporary, { force: true }).catch(() => undefined);
+      throw error;
+    }
     return this.mutate(async (state) => {
       const handle = currentHandle(state, input.taskId, input.executionEpoch);
       if (!handle || isTerminalExecutionProgress(handle.progress.state)) return false;
       handle.checkpointRef = destination;
       handle.resumeCapability = "checkpoint_restart";
+      state.checkpointIntegrity = state.checkpointIntegrity.filter(
+        (record) => record.taskId !== input.taskId
+      );
+      state.checkpointIntegrity.push({
+        taskId: input.taskId,
+        capturedExecutionEpoch: input.executionEpoch,
+        checkpointRef: destination,
+        sha256: checkpointDigest
+      });
       return true;
     });
   }
@@ -313,6 +363,25 @@ export class DurableExecutionRegistry implements ExecutionHandleRegistry {
     return new Date(now.getTime() + this.leaseMs).toISOString();
   }
 
+  private async isCheckpointIntact(
+    state: ExecutionHandleStoreState,
+    handle: ExecutionHandle
+  ): Promise<boolean> {
+    const record = state.checkpointIntegrity.find((candidate) =>
+      candidate.taskId === handle.taskId
+      && candidate.checkpointRef === handle.checkpointRef
+    );
+    if (!record || !handle.checkpointRef) return false;
+    try {
+      const checkpointRoot = await realpath(this.checkpointRoot);
+      const checkpoint = await realpath(handle.checkpointRef);
+      return isContained(checkpointRoot, checkpoint)
+        && await sha256File(checkpoint) === record.sha256;
+    } catch {
+      return false;
+    }
+  }
+
   private read<T>(operation: (state: ExecutionHandleStoreState) => Promise<T>): Promise<T> {
     return this.serialize(async () => operation(await this.store.load()));
   }
@@ -334,7 +403,24 @@ export class DurableExecutionRegistry implements ExecutionHandleRegistry {
 }
 
 function emptyExecutionHandleStoreState(): ExecutionHandleStoreState {
-  return { schemaVersion: EXECUTION_STORE_SCHEMA_VERSION, handles: [] };
+  return {
+    schemaVersion: EXECUTION_STORE_SCHEMA_VERSION,
+    handles: [],
+    checkpointIntegrity: []
+  };
+}
+
+function migrateExecutionHandleStoreState(value: unknown): unknown {
+  if (!isRecord(value)
+    || value.schemaVersion !== 1
+    || Object.keys(value).sort().join(",") !== "handles,schemaVersion") {
+    return value;
+  }
+  return {
+    schemaVersion: EXECUTION_STORE_SCHEMA_VERSION,
+    handles: value.handles,
+    checkpointIntegrity: []
+  };
 }
 
 function validateExecutionHandleStoreState(
@@ -342,9 +428,11 @@ function validateExecutionHandleStoreState(
 ): asserts value is ExecutionHandleStoreState {
   if (!isRecord(value)
     || value.schemaVersion !== EXECUTION_STORE_SCHEMA_VERSION
-    || Object.keys(value).sort().join(",") !== "handles,schemaVersion"
+    || Object.keys(value).sort().join(",") !== "checkpointIntegrity,handles,schemaVersion"
     || !Array.isArray(value.handles)
-    || value.handles.length > MAX_EXECUTION_HANDLES) {
+    || value.handles.length > MAX_EXECUTION_HANDLES
+    || !Array.isArray(value.checkpointIntegrity)
+    || value.checkpointIntegrity.length > MAX_EXECUTION_HANDLES) {
     throw new Error("Execution Handle store is invalid.");
   }
   const taskIds = new Set<string>();
@@ -352,6 +440,27 @@ function validateExecutionHandleStoreState(
     validateExecutionHandle(handle);
     if (taskIds.has(handle.taskId)) throw new Error("Execution Handle task ID is duplicated.");
     taskIds.add(handle.taskId);
+  }
+  const integrityTaskIds = new Set<string>();
+  for (const record of value.checkpointIntegrity) {
+    if (!isRecord(record)
+      || Object.keys(record).sort().join(",")
+        !== "capturedExecutionEpoch,checkpointRef,sha256,taskId"
+      || typeof record.taskId !== "string"
+      || !Number.isSafeInteger(record.capturedExecutionEpoch)
+      || Number(record.capturedExecutionEpoch) < 1
+      || typeof record.checkpointRef !== "string"
+      || !/^sha256:[a-f0-9]{64}$/.test(String(record.sha256))
+      || integrityTaskIds.has(record.taskId)) {
+      throw new Error("Execution checkpoint integrity state is invalid.");
+    }
+    const handle = value.handles.find((candidate) => candidate.taskId === record.taskId);
+    if (!handle
+      || handle.checkpointRef !== record.checkpointRef
+      || handle.resumeCapability !== "checkpoint_restart") {
+      throw new Error("Execution checkpoint integrity state is orphaned.");
+    }
+    integrityTaskIds.add(record.taskId);
   }
 }
 
@@ -377,6 +486,17 @@ function pruneHandles(state: ExecutionHandleStoreState): void {
   if (state.handles.length > MAX_EXECUTION_HANDLES) {
     throw new Error("Execution Handle store capacity is exhausted.");
   }
+  state.checkpointIntegrity = state.checkpointIntegrity.filter((record) =>
+    state.handles.some((handle) =>
+      handle.taskId === record.taskId
+      && handle.checkpointRef === record.checkpointRef
+      && handle.resumeCapability === "checkpoint_restart"
+    )
+  );
+}
+
+async function sha256File(path: string): Promise<string> {
+  return `sha256:${createHash("sha256").update(await readFile(path)).digest("hex")}`;
 }
 
 function isContained(root: string, candidate: string): boolean {

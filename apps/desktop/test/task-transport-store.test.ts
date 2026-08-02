@@ -30,3 +30,29 @@ test("Task transport store is private, atomic, and fails closed on corruption", 
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("Task transport store migrates the 0.2.8 schema without importing a remote Delegation Plan", async () => {
+  const root = await mkdtemp(join(tmpdir(), "teti-task-store-migration-"));
+  const path = join(root, "tasks.json");
+  const store = new FileTaskTransportStore(path);
+  try {
+    await writeFile(path, JSON.stringify({
+      schemaVersion: 3,
+      records: [],
+      peers: []
+    }), "utf8");
+    const migrated = await store.load();
+    assert.equal(migrated.schemaVersion, 4);
+    assert.deepEqual(migrated.records, []);
+
+    await writeFile(path, JSON.stringify({
+      schemaVersion: 3,
+      records: [],
+      peers: [],
+      delegationPlan: { injected: true }
+    }), "utf8");
+    await assert.rejects(() => store.load(), /unsupported field/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

@@ -5,6 +5,7 @@ import type {
   TetiTaskAttachmentReceiptPayload,
   TetiTaskAttachmentPayload,
   TetiTaskCancelPayload,
+  TetiTaskInputPayload,
   TetiTaskReceiptPayload,
   TetiTaskStatusPayload
 } from "../task/transport.ts";
@@ -26,6 +27,7 @@ export type TetiApplicationMessageType =
   | "teti.task.attachment.receipt"
   | "teti.task.status"
   | "teti.task.cancel"
+  | "teti.task.input"
   | "teti.task.artifact";
 
 export interface TetiApplicationEnvelope<TPayload = unknown> {
@@ -51,7 +53,7 @@ export interface TetiPresencePayload {
   status: string;
   timestamp: string;
   collaborationProtocolEpoch: 2;
-  taskProtocolVersions: [5];
+  taskProtocolVersions: [6];
   /** Explicit Passport capability; independent from the latest shared snapshot. */
   passportSchemaVersions: [4];
 }
@@ -67,6 +69,7 @@ export type TetiKnownApplicationEnvelope =
   | TetiApplicationEnvelope<TetiTaskAttachmentReceiptPayload>
   | TetiApplicationEnvelope<TetiTaskStatusPayload>
   | TetiApplicationEnvelope<TetiTaskCancelPayload>
+  | TetiApplicationEnvelope<TetiTaskInputPayload>
   | TetiApplicationEnvelope<TetiTaskArtifactPayload>;
 
 export interface TetiProcessedMessageStore {

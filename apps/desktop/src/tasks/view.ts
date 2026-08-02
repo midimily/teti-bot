@@ -8,8 +8,13 @@ import type {
   TetiCapability,
   TetiCapabilityPassport
 } from "../../../../core/passport/types.ts";
-import type { TaskController, TaskControllerSnapshot } from "./controller.ts";
+import { delegationTargetKey, type TaskController, type TaskControllerSnapshot } from "./controller.ts";
 import type { MemoryController } from "../memory/controller.ts";
+import type {
+  DelegationArtifactProvenance,
+  DelegationPlanState,
+  DelegationStepState
+} from "../../../../core/delegation/types.ts";
 
 export function createTaskWorkspace(
   controller: TaskController,
@@ -167,7 +172,17 @@ function createComposer(
     });
     controller.openCompose();
   });
-  selectors.append(peerSelect.label, capabilitySelect.label);
+  const modeSelect = labeledSelect("协作模式", [
+    { value: "single_stage", label: "单次调用" },
+    { value: "long_horizon", label: "持续协作" }
+  ], snapshot.draft.executionMode);
+  modeSelect.select.addEventListener("change", () => {
+    controller.updateDraft({
+      executionMode: modeSelect.select.value === "long_horizon" ? "long_horizon" : "single_stage"
+    });
+    controller.openCompose();
+  });
+  selectors.append(peerSelect.label, capabilitySelect.label, modeSelect.label);
 
   const prompt = document.createElement("textarea");
   prompt.className = "teti-task-prompt";
@@ -177,7 +192,7 @@ function createComposer(
   prompt.disabled = snapshot.busy || !selectedCapability;
   prompt.setAttribute("aria-label", "任务内容");
 
-  const supportsImages = Boolean(selectedPeer && selectedCapability
+  const supportsImages = snapshot.draft.executionMode !== "long_horizon" && Boolean(selectedPeer && selectedCapability
     && capabilityAcceptsImages(selectedPeer, selectedCapability.id));
   const returnsImages = Boolean(selectedPeer && selectedCapability
     && capabilityReturnsImages(selectedPeer, selectedCapability.id));
@@ -201,7 +216,9 @@ function createComposer(
   const footer = document.createElement("div");
   footer.className = "teti-task-actionbar";
   const hint = document.createElement("small");
-  hint.textContent = selectedOffer?.compute
+  hint.textContent = snapshot.draft.executionMode === "long_horizon"
+    ? "持续协作 · 仅文字 · 每阶段由 Host 显式推进 · 最多 16 阶段"
+    : selectedOffer?.compute
     ? "接收端本地算力 · 仅文字 · 并发 1 · 每次授权"
     : returnsImages
     ? `${supportsImages ? "PNG/JPEG · 最多 4 张 · " : ""}结果必须返回图片`
@@ -214,10 +231,12 @@ function createComposer(
     || !selectedPeer
     || !selectedCapability
     || !snapshot.draft.text.trim()
+    || (snapshot.draft.executionMode === "long_horizon" && returnsImages)
     || (snapshot.draft.images.length > 0 && !supportsImages);
   const syncSendState = (): void => {
     controller.updateDraft({ text: prompt.value });
     send.disabled = !controller.canSendDraft()
+      || (snapshot.draft.executionMode === "long_horizon" && returnsImages)
       || (snapshot.draft.images.length > 0 && !supportsImages);
   };
   prompt.addEventListener("input", syncSendState);
@@ -227,7 +246,7 @@ function createComposer(
     const warning = document.createElement("p");
     warning.className = "teti-task-known-defect";
     warning.setAttribute("role", "status");
-    warning.textContent = "0.2.7 延续已知限制：多图送达仍在实机复盘；若图片不完整，对方无法授权或执行任务。";
+    warning.textContent = "0.2.10 延续已知限制：多图送达仍在实机复盘；若图片不完整，对方无法授权或执行任务。";
     form.append(warning);
   }
   if (snapshot.error) form.append(errorText(snapshot.error));
@@ -314,6 +333,17 @@ function createTaskDetail(
     content.append(execution);
   }
 
+  if (record.longHorizon || record.peerLongHorizon) {
+    content.append(createLongHorizonSection(controller, snapshot));
+  }
+
+  if (record.direction === "incoming"
+    && record.approval === "pending"
+    && record.request.executionMode === "long_horizon"
+    && snapshot.delegationTargets.length > 0) {
+    content.append(createDelegationApprovalSection(controller, snapshot));
+  }
+
   if (record.direction === "incoming" && record.approval === "pending") {
     const scope = document.createElement("section");
     scope.className = "teti-task-scope";
@@ -334,11 +364,22 @@ function createTaskDetail(
     content.append(scope);
   }
 
-  for (const artifact of record.artifacts ?? []) {
+  for (const [artifactIndex, artifact] of (record.artifacts ?? []).entries()) {
     const card = document.createElement("section");
     card.className = "teti-task-card teti-task-artifact";
     const title = document.createElement("strong");
-    title.textContent = "结果 Artifact";
+    const localEntry = record.longHorizon?.artifacts.find((entry) => entry.artifactId === artifact.artifactId);
+    const peerEntry = record.peerArtifactMetadata?.find((entry) => entry.artifactId === artifact.artifactId);
+    const delegationEntry = record.delegationPlan?.artifacts.find((entry) =>
+      entry.artifactId === artifact.artifactId
+    );
+    const isFinal = localEntry?.role === "final"
+      || peerEntry?.role === "final"
+      || delegationEntry?.role === "final"
+      || record.peerLongHorizon?.finalArtifactId === artifact.artifactId;
+    title.textContent = delegationEntry
+      ? delegationArtifactTitle(delegationEntry, record.delegationPlan!)
+      : `${isFinal ? "最终" : "中间"} Artifact · 阶段 ${localEntry?.stageIndex ?? peerEntry?.stageIndex ?? artifactIndex + 1}`;
     const result = document.createElement("pre");
     result.textContent = artifact.schemaVersion === 1
       ? artifact.text
@@ -398,6 +439,245 @@ function createTaskDetail(
   }
   content.append(actions);
   return content;
+}
+
+function createLongHorizonSection(
+  controller: TaskController,
+  snapshot: TaskControllerSnapshot
+): HTMLElement {
+  const record = snapshot.selectedTask!;
+  const local = record.longHorizon;
+  const peer = record.peerLongHorizon;
+  const phase = local?.phase ?? peer?.phase ?? "working";
+  const stageIndex = local?.currentStageIndex ?? peer?.currentStageIndex ?? 0;
+  const workspaceRevision = local?.workspaceRevision ?? peer?.workspaceRevision ?? 1;
+  const progress = local?.progress;
+  const delegation = record.delegationPlan;
+  const section = document.createElement("section");
+  section.className = "teti-task-card teti-task-long-horizon";
+  const heading = document.createElement("div");
+  heading.className = "teti-task-long-horizon-head";
+  const title = document.createElement("strong");
+  title.textContent = delegation
+    ? `Teti Host 委派 · 步骤 ${delegation.currentStepIndex}/${delegation.maximumChildCalls + 1}`
+    : `持续协作 · 阶段 ${stageIndex}`;
+  const state = document.createElement("span");
+  state.textContent = longHorizonPhaseLabel(phase);
+  heading.append(title, state);
+  const meta = document.createElement("p");
+  meta.textContent = `Workspace r${workspaceRevision} · 续期至 ${formatShortTimestamp(
+    local?.continuationExpiresAt ?? peer?.continuationExpiresAt ?? record.request.expiresAt
+  )}`;
+  section.append(heading, meta);
+
+  if (delegation) {
+    const boundary = document.createElement("p");
+    boundary.className = "teti-task-delegation-boundary";
+    boundary.textContent = "确定性计划 · 深度 1 · Planner 关闭 · Child 不可联系远端或扩大 Workspace 权限";
+    section.append(boundary);
+
+    const planSteps = document.createElement("ol");
+    planSteps.className = "teti-task-stage-list teti-task-delegation-plan";
+    for (const step of delegation.steps) {
+      const item = document.createElement("li");
+      const label = document.createElement("strong");
+      const detail = document.createElement("span");
+      if (step.kind === "child_execution") {
+        label.textContent = `步骤 ${step.stepIndex} · ${step.childAgentId}`;
+        detail.textContent = `${step.capabilityId} · ${step.resourceBindingId} · ${delegationStepStateLabel(step.state)}`;
+        const budget = document.createElement("small");
+        budget.textContent = `Workspace r${step.workspaceRevision} · ${Math.round(step.budget.timeoutMs / 1_000)}s · 输出上限 ${Math.round(step.budget.maxOutputBytes / 1_024)} KiB`;
+        item.append(label, detail, budget);
+      } else {
+        label.textContent = `步骤 ${step.stepIndex} · Teti Host`;
+        detail.textContent = `Artifact 确定性汇总 · ${delegationStepStateLabel(step.state)}`;
+        item.append(label, detail);
+      }
+      planSteps.append(item);
+    }
+    section.append(planSteps);
+  }
+
+  const progressText = progress?.message ?? peer?.progressMessage;
+  if (progressText) {
+    const status = document.createElement("p");
+    status.className = "teti-task-long-horizon-progress";
+    status.setAttribute("role", "status");
+    status.textContent = progressText;
+    section.append(status);
+  }
+
+  if (local?.stages.length) {
+    const stages = document.createElement("ol");
+    stages.className = "teti-task-stage-list";
+    for (const stage of local.stages) {
+      const item = document.createElement("li");
+      const label = document.createElement("strong");
+      label.textContent = `阶段 ${stage.stageIndex} · ${stage.childAgentId}`;
+      const detail = document.createElement("span");
+      detail.textContent = `${longHorizonPhaseLabel(stage.state)} · Workspace r${stage.workspaceRevision}`;
+      item.append(label, detail);
+      stages.append(item);
+    }
+    section.append(stages);
+  }
+
+  if (record.direction === "outgoing" && record.state === "input_required") {
+    const form = document.createElement("form");
+    form.className = "teti-task-stage-input";
+    const input = document.createElement("textarea");
+    input.maxLength = 6_000;
+    input.placeholder = "补充下一阶段指令…";
+    input.setAttribute("aria-label", "下一阶段补充指令");
+    const submit = actionButton("发送补充指令", "primary", () => undefined);
+    submit.type = "submit";
+    submit.disabled = snapshot.busy || Boolean(record.inputPending);
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      if (input.value.trim()) void controller.submitInput(input.value);
+    });
+    form.append(input, submit);
+    section.append(form);
+  }
+
+  if (record.direction === "incoming" && local && !delegation) {
+    const controls = document.createElement("div");
+    controls.className = "teti-task-stage-controls";
+    if (phase === "working") {
+      controls.append(actionButton(local.pauseRequested ? "将在阶段边界暂停" : "阶段后暂停", "secondary", () => void controller.pause()));
+    }
+    if ((phase === "input_required" || phase === "paused") && local.pendingInput) {
+      const instruction = document.createElement("p");
+      instruction.className = "teti-task-stage-instruction";
+      instruction.textContent = `补充指令：${local.pendingInput.instruction}`;
+      section.append(instruction);
+      const child = labeledSelect("继续使用 Child Agent", local.availableChildAgents.map((target) => ({
+        value: target.childAgentId,
+        label: `${target.childAgentId} · ${target.connectorId}`
+      })), local.stages.at(-1)?.childAgentId ?? local.availableChildAgents[0]?.childAgentId ?? "");
+      controls.append(child.label, actionButton("开始下一阶段", "primary", () => {
+        void controller.continue(child.select.value || undefined);
+      }));
+    }
+    if ((phase === "input_required" || phase === "paused") && local.artifacts.length > 0 && !local.pendingInput) {
+      controls.append(actionButton("确认当前结果为最终结果", "primary", () => void controller.complete()));
+    }
+    if (phase === "input_required" || phase === "paused") {
+      controls.append(actionButton("续期 1 小时", "secondary", () => void controller.renew()));
+    }
+    section.append(controls);
+
+    const audit = document.createElement("details");
+    audit.className = "teti-task-audit";
+    const summary = document.createElement("summary");
+    summary.textContent = `恢复与操作审计 · ${local.audit.length}`;
+    const list = document.createElement("ol");
+    for (const event of [...local.audit].reverse()) {
+      const item = document.createElement("li");
+      item.textContent = `${formatShortTimestamp(event.timestamp)} · ${event.action}${
+        event.stageIndex ? ` · 阶段 ${event.stageIndex}` : ""
+      }`;
+      list.append(item);
+    }
+    audit.append(summary, list);
+    section.append(audit);
+  }
+  if (delegation) {
+    const audit = document.createElement("details");
+    audit.className = "teti-task-audit";
+    const summary = document.createElement("summary");
+    summary.textContent = `Host 委派审计 · ${delegation.audit.length}`;
+    const list = document.createElement("ol");
+    for (const event of [...delegation.audit].reverse()) {
+      const item = document.createElement("li");
+      item.textContent = `${formatShortTimestamp(event.timestamp)} · ${event.action}${
+        event.stepId ? ` · ${event.stepId}` : ""
+      }`;
+      list.append(item);
+    }
+    audit.append(summary, list);
+    section.append(audit);
+  }
+  return section;
+}
+
+function createDelegationApprovalSection(
+  controller: TaskController,
+  snapshot: TaskControllerSnapshot
+): HTMLElement {
+  const section = document.createElement("section");
+  section.className = "teti-task-card teti-task-delegation-approval";
+  const heading = document.createElement("div");
+  heading.className = "teti-task-delegation-heading";
+  const title = document.createElement("strong");
+  title.textContent = "Teti Host 委派计划";
+  const badge = document.createElement("span");
+  badge.textContent = "Planner 关闭";
+  heading.append(title, badge);
+  const note = document.createElement("p");
+  note.textContent = "由你明确指定本机 Child Agent 顺序。每步独立预算、超时和权限，最多 4 步，最后由 Teti Host 汇总 Artifact。";
+  const steps = document.createElement("ol");
+  steps.className = "teti-task-delegation-editor";
+  for (const [index, selection] of snapshot.delegationSelections.entries()) {
+    const item = document.createElement("li");
+    const target = labeledSelect(`步骤 ${index + 1}`, snapshot.delegationTargets.map((candidate) => ({
+      value: delegationTargetKey(candidate),
+      label: `${candidate.childAgentId} · ${candidate.capabilityId}`
+    })), delegationTargetKey(selection));
+    target.select.disabled = snapshot.busy;
+    target.select.addEventListener("change", () => controller.setDelegationStep(index, target.select.value));
+    const selectedTarget = snapshot.delegationTargets.find((candidate) =>
+      delegationTargetKey(candidate) === delegationTargetKey(selection)
+    );
+    const detail = document.createElement("small");
+    detail.textContent = selectedTarget
+      ? `${selectedTarget.resourceBindingId} · ${workspacePolicyLabel(selectedTarget.workspacePolicy)} · ${Math.round(selectedTarget.timeoutMs / 1_000)}s`
+      : "本机目标待重新检测";
+    const remove = actionButton("移除", "secondary", () => controller.removeDelegationStep(index));
+    remove.disabled = snapshot.busy || snapshot.delegationSelections.length <= 1;
+    remove.setAttribute("aria-label", `移除委派步骤 ${index + 1}`);
+    item.append(target.label, detail, remove);
+    steps.append(item);
+  }
+  const controls = document.createElement("div");
+  controls.className = "teti-task-delegation-controls";
+  const add = actionButton("增加一步", "secondary", () => controller.addDelegationStep());
+  add.disabled = snapshot.busy
+    || snapshot.delegationSelections.length >= 4
+    || snapshot.delegationTargets.length === 0;
+  const approve = actionButton("按计划委派", "primary", () => void controller.approveDelegation());
+  approve.disabled = snapshot.busy
+    || snapshot.selectedTask?.attachmentsReady === false
+    || snapshot.delegationSelections.length === 0;
+  controls.append(add, approve);
+  section.append(heading, note, steps, controls);
+  return section;
+}
+
+function delegationArtifactTitle(
+  entry: DelegationArtifactProvenance,
+  plan: DelegationPlanState
+): string {
+  if (entry.producer.kind === "teti_host") {
+    return `最终 Artifact · Teti Host 汇总 · Workspace r${entry.workspaceRevision}`;
+  }
+  const step = plan.steps.find((candidate) => candidate.stepId === entry.stepId);
+  return `中间 Artifact · 步骤 ${step?.stepIndex ?? "?"} · ${entry.producer.childAgentId} · ${entry.producer.resourceBindingId} · Workspace r${entry.workspaceRevision}`;
+}
+
+function delegationStepStateLabel(state: DelegationStepState): string {
+  if (state === "pending") return "待执行";
+  if (state === "working") return "执行中";
+  if (state === "completed") return "已完成";
+  if (state === "failed") return "失败";
+  if (state === "canceled") return "已取消";
+  return "已中断";
+}
+
+function workspacePolicyLabel(policy: "snapshot" | "bounded_context" | "none"): string {
+  if (policy === "snapshot") return "Workspace Snapshot";
+  if (policy === "bounded_context") return "有界上下文";
+  return "无 Workspace";
 }
 
 function createTaskMemorySection(
@@ -742,6 +1022,32 @@ function stateLabel(state: string): string {
   }[state] ?? "状态未知";
 }
 
+function longHorizonPhaseLabel(phase: string): string {
+  return {
+    pending_approval: "等待批准",
+    queued: "排队中",
+    working: "执行中",
+    input_required: "等待补充指令",
+    paused: "已暂停",
+    interrupted: "已中断",
+    completed: "已完成",
+    failed: "失败",
+    canceled: "已取消",
+    expired: "已过期"
+  }[phase] ?? "状态更新中";
+}
+
+function formatShortTimestamp(value: string): string {
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return "时间未知";
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "numeric",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit"
+  }).format(date);
+}
+
 function shortTetiId(tetiId: string): string {
   return tetiId.replace(/^teti_/, "");
 }
@@ -768,6 +1074,7 @@ export function taskComposeRenderKey(snapshot: TaskControllerSnapshot): string {
   return JSON.stringify({
     connectionRequestId: snapshot.draft.connectionRequestId,
     capabilityId: snapshot.draft.capabilityId,
+    executionMode: snapshot.draft.executionMode,
     imageIds: snapshot.draft.images.map((image) => image.part.attachmentId),
     busy: snapshot.busy,
     error: snapshot.error ?? ""

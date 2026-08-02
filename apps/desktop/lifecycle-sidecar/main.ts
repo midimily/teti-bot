@@ -68,6 +68,12 @@ import {
   ChildMemoryService,
   FileChildMemoryStore
 } from "./runtime/memory/service.ts";
+import {
+  FileReleasePolicyStore,
+  LocalReleasePolicyService,
+  RegistryReleasePolicyClient
+} from "./runtime/release/service.ts";
+import { TETI_BUILD_INFO } from "../src/build-info.ts";
 
 const PROCESS_SHUTDOWN_HARD_LIMIT_MS = 4_000;
 const OSAURUS_QUALIFICATION_RETRY_MS = 15_000;
@@ -105,6 +111,13 @@ async function startSidecar(): Promise<void> {
   await ensureProfileBootstrapDirectories(profile);
   profileLock = await acquireTetiRuntimeProfileLock(profile);
   await ensureProfileDirectories(profile);
+  const releasePolicyService = new LocalReleasePolicyService({
+    currentVersion: TETI_BUILD_INFO.appVersion,
+    buildTimestamp: TETI_BUILD_INFO.buildTimestamp,
+    store: new FileReleasePolicyStore(join(profile.storeDir, "release-policy-v1.json")),
+    client: new RegistryReleasePolicyClient()
+  });
+  await releasePolicyService.initialize();
   const codexUsageService = getDefaultCodexUsageService();
   const agentConfigPath = join(profile.storeDir, "agent-detectors.override.json");
   const agentConfiguration = new FileAgentDetectorConfiguration(agentConfigPath);
@@ -278,7 +291,8 @@ async function startSidecar(): Promise<void> {
             adapterRevision: qualification.readiness.adapterRevision,
             origin: "native_agent",
             workspacePolicy: "bounded_context",
-            releaseBlockers: qualification.releaseBlockers.join(",") || undefined
+            releaseBlockers: qualification.releaseBlockers.join(",") || undefined,
+            acceptedRisks: qualification.acceptedRisks.join(",") || undefined
           });
           await waitForNativeAgentChange(signal, [
             { directory: profile.storeDir, fileName: "osaurus-native-child.json" },
@@ -318,6 +332,7 @@ async function startSidecar(): Promise<void> {
       agentConfiguration,
       hostAgent,
       memoryService,
+      releasePolicyService,
       dispose: async () => {
         await qualificationSupervisor.stop();
         await closeDefaultPeerConnectionService();
@@ -385,8 +400,13 @@ function isNativeAuthorityBlocker(reasonCode: string | undefined): boolean {
   return reasonCode === "OSAURUS_NATIVE_AGENT_ID_INVALID"
     || reasonCode === "OSAURUS_NATIVE_AUTHORITY_UNSAFE"
     || reasonCode === "OSAURUS_NATIVE_METADATA_MISMATCH"
+    || reasonCode === "OSAURUS_RUNTIME_UNTRUSTED"
+    || reasonCode === "OSAURUS_RUNTIME_LISTENER_MISMATCH"
+    || reasonCode === "OSAURUS_RUNTIME_EXECUTABLE_UNTRUSTED"
+    || reasonCode === "OSAURUS_RUNTIME_APP_PATH_UNTRUSTED"
+    || reasonCode === "OSAURUS_RUNTIME_SIGNATURE_INVALID"
+    || reasonCode === "OSAURUS_RUNTIME_SIGNATURE_MISMATCH"
     || reasonCode === "OSAURUS_RUNTIME_VERSION_UNSUPPORTED"
-    || reasonCode === "OSAURUS_INSIGHTS_BODY_RETENTION"
     || reasonCode === "OSAURUS_INSIGHTS_POLICY_UNVERIFIED";
 }
 

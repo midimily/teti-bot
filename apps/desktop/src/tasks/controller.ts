@@ -9,6 +9,10 @@ import type { TauriInvoker } from "../platform/tauri-api.ts";
 import type { TauriNotchWindowController } from "../platform/tauri-notch-window.ts";
 import type { StagedTaskImageDto } from "../lifecycle-bridge/protocol.ts";
 import type { ExecutionHandle } from "../../../../core/callability/execution.ts";
+import type {
+  DelegationTargetOption,
+  DelegationTargetSelection
+} from "../../../../core/delegation/types.ts";
 
 const TASK_REFRESH_INTERVAL_MS = 2_000;
 const EMPTY_SUMMARY: CollaborationTaskSummarySnapshot = {
@@ -28,6 +32,8 @@ export interface TaskControllerSnapshot {
   summary: CollaborationTaskSummarySnapshot;
   selectedTask: CollaborationTaskTransportRecord | null;
   selectedExecution: ExecutionHandle | null;
+  delegationTargets: DelegationTargetOption[];
+  delegationSelections: DelegationTargetSelection[];
   selectedImagePaths: Record<string, string>;
   draft: {
     connectionRequestId: string;
@@ -35,6 +41,7 @@ export interface TaskControllerSnapshot {
     capabilityId: string;
     text: string;
     images: TaskDraftImage[];
+    executionMode: "single_stage" | "long_horizon";
   };
   busy: boolean;
   error?: string;
@@ -52,10 +59,20 @@ export interface TaskClient {
   stageImage(path: string): Promise<StagedTaskImageDto>;
   send(input: SendCollaborationTaskInput): Promise<CollaborationTaskTransportRecord>;
   approve(taskId: string): Promise<CollaborationTaskTransportRecord>;
+  delegationTargets(taskId: string): Promise<DelegationTargetOption[]>;
+  approveDelegation(
+    taskId: string,
+    selections: DelegationTargetSelection[]
+  ): Promise<CollaborationTaskTransportRecord>;
   reject(taskId: string): Promise<CollaborationTaskTransportRecord>;
   cancel(taskId: string): Promise<CollaborationTaskTransportRecord>;
   getExecution(taskId: string): Promise<ExecutionHandle | null>;
   resume(taskId: string): Promise<CollaborationTaskTransportRecord>;
+  submitInput(taskId: string, instruction: string): Promise<CollaborationTaskTransportRecord>;
+  pause(taskId: string): Promise<CollaborationTaskTransportRecord>;
+  continue(taskId: string, childAgentId?: string): Promise<CollaborationTaskTransportRecord>;
+  complete(taskId: string): Promise<CollaborationTaskTransportRecord>;
+  renew(taskId: string, ttlMs: number): Promise<CollaborationTaskTransportRecord>;
 }
 
 export class TaskController {
@@ -72,8 +89,17 @@ export class TaskController {
     summary: structuredClone(EMPTY_SUMMARY),
     selectedTask: null,
     selectedExecution: null,
+    delegationTargets: [],
+    delegationSelections: [],
     selectedImagePaths: {},
-    draft: { connectionRequestId: "", offerId: "", capabilityId: "", text: "", images: [] },
+    draft: {
+      connectionRequestId: "",
+      offerId: "",
+      capabilityId: "",
+      text: "",
+      images: [],
+      executionMode: "single_stage"
+    },
     busy: false
   };
   private timer: unknown;
@@ -156,16 +182,22 @@ export class TaskController {
     this.snapshotValue.screen = "inbox";
     this.snapshotValue.selectedTask = null;
     this.snapshotValue.selectedExecution = null;
+    this.snapshotValue.delegationTargets = [];
+    this.snapshotValue.delegationSelections = [];
     this.snapshotValue.selectedImagePaths = {};
     delete this.snapshotValue.error;
     this.onChange();
   }
 
-  updateDraft(input: Partial<Pick<TaskControllerSnapshot["draft"], "connectionRequestId" | "offerId" | "capabilityId" | "text">>): void {
+  updateDraft(input: Partial<Pick<
+    TaskControllerSnapshot["draft"],
+    "connectionRequestId" | "offerId" | "capabilityId" | "text" | "executionMode"
+  >>): void {
     if (input.connectionRequestId !== undefined) this.snapshotValue.draft.connectionRequestId = input.connectionRequestId;
     if (input.offerId !== undefined) this.snapshotValue.draft.offerId = input.offerId;
     if (input.capabilityId !== undefined) this.snapshotValue.draft.capabilityId = input.capabilityId;
     if (input.text !== undefined) this.snapshotValue.draft.text = [...input.text].slice(0, 6_000).join("");
+    if (input.executionMode !== undefined) this.snapshotValue.draft.executionMode = input.executionMode;
     delete this.snapshotValue.error;
   }
 
@@ -175,7 +207,8 @@ export class TaskController {
       && Boolean(draft.connectionRequestId)
       && Boolean(draft.offerId)
       && Boolean(draft.capabilityId)
-      && Boolean(draft.text.trim());
+      && Boolean(draft.text.trim())
+      && (draft.executionMode !== "long_horizon" || draft.images.length === 0);
   }
 
   removeDraftImage(attachmentId: string): void {
@@ -212,13 +245,21 @@ export class TaskController {
         offerId: draft.offerId,
         capabilityId: draft.capabilityId,
         text: draft.text.trim(),
-        attachments: draft.images.map((image) => structuredClone(image.part))
+        attachments: draft.images.map((image) => structuredClone(image.part)),
+        executionMode: draft.executionMode
       });
       this.snapshotValue.selectedTask = record;
       await this.loadSelectedExecution(record.request.taskId);
       await this.loadSelectedImages(record);
       this.snapshotValue.screen = "detail";
-      this.snapshotValue.draft = { connectionRequestId: "", offerId: "", capabilityId: "", text: "", images: [] };
+      this.snapshotValue.draft = {
+        connectionRequestId: "",
+        offerId: "",
+        capabilityId: "",
+        text: "",
+        images: [],
+        executionMode: "single_stage"
+      };
       await this.refreshSummary();
     });
   }
@@ -240,12 +281,57 @@ export class TaskController {
       this.snapshotValue.selectedTask = await this.client.get(taskId);
       await this.loadSelectedExecution(taskId);
       await this.loadSelectedImages(this.snapshotValue.selectedTask);
+      await this.loadDelegationTargets(this.snapshotValue.selectedTask);
       this.snapshotValue.screen = "detail";
     });
   }
 
   approve(): Promise<void> {
     return this.mutateSelected((taskId) => this.client.approve(taskId));
+  }
+
+  addDelegationStep(): void {
+    if (this.snapshotValue.delegationSelections.length >= 4
+      || this.snapshotValue.delegationTargets.length === 0) return;
+    const target = this.snapshotValue.delegationTargets[
+      Math.min(this.snapshotValue.delegationSelections.length, this.snapshotValue.delegationTargets.length - 1)
+    ]!;
+    this.snapshotValue.delegationSelections.push(delegationSelection(target));
+    delete this.snapshotValue.error;
+    this.onChange();
+  }
+
+  removeDelegationStep(index: number): void {
+    if (this.snapshotValue.delegationSelections.length <= 1) return;
+    this.snapshotValue.delegationSelections.splice(index, 1);
+    delete this.snapshotValue.error;
+    this.onChange();
+  }
+
+  setDelegationStep(index: number, targetKey: string): void {
+    const target = this.snapshotValue.delegationTargets.find((candidate) =>
+      delegationTargetKey(candidate) === targetKey
+    );
+    if (!target || index < 0 || index >= this.snapshotValue.delegationSelections.length) return;
+    this.snapshotValue.delegationSelections[index] = delegationSelection(target);
+    delete this.snapshotValue.error;
+    this.onChange();
+  }
+
+  async approveDelegation(): Promise<void> {
+    const taskId = this.snapshotValue.selectedTask?.request.taskId;
+    if (!taskId || this.snapshotValue.delegationSelections.length === 0) return;
+    await this.run(async () => {
+      this.snapshotValue.selectedTask = await this.client.approveDelegation(
+        taskId,
+        structuredClone(this.snapshotValue.delegationSelections)
+      );
+      this.snapshotValue.delegationTargets = [];
+      this.snapshotValue.delegationSelections = [];
+      await this.loadSelectedExecution(taskId);
+      await this.loadSelectedImages(this.snapshotValue.selectedTask);
+      await this.refreshSummary();
+    });
   }
 
   reject(): Promise<void> {
@@ -258,6 +344,26 @@ export class TaskController {
 
   resume(): Promise<void> {
     return this.mutateSelected((taskId) => this.client.resume(taskId));
+  }
+
+  submitInput(instruction: string): Promise<void> {
+    return this.mutateSelected((taskId) => this.client.submitInput(taskId, instruction));
+  }
+
+  pause(): Promise<void> {
+    return this.mutateSelected((taskId) => this.client.pause(taskId));
+  }
+
+  continue(childAgentId?: string): Promise<void> {
+    return this.mutateSelected((taskId) => this.client.continue(taskId, childAgentId));
+  }
+
+  complete(): Promise<void> {
+    return this.mutateSelected((taskId) => this.client.complete(taskId));
+  }
+
+  renew(ttlMs = 60 * 60 * 1_000): Promise<void> {
+    return this.mutateSelected((taskId) => this.client.renew(taskId, ttlMs));
   }
 
   dispose(): void {
@@ -345,6 +451,22 @@ export class TaskController {
       this.snapshotValue.selectedExecution = await this.client.getExecution(taskId);
     } catch {
       this.snapshotValue.selectedExecution = null;
+    }
+  }
+
+  private async loadDelegationTargets(record: CollaborationTaskTransportRecord): Promise<void> {
+    this.snapshotValue.delegationTargets = [];
+    this.snapshotValue.delegationSelections = [];
+    if (record.direction !== "incoming"
+      || record.approval !== "pending"
+      || record.request.executionMode !== "long_horizon"
+      || record.delegationPlan) return;
+    try {
+      const targets = await this.client.delegationTargets(record.request.taskId);
+      this.snapshotValue.delegationTargets = targets;
+      if (targets[0]) this.snapshotValue.delegationSelections = [delegationSelection(targets[0])];
+    } catch {
+      // Normal single-Child approval remains available when delegation is unavailable.
     }
   }
 
@@ -436,6 +558,20 @@ export class BridgeTaskClient implements TaskClient {
     return this.bridge.request("task.approve", { taskId }) as Promise<CollaborationTaskTransportRecord>;
   }
 
+  delegationTargets(taskId: string): Promise<DelegationTargetOption[]> {
+    return this.bridge.request("task.delegation.targets", { taskId }) as Promise<DelegationTargetOption[]>;
+  }
+
+  approveDelegation(
+    taskId: string,
+    selections: DelegationTargetSelection[]
+  ): Promise<CollaborationTaskTransportRecord> {
+    return this.bridge.request(
+      "task.delegation.approve",
+      { taskId, selections }
+    ) as Promise<CollaborationTaskTransportRecord>;
+  }
+
   reject(taskId: string): Promise<CollaborationTaskTransportRecord> {
     return this.bridge.request("task.reject", { taskId }) as Promise<CollaborationTaskTransportRecord>;
   }
@@ -451,6 +587,29 @@ export class BridgeTaskClient implements TaskClient {
   resume(taskId: string): Promise<CollaborationTaskTransportRecord> {
     return this.bridge.request("task.execution.resume", { taskId }) as Promise<CollaborationTaskTransportRecord>;
   }
+
+  submitInput(taskId: string, instruction: string): Promise<CollaborationTaskTransportRecord> {
+    return this.bridge.request("task.input.submit", { taskId, instruction }) as Promise<CollaborationTaskTransportRecord>;
+  }
+
+  pause(taskId: string): Promise<CollaborationTaskTransportRecord> {
+    return this.bridge.request("task.pause", { taskId }) as Promise<CollaborationTaskTransportRecord>;
+  }
+
+  continue(taskId: string, childAgentId?: string): Promise<CollaborationTaskTransportRecord> {
+    return this.bridge.request(
+      "task.continue",
+      { taskId, ...(childAgentId ? { childAgentId } : {}) }
+    ) as Promise<CollaborationTaskTransportRecord>;
+  }
+
+  complete(taskId: string): Promise<CollaborationTaskTransportRecord> {
+    return this.bridge.request("task.complete", { taskId }) as Promise<CollaborationTaskTransportRecord>;
+  }
+
+  renew(taskId: string, ttlMs: number): Promise<CollaborationTaskTransportRecord> {
+    return this.bridge.request("task.renew", { taskId, ttlMs }) as Promise<CollaborationTaskTransportRecord>;
+  }
 }
 
 export class MockTaskClient implements TaskClient {
@@ -460,10 +619,29 @@ export class MockTaskClient implements TaskClient {
   async stageImage(_path: string): Promise<StagedTaskImageDto> { throw new Error("TASK_ATTACHMENTS_UNAVAILABLE"); }
   async send(): Promise<CollaborationTaskTransportRecord> { throw new Error("TASK_TRANSPORT_UNAVAILABLE"); }
   async approve(): Promise<CollaborationTaskTransportRecord> { throw new Error("TASK_NOT_FOUND"); }
+  async delegationTargets(): Promise<DelegationTargetOption[]> { return []; }
+  async approveDelegation(): Promise<CollaborationTaskTransportRecord> { throw new Error("TASK_DELEGATION_UNAVAILABLE"); }
   async reject(): Promise<CollaborationTaskTransportRecord> { throw new Error("TASK_NOT_FOUND"); }
   async cancel(): Promise<CollaborationTaskTransportRecord> { throw new Error("TASK_NOT_FOUND"); }
   async getExecution(): Promise<ExecutionHandle | null> { return null; }
   async resume(): Promise<CollaborationTaskTransportRecord> { throw new Error("TASK_RESUME_UNAVAILABLE"); }
+  async submitInput(): Promise<CollaborationTaskTransportRecord> { throw new Error("TASK_INPUT_UNAVAILABLE"); }
+  async pause(): Promise<CollaborationTaskTransportRecord> { throw new Error("TASK_PAUSE_UNAVAILABLE"); }
+  async continue(): Promise<CollaborationTaskTransportRecord> { throw new Error("TASK_CONTINUE_UNAVAILABLE"); }
+  async complete(): Promise<CollaborationTaskTransportRecord> { throw new Error("TASK_COMPLETE_UNAVAILABLE"); }
+  async renew(): Promise<CollaborationTaskTransportRecord> { throw new Error("TASK_RENEW_UNAVAILABLE"); }
+}
+
+export function delegationTargetKey(target: DelegationTargetSelection): string {
+  return `${target.childAgentId}|${target.connectorId}|${target.capabilityId}`;
+}
+
+function delegationSelection(target: DelegationTargetSelection): DelegationTargetSelection {
+  return {
+    childAgentId: target.childAgentId,
+    connectorId: target.connectorId,
+    capabilityId: target.capabilityId
+  };
 }
 
 function taskErrorMessage(error: unknown): string {

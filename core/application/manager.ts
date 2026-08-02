@@ -31,6 +31,7 @@ import type {
   TetiTaskAttachmentPayload,
   TetiTaskAttachmentReceiptPayload,
   TetiTaskCancelPayload,
+  TetiTaskInputPayload,
   TetiTaskReceiptPayload,
   TetiTaskStatusPayload
 } from "../task/transport.ts";
@@ -194,6 +195,13 @@ export class TetiApplicationManager {
     payload: TetiTaskCancelPayload
   ): Promise<SentApplicationEnvelope> {
     return this.sendApplicationEnvelope({ connectionRequestId, type: "teti.task.cancel", payload });
+  }
+
+  async sendTaskInput(
+    connectionRequestId: string,
+    payload: TetiTaskInputPayload
+  ): Promise<SentApplicationEnvelope> {
+    return this.sendApplicationEnvelope({ connectionRequestId, type: "teti.task.input", payload });
   }
 
   async sendTaskArtifact(

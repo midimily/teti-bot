@@ -44,6 +44,8 @@ import type {
   DurableMemoryScope,
   MemoryExportResult
 } from "../../../core/memory/types.ts";
+import type { LocalReleaseStatus } from "../../../core/release/policy.ts";
+import type { DelegationTargetSelection } from "../../../core/delegation/types.ts";
 
 export interface LifecycleSidecarDependencies {
   loadTetiAccount(): Promise<TetiAccount | null>;
@@ -52,6 +54,7 @@ export interface LifecycleSidecarDependencies {
   registerDiscovery(account: TetiAccount): Promise<unknown>;
   heartbeatDiscovery(): Promise<TetiAccount>;
   getPeerConnectionService(): Promise<PeerConnectionService>;
+  getLocalReleaseStatus?(): Promise<LocalReleaseStatus> | LocalReleaseStatus;
   getPassportSnapshot?(): Promise<RuntimePassportSnapshot>;
   setPassportSharing?(policy: PassportSharingPolicy): Promise<RuntimePassportSnapshot>;
   getAgentManagementSnapshot?(): Promise<AgentManagementSnapshot>;
@@ -106,6 +109,15 @@ export async function handleLifecycleRequest(
       result
     };
   } catch (error) {
+    if (error instanceof LocalAppUpdateRequiredError) {
+      const releaseError = createLifecycleError(
+        "APP_UPDATE_REQUIRED",
+        "This Teti Beta build is no longer supported. Install the current version to continue.",
+        { recoverable: false }
+      );
+      releaseError.diagnosticCode = "RELEASE-UPDATE-REQUIRED";
+      return failure(id, releaseError);
+    }
     return failure(id, sanitizeUnknownError(error, fallbackCodeForMethod(validation.request.method)));
   }
 }
@@ -135,6 +147,12 @@ async function dispatchLifecycleRequest(
   request: LifecycleRequest,
   dependencies: LifecycleSidecarDependencies
 ): Promise<LifecycleResult> {
+  if (!isReleaseLockExemptMethod(request.method)) {
+    const release = await dependencies.getLocalReleaseStatus?.();
+    if (release?.state === "update_required") {
+      throw new LocalAppUpdateRequiredError(release.currentVersion);
+    }
+  }
   switch (request.method) {
     case "lifecycle.health":
       return {
@@ -142,6 +160,18 @@ async function dispatchLifecycleRequest(
         protocolVersion: LIFECYCLE_PROTOCOL_VERSION,
         methods: LIFECYCLE_METHODS
       };
+
+    case "release.status":
+      return dependencies.getLocalReleaseStatus
+        ? await dependencies.getLocalReleaseStatus()
+        : {
+            schemaVersion: 1,
+            state: "temporarily_unavailable",
+            currentVersion: "unknown",
+            buildTimestamp: "unknown",
+            source: "none",
+            diagnosticCode: "RELEASE_POLICY_UNAVAILABLE"
+          };
 
     case "account.status":
       return statusToDto(await dependencies.getTetiStatus(), await dependencies.loadTetiAccount());
@@ -229,6 +259,21 @@ async function dispatchLifecycleRequest(
       return service.approveTask(validateTaskId(request.params?.taskId));
     }
 
+    case "task.delegation.targets": {
+      const service = await dependencies.getPeerConnectionService();
+      if (!service.listTaskDelegationTargets) throw new Error("Delegation target discovery is unavailable.");
+      return service.listTaskDelegationTargets(validateTaskId(request.params?.taskId));
+    }
+
+    case "task.delegation.approve": {
+      const service = await dependencies.getPeerConnectionService();
+      if (!service.approveTaskDelegation) throw new Error("Delegation approval is unavailable.");
+      return service.approveTaskDelegation(
+        validateTaskId(request.params?.taskId),
+        validateDelegationSelections(request.params?.selections)
+      );
+    }
+
     case "task.reject": {
       const service = await dependencies.getPeerConnectionService();
       if (!service.rejectTask) throw new Error("Task rejection is unavailable.");
@@ -251,6 +296,45 @@ async function dispatchLifecycleRequest(
       const service = await dependencies.getPeerConnectionService();
       if (!service.resumeTask) throw new Error("Durable execution resume is unavailable.");
       return service.resumeTask(validateTaskId(request.params?.taskId));
+    }
+
+    case "task.input.submit": {
+      const service = await dependencies.getPeerConnectionService();
+      if (!service.submitTaskInput) throw new Error("Long-horizon Task input is unavailable.");
+      return service.submitTaskInput(
+        validateTaskId(request.params?.taskId),
+        validateTaskInstruction(request.params?.instruction)
+      );
+    }
+
+    case "task.pause": {
+      const service = await dependencies.getPeerConnectionService();
+      if (!service.pauseTask) throw new Error("Long-horizon Task pause is unavailable.");
+      return service.pauseTask(validateTaskId(request.params?.taskId));
+    }
+
+    case "task.continue": {
+      const service = await dependencies.getPeerConnectionService();
+      if (!service.continueTask) throw new Error("Long-horizon Task continuation is unavailable.");
+      const childAgentId = request.params?.childAgentId === undefined
+        ? undefined
+        : validateChildAgentId(request.params.childAgentId);
+      return service.continueTask(validateTaskId(request.params?.taskId), childAgentId);
+    }
+
+    case "task.complete": {
+      const service = await dependencies.getPeerConnectionService();
+      if (!service.completeTask) throw new Error("Long-horizon Task completion is unavailable.");
+      return service.completeTask(validateTaskId(request.params?.taskId));
+    }
+
+    case "task.renew": {
+      const service = await dependencies.getPeerConnectionService();
+      if (!service.renewTask) throw new Error("Long-horizon Task renewal is unavailable.");
+      return service.renewTask(
+        validateTaskId(request.params?.taskId),
+        validateTaskRenewal(request.params?.ttlMs)
+      );
     }
 
     case "memory.get":
@@ -315,6 +399,23 @@ async function dispatchLifecycleRequest(
       if (!dependencies.setOsaurusNativeChildAgentId) throw new Error("Osaurus Native Child settings are unavailable.");
       return dependencies.setOsaurusNativeChildAgentId(validateOsaurusNativeAgentId(request.params?.agentId));
   }
+}
+
+class LocalAppUpdateRequiredError extends Error {
+  readonly currentVersion: string;
+
+  constructor(currentVersion: string) {
+    super(`Teti ${currentVersion} is below the supported Beta version floor.`);
+    this.name = "LocalAppUpdateRequiredError";
+    this.currentVersion = currentVersion;
+  }
+}
+
+function isReleaseLockExemptMethod(method: LifecycleRequest["method"]): boolean {
+  return method === "lifecycle.health"
+    || method === "release.status"
+    || method === "account.load"
+    || method === "account.status";
 }
 
 function validateLifecycleRequest(
@@ -414,7 +515,8 @@ function validateTaskSendInput(value: unknown): SendCollaborationTaskInput {
     "text",
     "attachments",
     "workspace",
-    "ttlMs"
+    "ttlMs",
+    "executionMode"
   ];
   if (Object.keys(params).some((key) => !allowed.includes(key))) {
     throw new Error("Task parameters contain an unsupported field.");
@@ -447,6 +549,10 @@ function validateTaskSendInput(value: unknown): SendCollaborationTaskInput {
   }
   for (const attachment of attachments) validateTaskImagePart(attachment);
   if (params.workspace !== undefined) validateTaskWorkspaceRequest(params.workspace);
+  const executionMode = params.executionMode ?? "single_stage";
+  if (executionMode !== "single_stage" && executionMode !== "long_horizon") {
+    throw new Error("Task execution mode is invalid.");
+  }
   return {
     connectionRequestId,
     capabilityId: params.capabilityId,
@@ -454,9 +560,24 @@ function validateTaskSendInput(value: unknown): SendCollaborationTaskInput {
     attachments: structuredClone(attachments),
     ...(params.workspace === undefined ? {} : { workspace: structuredClone(params.workspace) }),
     ttlMs: Number(ttlMs),
+    executionMode,
     ...(params.taskId === undefined ? {} : { taskId: params.taskId }),
     ...(params.offerId === undefined ? {} : { offerId: params.offerId })
   };
+}
+
+function validateTaskInstruction(value: unknown): string {
+  if (typeof value !== "string" || !value.trim() || Buffer.byteLength(value, "utf8") > 8 * 1024) {
+    throw new Error("Task supplemental instruction is invalid or too large.");
+  }
+  return value.trim();
+}
+
+function validateTaskRenewal(value: unknown): number {
+  if (!Number.isSafeInteger(value) || Number(value) < 60_000 || Number(value) > 24 * 60 * 60 * 1_000) {
+    throw new Error("Task renewal is invalid.");
+  }
+  return Number(value);
 }
 
 function validateTaskId(value: unknown): string {
@@ -464,6 +585,32 @@ function validateTaskId(value: unknown): string {
     throw new Error("Task ID is invalid.");
   }
   return value;
+}
+
+function validateDelegationSelections(value: unknown): DelegationTargetSelection[] {
+  if (!Array.isArray(value) || value.length < 1 || value.length > 4) {
+    throw new Error("Delegation requires one to four Child Agent selections.");
+  }
+  return value.map((raw) => {
+    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+      throw new Error("Delegation target selection is invalid.");
+    }
+    const selection = raw as Record<string, unknown>;
+    const expected = ["childAgentId", "connectorId", "capabilityId"];
+    if (Object.keys(selection).length !== expected.length
+      || Object.keys(selection).some((key) => !expected.includes(key))
+      || ![selection.childAgentId, selection.connectorId, selection.capabilityId].every((item) =>
+        typeof item === "string"
+        && item.length <= 128
+        && /^[a-z0-9]+(?:[._-][a-z0-9]+)*$/.test(item))) {
+      throw new Error("Delegation target selection is invalid.");
+    }
+    return {
+      childAgentId: selection.childAgentId as string,
+      connectorId: selection.connectorId as string,
+      capabilityId: selection.capabilityId as string
+    };
+  });
 }
 
 function validateAbsoluteTaskImagePath(value: unknown): string {
@@ -612,10 +759,17 @@ function fallbackCodeForMethod(method: LifecycleRequest["method"]) {
     case "task.attachment.stage":
     case "task.attachment.resolve":
     case "task.approve":
+    case "task.delegation.targets":
+    case "task.delegation.approve":
     case "task.reject":
     case "task.cancel":
     case "task.execution.get":
     case "task.execution.resume":
+    case "task.input.submit":
+    case "task.pause":
+    case "task.continue":
+    case "task.complete":
+    case "task.renew":
       return "TASK_TRANSPORT_FAILED";
     case "memory.get":
     case "memory.authorization.set":

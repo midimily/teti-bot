@@ -94,12 +94,13 @@ test("Task v2 accepts one leading instruction and bounded PNG/JPEG descriptors",
   }), /digest/);
 });
 
-test("Task v5 carries only an abstract Workspace request and rejects every remote path field", () => {
+test("Task v6 carries only an abstract Workspace request and rejects every remote path field", () => {
   const request: CollaborationTaskRequest = {
     ...taskRequest(),
-    schemaVersion: 5,
+    schemaVersion: 6,
     input: { kind: "parts", parts: [{ kind: "text", text: "Use a controlled Workspace." }] },
-    workspace: { kind: "temporary", access: ["read", "write", "create_artifact"] }
+    workspace: { kind: "temporary", access: ["read", "write", "create_artifact"] },
+    executionMode: "single_stage"
   };
   assert.doesNotThrow(() => validateCollaborationTaskRequest(request));
   assert.throws(() => validateCollaborationTaskRequest({
@@ -134,6 +135,20 @@ test("Task v2 Artifact supports bounded text and image parts without local paths
   assert.throws(
     () => validateTaskArtifactV2({ ...artifact, filePath: "/private/result.png" }),
     /unsupported field/
+  );
+  assert.throws(
+    () => validateTaskArtifactV2({
+      ...artifact,
+      parts: [{ kind: "text", text: "x" }, { ...imagePart(), sourceUrl: "file:///etc/passwd" }]
+    }),
+    /unsupported field/
+  );
+  assert.throws(
+    () => validateTaskArtifactV2({
+      ...artifact,
+      parts: [{ kind: "text", text: "x".repeat(64 * 1024) }]
+    }),
+    /allowed size|exceeds/
   );
 });
 

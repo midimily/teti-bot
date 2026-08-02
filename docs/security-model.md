@@ -73,7 +73,7 @@ disabled, so Beta 0.2.1 introduces no new local HTTP attack surface. Transport
 and Resource Binding details are excluded from both Task and Passport.
 
 Beta 0.2.2 replaces the Host's unversioned task directory with Collaboration
-Workspace v1. Network Task v5 can request only a temporary Workspace or name an
+Workspace v1. Network Task v6 can request only a temporary Workspace or name an
 already confirmed Workspace ID and revision. The receiving Runtime derives all
 disk paths locally, issues a path-free ExecutionGrant/Authority, executes in a
 private Snapshot, and commits only after traversal, symlink, file-type, quota,
@@ -101,6 +101,14 @@ qualification fails closed with `OSAURUS_INSIGHTS_BODY_RETENTION`. The Child is
 not registered or advertised until a documented, machine-verifiable
 no-request-body-retention mode is available.
 
+The 0.2.7 Native Child follows a deliberately different local-owner policy:
+the known official Insights ring is exposed as
+`OSAURUS_INSIGHTS_BODY_RETENTION_ACCEPTED` while the fixed Agent, signed Runtime,
+authority digest, direct-Workspace denial and Allow Once controls remain in
+force. It is callable but is not described as fully private. Failure to
+determine the retention policy still blocks. This exception does not relax the
+0.2.3 Runtime Facade gate.
+
 Beta 0.2.4 makes local compute a first-class, exact Passport schema-4 object.
 Only a Host-registered Connector can publish an offer. The wire object is
 limited to capability, `local_model`, `receiver_local`, text modes, concurrency
@@ -108,7 +116,7 @@ one, allow-once, ID, and timestamp; exact-key validation rejects model, Runtime
 endpoint/port, hardware, credential, token, path, or local Agent configuration
 fields.
 
-Task v5 binds both offer and capability, but the receiver alone resolves them
+Task v6 binds both offer and capability, but the receiver alone resolves them
 to a local Connector. The local-compute offer cannot use a legacy capability
 alias or a remote Workspace reference. Its path-free grant uses no Host
 Workspace Snapshot. One execution may run and at most eight may wait; overflow
@@ -166,6 +174,43 @@ and UTF-8 content, but never the Snapshot path or an arbitrary host mount.
 Provider-native Memory remains disabled until provider writes, retrieval and
 deletion can be audited. The existing Insights body-retention blocker applies
 equally to this endpoint.
+
+Beta 0.2.8 adds a Host-owned continuation lease and copies that deadline into
+each one-time Execution Authority. The Kernel checks it before decoding an
+Artifact and again before committing a Workspace Snapshot. A late process
+therefore cannot publish output after Task expiry. Renewal is local, explicit,
+limited to eight operations, at most 24 hours each and seven days total.
+
+Long-horizon Workspace concurrency is optimistic and exact: a Snapshot commit
+must produce precisely the expected next revision, while a read-only stage must
+observe no change. A mismatch discards the stage Artifact and returns to
+`input_required`. Child switching is a user decision recorded in the local
+audit; failure never causes automatic fallback. Peer status excludes Child,
+Connector, checkpoint digest, audit events and provider execution identity.
+
+Beta 0.2.9 keeps Delegation entirely on the receiver. A Peer can request only a
+normal Task-v6 long-horizon capability; it cannot supply a Child, Connector,
+Resource binding, budget, timeout, Workspace revision or plan. Local lifecycle
+validation accepts only exact Child/Connector/Capability selections and rejects
+transport, endpoint, credential, path and authority extension fields.
+
+Every step is re-resolved against the current Host catalog immediately before
+execution. Its Workspace access must remain a subset of the Task grant;
+bounded-context and no-Workspace Children receive read only. The frozen plan
+states `remoteAgentAccess: deny`, and the existing Connector context still
+contains no Passport, Chatmail handle or peer identity. One step failure stops
+the sequence. The Host aggregation is deterministic local code, not an
+unrecorded provider call. Producer Resource and Workspace revision provenance
+are persisted beside every intermediate and final Artifact.
+
+Beta 0.2.10 adds no authority or network surface. It hardens the receiver-local
+resume boundary by hashing a checkpoint after its private atomic copy and
+recording that digest only in the owner-readable Execution Handle store. Every
+explicit resume resolves the checkpoint under the private checkpoint root and
+recomputes its digest. A missing, escaped, legacy-unattested or changed file
+clears `checkpoint_restart` and fails closed; no bytes, digest or local path are
+projected into Task, Passport or Chatmail. Side-effecting executions remain
+non-resumable and are never automatically replayed after Runtime restart.
 
 ## Authentication Recovery
 

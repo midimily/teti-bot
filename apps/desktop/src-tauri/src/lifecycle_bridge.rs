@@ -620,11 +620,13 @@ fn should_restart(process: Option<&mut ManagedSidecar>) -> bool {
 
 pub fn timeout_for_method(method: &str) -> Duration {
     Duration::from_millis(match method {
-        "lifecycle.health" => 2_000,
+        "lifecycle.health" | "release.status" => 2_000,
         "passport.get" => 2_000,
         "passport.sharing.set" => 5_000,
         "agent.observation.get" => 2_000,
         "agent.observation.scan" | "agent.observation.override.set" => 10_000,
+        "osaurus.native.get" => 2_000,
+        "osaurus.native.set" => 5_000,
         "account.status" | "account.load" => 5_000,
         "account.create" => 120_000,
         "discovery.register" | "discovery.retry" => 15_000,
@@ -632,8 +634,26 @@ pub fn timeout_for_method(method: &str) -> Duration {
         "connection.resolve" => 15_000,
         "connection.request" | "connection.accept" | "connection.reject" => 30_000,
         "task.send" => 30_000,
-        "task.list" | "task.summary" | "task.get" | "task.attachment.resolve" => 2_000,
-        "task.attachment.stage" | "task.approve" | "task.reject" | "task.cancel" => 10_000,
+        "task.list"
+        | "task.summary"
+        | "task.get"
+        | "task.attachment.resolve"
+        | "task.delegation.targets"
+        | "task.execution.get" => 2_000,
+        "task.attachment.stage"
+        | "task.approve"
+        | "task.delegation.approve"
+        | "task.reject"
+        | "task.cancel"
+        | "task.execution.resume"
+        | "task.input.submit"
+        | "task.pause"
+        | "task.continue"
+        | "task.complete"
+        | "task.renew" => 10_000,
+        "memory.get" => 2_000,
+        "memory.export" => 10_000,
+        "memory.authorization.set" | "memory.task.save" | "memory.delete" => 5_000,
         _ => 5_000,
     })
 }
@@ -642,6 +662,7 @@ fn is_allowed_method(method: &str) -> bool {
     matches!(
         method,
         "lifecycle.health"
+            | "release.status"
             | "account.status"
             | "account.load"
             | "account.create"
@@ -659,13 +680,29 @@ fn is_allowed_method(method: &str) -> bool {
             | "task.attachment.stage"
             | "task.attachment.resolve"
             | "task.approve"
+            | "task.delegation.targets"
+            | "task.delegation.approve"
             | "task.reject"
             | "task.cancel"
+            | "task.execution.get"
+            | "task.execution.resume"
+            | "task.input.submit"
+            | "task.pause"
+            | "task.continue"
+            | "task.complete"
+            | "task.renew"
+            | "memory.get"
+            | "memory.authorization.set"
+            | "memory.task.save"
+            | "memory.delete"
+            | "memory.export"
             | "passport.get"
             | "passport.sharing.set"
             | "agent.observation.get"
             | "agent.observation.scan"
             | "agent.observation.override.set"
+            | "osaurus.native.get"
+            | "osaurus.native.set"
     )
 }
 
@@ -749,13 +786,34 @@ mod tests {
 
     #[test]
     fn timeout_values_are_method_specific() {
-        assert!(is_allowed_method("discovery.heartbeat"));
-        assert!(is_allowed_method("passport.get"));
-        assert!(is_allowed_method("agent.observation.get"));
-        assert!(is_allowed_method("task.send"));
-        assert!(is_allowed_method("task.list"));
-        assert!(is_allowed_method("task.approve"));
-        assert!(is_allowed_method("task.attachment.stage"));
+        for method in [
+            "release.status",
+            "discovery.heartbeat",
+            "passport.get",
+            "agent.observation.get",
+            "task.send",
+            "task.list",
+            "task.approve",
+            "task.attachment.stage",
+            "task.delegation.targets",
+            "task.delegation.approve",
+            "task.execution.get",
+            "task.execution.resume",
+            "task.input.submit",
+            "task.pause",
+            "task.continue",
+            "task.complete",
+            "task.renew",
+            "memory.get",
+            "memory.authorization.set",
+            "memory.task.save",
+            "memory.delete",
+            "memory.export",
+            "osaurus.native.get",
+            "osaurus.native.set",
+        ] {
+            assert!(is_allowed_method(method), "{method} must reach the sidecar");
+        }
         assert!(!is_allowed_method("usage.get"));
         assert_eq!(
             timeout_for_method("lifecycle.health"),
@@ -800,6 +858,30 @@ mod tests {
         assert_eq!(
             timeout_for_method("task.approve"),
             Duration::from_millis(10_000)
+        );
+        assert_eq!(
+            timeout_for_method("task.delegation.targets"),
+            Duration::from_millis(2_000)
+        );
+        assert_eq!(
+            timeout_for_method("task.execution.resume"),
+            Duration::from_millis(10_000)
+        );
+        assert_eq!(
+            timeout_for_method("memory.get"),
+            Duration::from_millis(2_000)
+        );
+        assert_eq!(
+            timeout_for_method("memory.export"),
+            Duration::from_millis(10_000)
+        );
+        assert_eq!(
+            timeout_for_method("osaurus.native.get"),
+            Duration::from_millis(2_000)
+        );
+        assert_eq!(
+            timeout_for_method("osaurus.native.set"),
+            Duration::from_millis(5_000)
         );
     }
 

@@ -54,6 +54,7 @@ test("Runtime owns Registry, Chatmail, peer heartbeat, AI sync, and Codex backgr
   assert.deepEqual(clock.pending().map((entry) => entry.delayMs).sort((a, b) => a - b), [
     TETI_RUNTIME_INTERVALS.chatmailPollMs,
     TETI_RUNTIME_INTERVALS.registryHeartbeatMs,
+    TETI_RUNTIME_INTERVALS.peerProfileRefreshMs,
     TETI_RUNTIME_INTERVALS.codexRefreshMs
   ].sort((a, b) => a - b));
 
@@ -61,6 +62,7 @@ test("Runtime owns Registry, Chatmail, peer heartbeat, AI sync, and Codex backgr
   runtime.notifyAccountAvailable(account);
   await drain();
   assert.equal(registryCalls, 1);
+  assert.equal(peer.profileRefreshCalls, 1);
   assert.equal(peer.pollCalls, 1);
   assert.equal(codex.refreshCalls, 1);
   assert.equal((await runtime.readDiscoveryAccount()).publicProfile.lastSeen, "2026-07-21T10:00:00.000Z");
@@ -74,6 +76,89 @@ test("Runtime owns Registry, Chatmail, peer heartbeat, AI sync, and Codex backgr
   await runtime.stop();
   assert.equal(runtime.snapshot.state, "stopped");
   assert.equal(clock.pending().length, 0);
+});
+
+test("Peer nicknames recover after Registry connectivity returns without depending on Chatmail polling", async () => {
+  const account = createAccount();
+  const clock = fakeClock();
+  const peer = new FakePeerService();
+  peer.profileRefreshError = new Error("registry offline");
+  const runtime = new TetiRuntime({
+    dependencies: {
+      async loadTetiAccount() { return clone(account); },
+      async heartbeatDiscovery() { return clone(account); },
+      async getPeerConnectionService() { return peer; },
+      passportSharingStore: new MemoryPassportSharingStore(),
+      codexUsageService: new FakeCodexUsageService()
+    },
+    schedule: clock.schedule,
+    cancel: clock.cancel
+  });
+
+  runtime.start();
+  await drain();
+  assert.equal(peer.profileRefreshCalls, 1);
+  assert.equal((await runtime.getPassportSnapshot()).connections[0]?.identity.displayName, undefined);
+  assert.equal(clock.pending().some((entry) => entry.delayMs === 5_000), true);
+
+  peer.profileRefreshError = undefined;
+  assert.equal(clock.fireDelay(5_000), true);
+  await drain();
+  assert.equal(peer.profileRefreshCalls, 2);
+  assert.equal((await runtime.getPassportSnapshot()).connections[0]?.identity.displayName, "Remote");
+  await runtime.stop();
+});
+
+test("an obsolete local build stops background collaboration and shuts down Child execution", async () => {
+  const account = createAccount();
+  const peer = new FakePeerService();
+  const codex = new FakeCodexUsageService();
+  let registryCalls = 0;
+  let releaseRefreshCalls = 0;
+  let shutdownCalls = 0;
+  const lockedStatus = {
+    schemaVersion: 1 as const,
+    state: "update_required" as const,
+    currentVersion: "0.2.8",
+    buildTimestamp: "2026-08-02T09:00:00.000Z",
+    source: "cache" as const,
+    minimumSupportedVersion: "0.2.9",
+    policyVersion: 2,
+    effectiveAt: "2026-08-02T00:00:00.000Z"
+  };
+  const runtime = new TetiRuntime({
+    dependencies: {
+      async loadTetiAccount() { return clone(account); },
+      async heartbeatDiscovery() {
+        registryCalls += 1;
+        return clone(account);
+      },
+      async getPeerConnectionService() { return peer; },
+      passportSharingStore: new MemoryPassportSharingStore(),
+      codexUsageService: codex,
+      releasePolicyService: {
+        getStatus() { return clone(lockedStatus); },
+        async refresh() {
+          releaseRefreshCalls += 1;
+          return clone(lockedStatus);
+        }
+      },
+      hostAgent: {
+        getCallableAgents() { return []; },
+        getComputeOffers() { return []; },
+        async shutdown() { shutdownCalls += 1; }
+      }
+    }
+  });
+
+  runtime.start();
+  await drain();
+  assert.equal(releaseRefreshCalls, 1);
+  assert.equal(shutdownCalls, 1);
+  assert.equal(registryCalls, 0);
+  assert.equal(peer.pollCalls, 0);
+  assert.equal(codex.refreshCalls, 0);
+  await runtime.stop();
 });
 
 test("Agent discovery starts without an account but never enters Callable Passport", async () => {
@@ -396,7 +481,9 @@ class FakeAgentConfiguration implements RuntimeAgentConfiguration {
 
 class FakePeerService implements PeerConnectionService {
   pollCalls = 0;
+  profileRefreshCalls = 0;
   pollResult?: Promise<PeerConnectionResult>;
+  profileRefreshError?: Error;
   private sharing = resourceSharingPolicy(false);
   private readonly connection: PeerConnectionDto = {
     requestId: "req-1",
@@ -421,6 +508,14 @@ class FakePeerService implements PeerConnectionService {
       receivedCount: 2,
       heartbeatCount: 1,
       aiStatusCount: 3
+    };
+  }
+  async refreshPeerProfiles() {
+    this.profileRefreshCalls += 1;
+    if (!this.profileRefreshError) this.connection.remoteDisplayName = "Remote";
+    return {
+      snapshot: this.empty(),
+      failedPeerCount: this.profileRefreshError ? 1 : 0
     };
   }
   async accept(): Promise<PeerConnectionResult> { return this.empty(); }
@@ -499,6 +594,15 @@ function fakeClock() {
     },
     pending() {
       return entries.filter((entry) => !entry.cancelled && !entry.fired);
+    },
+    fireDelay(delayMs: number) {
+      const entry = entries.find((candidate) =>
+        !candidate.cancelled && !candidate.fired && candidate.delayMs === delayMs
+      );
+      if (!entry) return false;
+      entry.fired = true;
+      entry.callback();
+      return true;
     }
   };
 }

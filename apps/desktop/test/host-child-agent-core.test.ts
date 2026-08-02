@@ -175,6 +175,38 @@ test("Connector and Passport projections contain no collaboration identity or tr
   await hostAgent.shutdown();
 });
 
+test("Host exposes a receiver-local Delegation target catalog bound to exact Connector resources", async () => {
+  const hostAgent = new TetiHostAgentKernel({
+    connectors: [fakeConnector()],
+    transports: [new FakeTransport(new Map([["echo", () => ({ stdout: "ok" })]]))]
+  });
+
+  const targets = hostAgent.listDelegationTargets();
+  assert.deepEqual(targets, [{
+    childAgentId: "fake-child",
+    connectorId: "test.fake.connector",
+    capabilityId: "code-analysis",
+    resourceBindingId: "fake.binding.code-analysis",
+    workspacePolicy: "snapshot",
+    inputModes: ["text"],
+    outputModes: ["text"],
+    timeoutMs: 2_000,
+    maxOutputBytes: 4 * 1_024
+  }]);
+  assert.deepEqual(hostAgent.resolveDelegationTarget({
+    childAgentId: "fake-child",
+    connectorId: "test.fake.connector",
+    capabilityId: "code-analysis"
+  }), targets[0]);
+  assert.equal(hostAgent.resolveDelegationTarget({
+    childAgentId: "fake-child",
+    connectorId: "test.fake.connector",
+    capabilityId: "image-editing"
+  }), null);
+  assert.doesNotMatch(JSON.stringify(targets), /endpoint|executable|path|token|passport|peer/i);
+  await hostAgent.shutdown();
+});
+
 test("LoopbackHttpTransport refuses Host Workspace access in 0.2.4", () => {
   const transport = new LoopbackHttpTransport({
     identityVerifier: {

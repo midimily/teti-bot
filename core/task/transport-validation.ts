@@ -9,7 +9,9 @@ import {
   type TetiTaskAttachmentPayload,
   type TetiTaskCancelPayload,
   type TetiTaskReceiptPayload,
-  type TetiTaskStatusPayload
+  type TetiTaskStatusPayload,
+  type TetiTaskInputPayload,
+  type TetiTaskLongHorizonStatus
 } from "./transport.ts";
 import type { CollaborationTaskRequest, TaskImagePart, TaskTextPart } from "./types.ts";
 import { validateTaskArtifact, validateTaskImagePart } from "./validation.ts";
@@ -132,6 +134,7 @@ export function validateTaskAttachmentReceiptPayload(
 export function validateTaskStatusPayload(
   value: unknown
 ): asserts value is TetiTaskStatusPayload {
+  const schemaVersion = isRecord(value) ? value.schemaVersion : undefined;
   const payload = exactOptionalRecord(value, [
     "schemaVersion",
     "taskId",
@@ -140,8 +143,10 @@ export function validateTaskStatusPayload(
     "revision",
     "state",
     "updatedAt"
-  ], ["safeErrorCode"], "Task status");
-  if (payload.schemaVersion !== 1) throw new TaskTransportContractError("Unsupported Task status version.");
+  ], ["safeErrorCode", ...(schemaVersion === 2 ? ["longHorizon"] : [])], "Task status");
+  if (payload.schemaVersion !== 1 && payload.schemaVersion !== 2) {
+    throw new TaskTransportContractError("Unsupported Task status version.");
+  }
   taskIdentity(payload);
   if (!Number.isSafeInteger(payload.revision) || Number(payload.revision) <= 0) {
     throw new TaskTransportContractError("Task status revision is invalid.");
@@ -155,6 +160,31 @@ export function validateTaskStatusPayload(
     && (typeof payload.safeErrorCode !== "string" || !/^[A-Z0-9_]{1,64}$/.test(payload.safeErrorCode))) {
     throw new TaskTransportContractError("Task status safe error code is invalid.");
   }
+  if (payload.schemaVersion === 2) validateLongHorizonStatus(payload.longHorizon);
+}
+
+export function validateTaskInputPayload(value: unknown): asserts value is TetiTaskInputPayload {
+  const payload = exactRecord(value, [
+    "schemaVersion",
+    "taskId",
+    "requesterTetiId",
+    "targetTetiId",
+    "inputId",
+    "expectedStageIndex",
+    "instruction",
+    "createdAt"
+  ], "Task supplemental input");
+  if (payload.schemaVersion !== 1) throw new TaskTransportContractError("Unsupported Task input version.");
+  taskIdentity(payload);
+  safeId(payload.inputId, "inputId");
+  if (!Number.isSafeInteger(payload.expectedStageIndex) || Number(payload.expectedStageIndex) < 1) {
+    throw new TaskTransportContractError("Task input stage is invalid.");
+  }
+  if (typeof payload.instruction !== "string" || !payload.instruction.trim()
+    || new TextEncoder().encode(payload.instruction).byteLength > 8 * 1024) {
+    throw new TaskTransportContractError("Task supplemental instruction is invalid.");
+  }
+  timestamp(payload.createdAt, "createdAt");
 }
 
 export function validateTaskCancelPayload(
@@ -175,24 +205,33 @@ export function validateTaskCancelPayload(
 export function validateTaskArtifactPayload(
   value: unknown
 ): asserts value is TetiTaskArtifactPayload {
-  const payload = exactRecord(value, [
+  const schemaVersion = isRecord(value) ? value.schemaVersion : undefined;
+  const payload = exactOptionalRecord(value, [
     "schemaVersion",
     "taskId",
     "requesterTetiId",
     "targetTetiId",
     "artifact",
     "createdAt"
-  ], "Task Artifact payload");
-  if (payload.schemaVersion !== 1) throw new TaskTransportContractError("Unsupported Task Artifact payload version.");
+  ], schemaVersion === 2 ? ["stageIndex", "role"] : [], "Task Artifact payload");
+  if (payload.schemaVersion !== 1 && payload.schemaVersion !== 2) {
+    throw new TaskTransportContractError("Unsupported Task Artifact payload version.");
+  }
   taskIdentity(payload);
   validateTaskArtifact(payload.artifact);
   if ((payload.artifact as { taskId: string }).taskId !== payload.taskId) {
     throw new TaskTransportContractError("Task Artifact identity is invalid.");
   }
   timestamp(payload.createdAt, "createdAt");
+  if (payload.schemaVersion === 2) {
+    if (!Number.isSafeInteger(payload.stageIndex) || Number(payload.stageIndex) < 1
+      || (payload.role !== "intermediate" && payload.role !== "final")) {
+      throw new TaskTransportContractError("Task Artifact stage metadata is invalid.");
+    }
+  }
 }
 
-/** Beta 0.2 never speculatively downgrades or sends before a v5 advertisement. */
+/** Beta 0.2.8 never speculatively downgrades or sends before a v6 advertisement. */
 export function selectTaskProtocolVersion(
   remoteVersions?: readonly number[]
 ): TetiTaskProtocolVersion | null {
@@ -213,9 +252,44 @@ export function canonicalTaskRequestJson(value: CollaborationTaskRequest): strin
     capabilityId: value.capabilityId,
     input: canonicalInput(value.input),
     ...(value.workspace ? { workspace: canonicalWorkspace(value.workspace) } : {}),
+    ...(value.executionMode ? { executionMode: value.executionMode } : {}),
     createdAt: value.createdAt,
     expiresAt: value.expiresAt
   });
+}
+
+function validateLongHorizonStatus(value: unknown): asserts value is TetiTaskLongHorizonStatus {
+  const status = exactOptionalRecord(value, [
+    "schemaVersion",
+    "phase",
+    "currentStageIndex",
+    "workspaceRevision",
+    "completedUnits",
+    "totalUnits",
+    "progressMessage",
+    "continuationExpiresAt"
+  ], ["inputRequestId", "finalArtifactId"], "Long-horizon Task status");
+  if (status.schemaVersion !== 1
+    || !["working", "input_required", "paused", "completed", "failed", "canceled", "expired"].includes(String(status.phase))
+    || !Number.isSafeInteger(status.currentStageIndex) || Number(status.currentStageIndex) < 0
+    || !Number.isSafeInteger(status.workspaceRevision) || Number(status.workspaceRevision) < 1
+    || !nullableUnit(status.completedUnits)
+    || !nullableUnit(status.totalUnits)
+    || (status.progressMessage !== null
+      && (typeof status.progressMessage !== "string" || status.progressMessage.length > 240))) {
+    throw new TaskTransportContractError("Long-horizon Task status is invalid.");
+  }
+  timestamp(status.continuationExpiresAt, "continuationExpiresAt");
+  if (status.inputRequestId !== undefined) safeId(status.inputRequestId, "inputRequestId");
+  if (status.finalArtifactId !== undefined) safeId(status.finalArtifactId, "finalArtifactId");
+}
+
+function nullableUnit(value: unknown): boolean {
+  return value === null || (Number.isSafeInteger(value) && Number(value) >= 0);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function canonicalWorkspace(workspace: NonNullable<CollaborationTaskRequest["workspace"]>): unknown {

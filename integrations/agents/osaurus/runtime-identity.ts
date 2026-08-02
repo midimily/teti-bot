@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { lstat, readFile, readdir, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, isAbsolute, join } from "node:path";
 import type { LoopbackRuntimeIdentityVerifier } from "../../../apps/desktop/lifecycle-sidecar/runtime/callable/transports/loopback-http.ts";
 import { LoopbackRuntimeIdentityError } from "../../../apps/desktop/lifecycle-sidecar/runtime/callable/transports/loopback-http.ts";
 
@@ -32,7 +32,28 @@ export interface OsaurusRuntimeIdentity {
 export type OsaurusRuntimeDiscovery =
   | { state: "trusted"; identity: OsaurusRuntimeIdentity }
   | { state: "not_running"; identity: null }
-  | { state: "untrusted"; identity: null };
+  | {
+      state: "untrusted";
+      identity: null;
+      reasonCode?: OsaurusRuntimeTrustFailureCode;
+    };
+
+export type OsaurusRuntimeTrustFailureCode =
+  | "OSAURUS_RUNTIME_LISTENER_MISMATCH"
+  | "OSAURUS_RUNTIME_EXECUTABLE_UNTRUSTED"
+  | "OSAURUS_RUNTIME_APP_PATH_UNTRUSTED"
+  | "OSAURUS_RUNTIME_SIGNATURE_INVALID"
+  | "OSAURUS_RUNTIME_SIGNATURE_MISMATCH";
+
+class OsaurusRuntimeTrustError extends Error {
+  readonly reasonCode: OsaurusRuntimeTrustFailureCode;
+
+  constructor(reasonCode: OsaurusRuntimeTrustFailureCode) {
+    super(reasonCode);
+    this.name = "OsaurusRuntimeTrustError";
+    this.reasonCode = reasonCode;
+  }
+}
 
 export interface OsaurusRuntimeIdentitySystem {
   listenerPids(port: number): Promise<number[]>;
@@ -85,14 +106,20 @@ export class OsaurusRuntimeIdentityVerifier implements LoopbackRuntimeIdentityVe
   async discoverRuntime(): Promise<OsaurusRuntimeDiscovery> {
     const configurations = await this.readConfigurations();
     if (configurations.length === 0) return { state: "not_running", identity: null };
+    let reasonCode: OsaurusRuntimeTrustFailureCode | undefined;
     for (const configuration of configurations) {
       try {
         return { state: "trusted", identity: await this.inspectListener(configuration) };
-      } catch {
+      } catch (error) {
+        reasonCode ??= runtimeTrustFailureCode(error);
         // A stale or spoofed instance must not hide a later valid instance.
       }
     }
-    return { state: "untrusted", identity: null };
+    return {
+      state: "untrusted",
+      identity: null,
+      ...(reasonCode ? { reasonCode } : {})
+    };
   }
 
   async verifyListener(input: {
@@ -147,7 +174,7 @@ export class OsaurusRuntimeIdentityVerifier implements LoopbackRuntimeIdentityVe
     configuration: OsaurusRuntimeConfiguration
   ): Promise<OsaurusRuntimeIdentity> {
     const pids = [...new Set(await this.system.listenerPids(configuration.port))];
-    if (pids.length !== 1) throw new LoopbackRuntimeIdentityError();
+    if (pids.length !== 1) throw new OsaurusRuntimeTrustError("OSAURUS_RUNTIME_LISTENER_MISMATCH");
     return this.inspectProcess(configuration, pids[0]);
   }
 
@@ -155,25 +182,50 @@ export class OsaurusRuntimeIdentityVerifier implements LoopbackRuntimeIdentityVe
     configuration: OsaurusRuntimeConfiguration,
     pid: number
   ): Promise<OsaurusRuntimeIdentity> {
-    const executablePath = await realpath(await this.system.executablePath(pid));
-    if (basename(executablePath) !== "osaurus") throw new LoopbackRuntimeIdentityError();
-    const marker = "/Osaurus.app/Contents/MacOS/osaurus";
-    if (!executablePath.endsWith(marker)) throw new LoopbackRuntimeIdentityError();
+    let executablePath: string;
+    try {
+      executablePath = await realpath(await this.system.executablePath(pid));
+    } catch {
+      throw new OsaurusRuntimeTrustError("OSAURUS_RUNTIME_EXECUTABLE_UNTRUSTED");
+    }
+    if (basename(executablePath).toLowerCase() !== "osaurus") {
+      throw new OsaurusRuntimeTrustError("OSAURUS_RUNTIME_EXECUTABLE_UNTRUSTED");
+    }
+    const marker = "/osaurus.app/contents/macos/osaurus";
+    if (!executablePath.toLowerCase().endsWith(marker)) {
+      throw new OsaurusRuntimeTrustError("OSAURUS_RUNTIME_EXECUTABLE_UNTRUSTED");
+    }
     const appPath = executablePath.slice(0, -"/Contents/MacOS/osaurus".length);
-    const allowedSystemPath = appPath === await canonicalPathIfPresent("/Applications/Osaurus.app");
-    const allowedUserPath = appPath === await canonicalPathIfPresent(
-      join(this.homeDirectory, "Applications", "Osaurus.app")
+    const appParent = dirname(appPath);
+    const allowedSystemPath = appParent === await canonicalPathIfPresent("/Applications");
+    const allowedUserPath = appParent === await canonicalPathIfPresent(
+      join(this.homeDirectory, "Applications")
     );
-    if (!allowedSystemPath && !allowedUserPath) throw new LoopbackRuntimeIdentityError();
-    if (!(await stat(appPath)).isDirectory()) throw new LoopbackRuntimeIdentityError();
+    if (basename(appPath).toLowerCase() !== "osaurus.app"
+      || (!allowedSystemPath && !allowedUserPath)) {
+      throw new OsaurusRuntimeTrustError("OSAURUS_RUNTIME_APP_PATH_UNTRUSTED");
+    }
+    try {
+      if (!(await stat(appPath)).isDirectory()) {
+        throw new OsaurusRuntimeTrustError("OSAURUS_RUNTIME_APP_PATH_UNTRUSTED");
+      }
+    } catch (error) {
+      if (error instanceof OsaurusRuntimeTrustError) throw error;
+      throw new OsaurusRuntimeTrustError("OSAURUS_RUNTIME_APP_PATH_UNTRUSTED");
+    }
 
-    const signature = await this.system.verifySignature(appPath);
+    let signature: Awaited<ReturnType<OsaurusRuntimeIdentitySystem["verifySignature"]>>;
+    try {
+      signature = await this.system.verifySignature(appPath);
+    } catch {
+      throw new OsaurusRuntimeTrustError("OSAURUS_RUNTIME_SIGNATURE_INVALID");
+    }
     const plistIdentifier = await this.system.readBundleValue(appPath, "CFBundleIdentifier");
     if (signature.bundleIdentifier !== OSAURUS_BUNDLE_IDENTIFIER
       || plistIdentifier !== OSAURUS_BUNDLE_IDENTIFIER
       || signature.teamIdentifier !== OSAURUS_DEVELOPER_TEAM_ID
       || !CD_HASH_PATTERN.test(signature.codeDirectoryHash)) {
-      throw new LoopbackRuntimeIdentityError();
+      throw new OsaurusRuntimeTrustError("OSAURUS_RUNTIME_SIGNATURE_MISMATCH");
     }
     const appVersion = safeVersion(
       await this.system.readBundleValue(appPath, "CFBundleShortVersionString")
@@ -257,6 +309,10 @@ export class OsaurusRuntimeIdentityVerifier implements LoopbackRuntimeIdentityVe
   }
 }
 
+function runtimeTrustFailureCode(error: unknown): OsaurusRuntimeTrustFailureCode | undefined {
+  return error instanceof OsaurusRuntimeTrustError ? error.reasonCode : undefined;
+}
+
 export function createMacOsaurusRuntimeIdentitySystem(): OsaurusRuntimeIdentitySystem {
   return {
     async listenerPids(port) {
@@ -278,20 +334,19 @@ export function createMacOsaurusRuntimeIdentitySystem(): OsaurusRuntimeIdentityS
       return parseEstablishedServerPids(output.stdout, serverPort, clientPort);
     },
     async executablePath(pid) {
-      const output = await execText("/usr/sbin/lsof", [
-        "-nP",
-        "-a",
-        "-p",
-        String(pid),
-        "-d",
-        "txt",
-        "-Fn"
+      const [processPath, mappedText] = await Promise.all([
+        execText("/bin/ps", ["-ww", "-p", String(pid), "-o", "comm="]),
+        execText("/usr/sbin/lsof", [
+          "-nP",
+          "-a",
+          "-p",
+          String(pid),
+          "-d",
+          "txt",
+          "-Fn"
+        ])
       ]);
-      const paths = output.stdout.split(/\r?\n/)
-        .filter((line) => line.startsWith("n/"))
-        .map((line) => line.slice(1));
-      if (paths.length !== 1) throw new LoopbackRuntimeIdentityError();
-      return paths[0];
+      return selectProcessExecutablePath(processPath.stdout, mappedText.stdout);
     },
     async verifySignature(appPath) {
       await execText("/usr/bin/codesign", ["--verify", "--strict", "--verbose=2", appPath]);
@@ -317,6 +372,23 @@ export function createMacOsaurusRuntimeIdentitySystem(): OsaurusRuntimeIdentityS
       }
     }
   };
+}
+
+export function selectProcessExecutablePath(
+  processTableOutput: string,
+  mappedTextOutput: string
+): string {
+  const processPaths = processTableOutput.split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (processPaths.length !== 1 || !isAbsolute(processPaths[0])) {
+    throw new LoopbackRuntimeIdentityError();
+  }
+  const mappedPaths = new Set(mappedTextOutput.split(/\r?\n/)
+    .filter((line) => line.startsWith("n/"))
+    .map((line) => line.slice(1)));
+  if (!mappedPaths.has(processPaths[0])) throw new LoopbackRuntimeIdentityError();
+  return processPaths[0];
 }
 
 function parsePids(value: string): number[] {

@@ -1,7 +1,7 @@
 import { FirstLaunchCoordinator } from "./first-launch/coordinator.ts";
 import { Check, ChevronDown, ClipboardList, Link2, X, createElement } from "lucide";
 import { countUnicodeCharacters, truncateTetiDisplayName } from "../../../core/account/display-name.ts";
-import type { PassportConnectionSnapshot } from "../../../core/passport/snapshot.ts";
+import type { LocalReleaseStatus } from "../../../core/release/policy.ts";
 import type { FirstLaunchSnapshot } from "./first-launch/state-machine.ts";
 import { toFirstLaunchViewModel, type FirstLaunchViewModel } from "./first-launch/view-model.ts";
 import { createDesktopAccountLifecycle } from "./provisioning/index.ts";
@@ -58,6 +58,11 @@ import {
   MemoryController,
   MockChildMemoryClient
 } from "./memory/controller.ts";
+import {
+  BridgeReleaseStatusClient,
+  ReleaseController,
+  SupportedMockReleaseStatusClient
+} from "./release/controller.ts";
 import "./styles.css";
 
 const aiToolsButtonIconUrl = new URL("../assets/ai-tools-btn.png", import.meta.url).href;
@@ -76,6 +81,7 @@ export interface DesktopApp {
   passport: PassportController;
   tasks: TaskController;
   memory: MemoryController;
+  release: ReleaseController;
   config: ProvisioningModeConfig;
   render(): void;
   dispose(): void;
@@ -113,7 +119,7 @@ export async function createDesktopApp(options: DesktopAppOptions): Promise<Desk
   let stopDockActivateListener: (() => void) | undefined;
   let preserveStateForBrandOpen = false;
   let brandOpenGuardTimer: number | undefined;
-  let protocolBlocked = false;
+  let localAppUpdateRequired = false;
   const dockActivationGuard = new DockActivationGuard();
   const baseSchedule = options.schedule ?? ((callback: () => void, delayMs: number) => setTimeout(callback, delayMs));
   const clearBrandOpenGuard = () => {
@@ -152,6 +158,13 @@ export async function createDesktopApp(options: DesktopAppOptions): Promise<Desk
       }, delayMs)
   });
   const bridge = selection.config.mode === "real" ? new LifecycleBridgeClient(options.tauri) : undefined;
+  const release = new ReleaseController({
+    client: bridge
+      ? new BridgeReleaseStatusClient(bridge)
+      : new SupportedMockReleaseStatusClient(),
+    onChange: () => app?.render(),
+    schedule: baseSchedule
+  });
   const mockPassportClient = selection.config.mode === "mock" ? new MockPassportClient() : undefined;
   let connections: PeerConnectionController;
   const passport = new PassportController({
@@ -189,8 +202,8 @@ export async function createDesktopApp(options: DesktopAppOptions): Promise<Desk
   });
   if (options.tauri.onFocusChanged) {
     stopFocusListener = await options.tauri.onFocusChanged((focused) => {
-      if (protocolBlocked) {
-        void notchWindow.setMode("error", "peer-protocol-blocked").catch(() => undefined);
+      if (localAppUpdateRequired) {
+        void notchWindow.setMode("error", "local-app-update-required").catch(() => undefined);
         return;
       }
       if (!focused) {
@@ -208,8 +221,8 @@ export async function createDesktopApp(options: DesktopAppOptions): Promise<Desk
 
   if (options.tauri.onDockActivate) {
     stopDockActivateListener = await options.tauri.onDockActivate(() => {
-      if (protocolBlocked) {
-        void notchWindow.setMode("error", "peer-protocol-blocked").catch(() => undefined);
+      if (localAppUpdateRequired) {
+        void notchWindow.setMode("error", "local-app-update-required").catch(() => undefined);
         return;
       }
       if (!dockActivationGuard.begin()) return;
@@ -229,13 +242,14 @@ export async function createDesktopApp(options: DesktopAppOptions): Promise<Desk
     passport,
     tasks,
     memory,
+    release,
     config: selection.config,
     render: () => {
-      const wasProtocolBlocked = protocolBlocked;
-      protocolBlocked = hasBlockingPeerCompatibility(passport.snapshot.passport.connections);
-      if (protocolBlocked) {
-        void notchWindow.setMode("error", "peer-protocol-blocked").catch(() => undefined);
-      } else if (wasProtocolBlocked) {
+      const wasUpdateRequired = localAppUpdateRequired;
+      localAppUpdateRequired = release.status.state === "update_required";
+      if (localAppUpdateRequired) {
+        void notchWindow.setMode("error", "local-app-update-required").catch(() => undefined);
+      } else if (wasUpdateRequired) {
         const mode = tasks.snapshot.open
           ? "task"
           : connections.snapshot.open
@@ -243,9 +257,19 @@ export async function createDesktopApp(options: DesktopAppOptions): Promise<Desk
               ? "connection_detail"
               : "onboarding"
             : visualModeForViewModel(toFirstLaunchViewModel(coordinator.snapshot));
-        void notchWindow.setMode(mode, "peer-protocol-compatible").catch(() => undefined);
+        void notchWindow.setMode(mode, "local-app-supported").catch(() => undefined);
       }
-      renderSnapshot(options.root, coordinator.snapshot, selection.config, coordinator, connections, passport, tasks, memory);
+      renderSnapshot(
+        options.root,
+        coordinator.snapshot,
+        selection.config,
+        coordinator,
+        connections,
+        passport,
+        tasks,
+        memory,
+        release.status
+      );
     },
     dispose: () => {
       if (disposed) return;
@@ -258,10 +282,12 @@ export async function createDesktopApp(options: DesktopAppOptions): Promise<Desk
       passport.stop();
       tasks.dispose();
       memory.dispose();
+      release.stop();
       connections.dispose();
     }
   };
 
+  await release.start();
   await coordinator.initialize();
   passport.start();
   tasks.start();
@@ -280,22 +306,22 @@ export function renderSnapshot(
   connections?: PeerConnectionController,
   passport?: PassportController,
   tasks?: TaskController,
-  memory?: MemoryController
+  memory?: MemoryController,
+  releaseStatus?: LocalReleaseStatus
 ): void {
   const viewModel = toFirstLaunchViewModel(snapshot);
-  const blockedPeers = blockingPeerCompatibility(
-    passport?.snapshot.passport.connections ?? []
-  );
-  if (blockedPeers.length > 0) {
+  if (!releaseStatus && root.dataset.protocolBlocked === "true") return;
+  if (releaseStatus?.state === "update_required") {
     root.className = "teti-shell teti-shell--protocol-blocked";
     root.dataset.protocolBlocked = "true";
-    const blockKey = blockedPeers
-      .map((connection) => `${connection.identity.tetiId}:${connection.compatibility}`)
-      .sort()
-      .join("|");
+    const blockKey = [
+      releaseStatus.currentVersion,
+      releaseStatus.minimumSupportedVersion ?? "unknown",
+      releaseStatus.policyVersion ?? "unknown"
+    ].join("|");
     const existing = root.querySelector<HTMLElement>(".teti-protocol-blocker[data-block-key]");
     if (existing?.dataset.blockKey === blockKey) return;
-    root.replaceChildren(createProtocolUpgradeBlocker(blockedPeers, blockKey));
+    root.replaceChildren(createAppUpdateBlocker(releaseStatus, blockKey));
     return;
   }
   delete root.dataset.protocolBlocked;
@@ -345,23 +371,8 @@ function restoreFocusKey(root: HTMLElement, focusKey: string | undefined): void 
   });
 }
 
-function hasBlockingPeerCompatibility(
-  connections: readonly PassportConnectionSnapshot[]
-): boolean {
-  return blockingPeerCompatibility(connections).length > 0;
-}
-
-function blockingPeerCompatibility(
-  connections: readonly PassportConnectionSnapshot[]
-): PassportConnectionSnapshot[] {
-  return connections.filter((connection) =>
-    connection.connectionState === "Confirmed"
-    && connection.compatibility !== "compatible"
-  );
-}
-
-function createProtocolUpgradeBlocker(
-  blockedPeers: readonly PassportConnectionSnapshot[],
+function createAppUpdateBlocker(
+  release: LocalReleaseStatus,
   blockKey: string
 ): HTMLElement {
   const blocker = document.createElement("section");
@@ -381,13 +392,13 @@ function createProtocolUpgradeBlocker(
   mark.setAttribute("aria-hidden", "true");
   const title = document.createElement("h1");
   title.id = "teti-protocol-blocker-title";
-  title.textContent = "需要升级 Teti";
+  title.textContent = "当前 Teti 需要升级";
   const message = document.createElement("p");
   message.id = "teti-protocol-blocker-message";
-  message.textContent = "检测到已建联设备尚未证明兼容当前 Beta 协作协议。请在所有已建联设备上安装并运行当前 Teti Beta 版本。";
+  message.textContent = "本机版本已低于当前 Beta 支持门槛。请安装最新 Teti；其他已建联设备的版本状态不会锁定本机。";
   const status = document.createElement("p");
   status.className = "teti-protocol-blocker-status";
-  status.textContent = `${blockedPeers.length} 个已建联设备需要升级或完成版本检测。兼容性验证完成前，本机 Teti 的所有功能均暂停使用。`;
+  status.textContent = `本机 ${release.currentVersion} · 最低支持 ${release.minimumSupportedVersion ?? "待确认"} · 构建 ${release.buildTimestamp}`;
   card.append(mark, title, message, status);
   blocker.append(card);
   queueMicrotask(() => {
@@ -863,12 +874,28 @@ function createConnectionRow(
   state.className = "teti-connection-state";
   if (connection.state === "Confirmed") {
     row.classList.add(`is-${connection.reachability}`);
+    row.classList.add(`is-compatibility-${connection.compatibility.replace("_", "-")}`);
     main.append(createRemoteTetiAvatar({
       reachability: connection.reachability,
       label: connection.reachabilityLabel,
       size: 28
     }));
-    state.append(createRemotePassport(connection.passport));
+    if (connection.compatibility === "compatible") {
+      state.append(createRemotePassport(connection.passport));
+    } else {
+      const compatibility = document.createElement("span");
+      compatibility.className = `teti-peer-compatibility is-${connection.compatibility.replace("_", "-")}`;
+      const compatibilityTitle = document.createElement("strong");
+      compatibilityTitle.textContent = connection.compatibility === "upgrade_required"
+        ? "需要升级"
+        : "版本检测中";
+      const compatibilityHint = document.createElement("small");
+      compatibilityHint.textContent = connection.compatibility === "upgrade_required"
+        ? "仅暂停此节点协作"
+        : "本机功能保持可用";
+      compatibility.append(compatibilityTitle, compatibilityHint);
+      state.append(compatibility);
+    }
   } else if (connection.state === "PendingApproval") {
     const accept = iconButton(Check, "接受建联", () => void controller.accept(connection.requestId));
     const reject = iconButton(X, "拒绝建联", () => void controller.reject(connection.requestId));
@@ -883,7 +910,7 @@ function createConnectionRow(
     state.textContent = connection.state;
   }
   main.append(identity, state);
-  if (connection.state === "Confirmed") {
+  if (connection.state === "Confirmed" && connection.compatibility === "compatible") {
     const disclosure = iconButton(
       ChevronDown,
       `${expanded ? "收起" : "展开"} ${connection.identityLabel} 的 AI Passport 详情`,

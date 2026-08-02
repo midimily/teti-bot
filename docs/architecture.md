@@ -63,7 +63,7 @@ Transport details remain local and cannot enter a Task or Passport.
 ### Layer 5: Collaboration Workspace
 
 Beta 0.2.2 adds `ephemeral_task` and `durable_collaboration` Workspace modes.
-Task v5 transports only a temporary request or a confirmed Workspace
+Task v6 transports only a temporary request or a confirmed Workspace
 ID/revision plus abstract access. The receiver owns storage resolution, quota,
 TTL, membership, Snapshot creation, and atomic revision commit. Absolute paths,
 remote paths, arbitrary host paths, external folders, traversal, and symlink
@@ -140,6 +140,55 @@ identity. Provider authority must deny Tools, native Memory, Host Workspace and
 Autonomous Exec; a configuration digest change withdraws Readiness before a new
 task can start. The HTTP run maps to Teti's existing durable states but remains
 truthfully non-resumable because the provider endpoint is connection-bound.
+
+### Layer 11: Long-horizon collaboration
+
+Beta 0.2.8 makes the Teti Host, not any provider, the owner of a durable
+collaboration session. A Child receives one bounded stage request and returns
+one intermediate Artifact. At the stage boundary the Host records the
+Workspace revision, creates a Host checkpoint, requests user input, and waits;
+it does not recursively prompt the Child or automatically select another one.
+
+Each stage has its own derived execution Task ID and Execution Epoch. A
+Snapshot-writing stage must advance the exact expected Workspace revision;
+read-only or bounded-context stages must leave it unchanged. Intermediate
+Artifacts are append-only. Resume, Child selection, renewal, pause, failure,
+checkpoint and completion are receiver-local audited events. The requester
+sees only a minimized progress projection and can submit one bounded next-stage
+instruction.
+
+### Layer 12: Teti Host delegation
+
+Beta 0.2.9 adds a receiver-local deterministic `DelegationPlan` above the
+long-horizon stage mechanism. The user selects one to four ordered local
+Child/Connector/Capability targets. The Host freezes each target's Resource
+binding, bounded text budget, output budget, timeout and Workspace access, then
+executes exactly one Child at a time. Each step depends only on its immediate
+predecessor; delegation depth is fixed at one, so a Child cannot create another
+Teti delegation or contact a remote Teti Agent through this contract.
+
+The final step is not a Child. `Teti Host` deterministically bundles the ordered
+intermediate Artifacts and records a final Artifact. Every provenance entry
+binds Artifact ID, producing step, Child or Host producer, receiver-local
+Resource binding and committed Workspace revision. A target or authority change
+before execution stops the plan. A failed step never falls through to the next
+Child.
+
+The autonomous `DelegationPlanner` interface exists only as a future seam. Its
+Beta 0.2.9 implementation is disabled and fail-closed. Plans can be created only
+from the local user's explicit ordered selection; Task v6, Passport and Chatmail
+contain no Delegation Plan.
+
+### Layer 13: Security and recovery release gate
+
+Beta 0.2.10 does not introduce a new product layer or execution route. It binds
+the existing layers into one reproducible RC suite and adds receiver-local
+checkpoint attestation at the durable execution boundary. The attestation is
+stored beside Execution Handles, not in the collaboration protocol. Resume is
+therefore allowed only when the current local file still matches the digest
+captured from the atomic private copy; otherwise the resume capability is
+quarantined. The application protocol, Connector contract and Host/Child
+ownership model remain unchanged.
 
 ## Boundary
 

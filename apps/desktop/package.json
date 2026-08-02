@@ -1,12 +1,12 @@
 {
   "name": "@teti/desktop",
-  "version": "0.2.7",
+  "version": "0.2.10",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "tauri:dev": "tauri dev",
-    "build": "npm run runtime:bundle && vite build",
+    "build": "node --experimental-strip-types scripts/build-desktop.ts",
     "runtime:bundle": "node --experimental-strip-types scripts/bundle-runtime.ts",
     "codex-adapter:smoke": "node --experimental-strip-types scripts/smoke-codex-adapter.ts",
     "codebuddy-adapter:smoke": "node --experimental-strip-types scripts/smoke-codebuddy-adapter.ts",

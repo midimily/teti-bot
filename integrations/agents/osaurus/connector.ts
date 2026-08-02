@@ -163,7 +163,11 @@ export async function qualifyOsaurusConnector(
     return blocked("degraded", checkedAt, "OSAURUS_RUNTIME_IDENTITY_FAILED");
   }
   if (discovery.state === "untrusted") {
-    return blocked("degraded", checkedAt, "OSAURUS_RUNTIME_UNTRUSTED");
+    return blocked(
+      "degraded",
+      checkedAt,
+      discovery.reasonCode ?? "OSAURUS_RUNTIME_UNTRUSTED"
+    );
   }
   if (discovery.state === "not_running") {
     return blocked("not_detected", checkedAt, "OSAURUS_TRUSTED_RUNTIME_NOT_RUNNING");
@@ -228,6 +232,11 @@ function qualificationSafeCode(reason: string) {
     return "ADAPTER_MODEL_UNAVAILABLE" as const;
   }
   if (reason === "OSAURUS_RUNTIME_UNTRUSTED"
+    || reason === "OSAURUS_RUNTIME_LISTENER_MISMATCH"
+    || reason === "OSAURUS_RUNTIME_EXECUTABLE_UNTRUSTED"
+    || reason === "OSAURUS_RUNTIME_APP_PATH_UNTRUSTED"
+    || reason === "OSAURUS_RUNTIME_SIGNATURE_INVALID"
+    || reason === "OSAURUS_RUNTIME_SIGNATURE_MISMATCH"
     || reason === "OSAURUS_RUNTIME_IDENTITY_FAILED"
     || reason === "OSAURUS_INSIGHTS_BODY_RETENTION"
     || reason === "OSAURUS_INSIGHTS_POLICY_UNVERIFIED") {

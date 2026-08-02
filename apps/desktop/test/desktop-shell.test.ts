@@ -233,6 +233,15 @@ test("Desktop consumes only the Runtime Passport read model and owns no network 
   assert.match(passportSource, /passport\.get/);
 });
 
+test("Desktop global update lock is local-policy-owned rather than peer-owned", async () => {
+  const appSource = await readFile(new URL("../src/app.ts", import.meta.url), "utf8");
+
+  assert.match(appSource, /releaseStatus\?\.state === "update_required"/);
+  assert.doesNotMatch(appSource, /blockingPeerCompatibility|hasBlockingPeerCompatibility/);
+  assert.match(appSource, /仅暂停此节点协作/);
+  assert.match(appSource, /版本检测中/);
+});
+
 function visualModeForSnapshot(snapshot: FirstLaunchSnapshot): string {
   return visualModeForViewModel(toFirstLaunchViewModel(snapshot));
 }

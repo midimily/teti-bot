@@ -48,7 +48,8 @@ export function validateCollaborationTaskRequest(
     "offerId",
     "capabilityId",
     "input",
-    ...(schemaVersion === TETI_COLLABORATION_TASK_SCHEMA_VERSION ? ["workspace"] : []),
+    ...(Number(schemaVersion) >= 5 ? ["workspace"] : []),
+    ...(schemaVersion === TETI_COLLABORATION_TASK_SCHEMA_VERSION ? ["executionMode"] : []),
     "createdAt",
     "expiresAt"
   ], "Task request");
@@ -56,6 +57,7 @@ export function validateCollaborationTaskRequest(
     && request.schemaVersion !== 2
     && request.schemaVersion !== 3
     && request.schemaVersion !== 4
+    && request.schemaVersion !== 5
     && request.schemaVersion !== TETI_COLLABORATION_TASK_SCHEMA_VERSION) {
     throw new TaskContractError("Unsupported Task request schema version.");
   }
@@ -72,8 +74,13 @@ export function validateCollaborationTaskRequest(
   } else {
     validateMultipartInput(request.input);
   }
-  if (request.schemaVersion === TETI_COLLABORATION_TASK_SCHEMA_VERSION) {
+  if (Number(request.schemaVersion) >= 5) {
     validateTaskWorkspaceRequest(request.workspace);
+  }
+  if (request.schemaVersion === TETI_COLLABORATION_TASK_SCHEMA_VERSION
+    && request.executionMode !== "single_stage"
+    && request.executionMode !== "long_horizon") {
+    throw new TaskContractError("Task execution mode is invalid.");
   }
   const createdAt = timestamp(request.createdAt, "createdAt");
   const expiresAt = timestamp(request.expiresAt, "expiresAt");

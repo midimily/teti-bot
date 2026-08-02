@@ -69,11 +69,19 @@ test("native connection detail mode follows measured content within screen bound
 });
 
 test("Passport and header panels share one low-contrast local scrollbar treatment", async () => {
-  const styles = await readFile(new URL("../src/styles.css", import.meta.url), "utf8");
+  const [styles, view] = await Promise.all([
+    readFile(new URL("../src/styles.css", import.meta.url), "utf8"),
+    readFile(new URL("../src/passport/view.ts", import.meta.url), "utf8")
+  ]);
 
   assert.match(styles, /--teti-scrollbar-thumb:\s*rgba\(45, 103, 151, 0\.14\)/);
   assert.match(styles, /\.teti-island--connections\.has-peer-details \.teti-connection-list\s*\{[\s\S]*overflow:\s*visible/);
   assert.match(styles, /max-height:\s*var\(--teti-peer-details-max-height, 320px\)/);
+  assert.match(styles, /--teti-header-panel-viewport-offset:\s*calc\(74px \+ var\(--teti-safe-top-inset\)\)/);
+  assert.match(styles, /max-height:\s*min\(430px, calc\(100vh - var\(--teti-header-panel-viewport-offset\)\)\)/);
+  assert.match(styles, /max-height:\s*min\(380px, calc\(100vh - var\(--teti-header-panel-viewport-offset\)\)\)/);
+  assert.doesNotMatch(styles, /max-height:\s*min\((?:430|380)px, calc\(100vh - 24px\)\)/);
+  assert.match(view, /if \(viewModel\.showOsaurusNativeConfiguration\) \{[\s\S]*createOsaurusNativeChildSection/);
   assert.match(
     styles,
     /\.teti-connection-list,[\s\S]*\.teti-ai-status-panel,[\s\S]*\.teti-sharing-panel,[\s\S]*\.teti-peer-details-sections\s*\{[\s\S]*scrollbar-color:\s*var\(--teti-scrollbar-thumb\) transparent/

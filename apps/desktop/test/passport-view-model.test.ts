@@ -2,11 +2,20 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { emptyPassportSnapshot } from "../src/passport/controller.ts";
 import {
+  formatOsaurusNativeReason,
   formatLocalTetiIdentity,
   formatResetAt,
   toAgentViewModel,
   toPassportViewModel
 } from "../src/passport/view-model.ts";
+
+test("Osaurus Native accepted risks use user-facing copy", () => {
+  assert.equal(
+    formatOsaurusNativeReason("OSAURUS_INSIGHTS_BODY_RETENTION_ACCEPTED"),
+    "Osaurus Insights 会保留请求正文；已按本机 Agent 信任策略允许调用。"
+  );
+  assert.equal(formatOsaurusNativeReason("OSAURUS_RUNTIME_UNTRUSTED"), "OSAURUS_RUNTIME_UNTRUSTED");
+});
 
 test("Passport reset time uses the compact month/day and 24-hour format", () => {
   assert.equal(formatResetAt("2026-07-25T14:26:00"), "7/25 14:26 重置");
@@ -30,6 +39,8 @@ test("Passport settings show the local Teti name and nine-character ID", () => {
   };
   const viewModel = toPassportViewModel({ passport, sharingBusy: false, openPanel: "sharing" });
   assert.equal(viewModel.settings.identityLabel, "Max0717（abc123xyz）");
+  assert.ok(viewModel.settings.appVersion.length > 0);
+  assert.ok(viewModel.settings.buildTimestamp.length > 0);
 });
 
 test("Passport settings distinguish Registry network recovery from missing registration", () => {
@@ -163,7 +174,7 @@ test("Agent presentation distinguishes installed, absent, and unknown states", (
   }).statusLabel, "未确认");
 });
 
-test("Agent management orders running, installed, unknown, then absent without reshuffling peers", () => {
+test("Agent management shows only locally installed or running Agents", () => {
   const passport = emptyPassportSnapshot();
   const observedAt = "2026-07-25T00:00:00.000Z";
   const observation = (
@@ -209,8 +220,45 @@ test("Agent management orders running, installed, unknown, then absent without r
 
   assert.deepEqual(
     viewModel.settings.agentManagement.agents.map((agent) => agent.id),
-    ["running-a", "running-b", "installed-a", "installed-b", "unknown", "absent"]
+    ["running-a", "running-b", "installed-a", "installed-b"]
   );
+  assert.equal(viewModel.settings.agentManagement.statusLabel, "已发现 4");
+});
+
+test("Osaurus Native configuration is shown only when Osaurus exists locally", () => {
+  const passport = emptyPassportSnapshot();
+  const observedAt = "2026-07-25T00:00:00.000Z";
+  const snapshot = {
+    passport,
+    sharingBusy: false,
+    openPanel: "sharing" as const,
+    agentManagement: {
+      schemaVersion: 1 as const,
+      revision: 1,
+      state: "ready" as const,
+      generatedAt: observedAt,
+      completedAt: observedAt,
+      pathOverrides: {},
+      errors: [],
+      agents: [{
+        schemaVersion: 1 as const,
+        observationId: "osaurus:1",
+        agentId: "osaurus",
+        provider: "osaurus",
+        displayName: "Osaurus",
+        surfaces: ["desktop" as const, "local_service" as const],
+        supportedLevels: [1 as const, 2 as const],
+        installation: { state: "not_installed" as const, evidence: [] },
+        runtime: { state: "not_running" as const, processCount: 0, evidence: [] },
+        observedAt,
+        errors: []
+      }]
+    }
+  };
+
+  assert.equal(toPassportViewModel(snapshot).settings.showOsaurusNativeConfiguration, false);
+  snapshot.agentManagement.agents[0]!.installation.state = "installed";
+  assert.equal(toPassportViewModel(snapshot).settings.showOsaurusNativeConfiguration, true);
 });
 
 test("confirmed peer cards present shared Agent Passport rows", () => {

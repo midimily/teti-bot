@@ -16,6 +16,7 @@ import {
   validateTaskAttachmentPayload,
   validateTaskAttachmentReceiptPayload,
   validateTaskCancelPayload,
+  validateTaskInputPayload,
   validateTaskReceiptPayload,
   validateTaskStatusPayload
 } from "../task/transport-validation.ts";
@@ -113,7 +114,7 @@ function validatePayload(type: TetiApplicationMessageType, payload: Record<strin
     }
     try {
       validateTaskProtocolVersions(payload.taskProtocolVersions);
-      if (payload.taskProtocolVersions.length !== 1 || payload.taskProtocolVersions[0] !== 5) {
+      if (payload.taskProtocolVersions.length !== 1 || payload.taskProtocolVersions[0] !== 6) {
         throw new Error("0.2 requires Task protocol v5.");
       }
     } catch {
@@ -144,8 +145,8 @@ function validatePayload(type: TetiApplicationMessageType, payload: Record<strin
 
   if (type === "teti.task.request") {
     try {
-      if (payload.schemaVersion !== 5) {
-        throw new Error("0.2 requires Task protocol v5.");
+      if (payload.schemaVersion !== 6) {
+        throw new Error("0.2.8 requires Task protocol v6.");
       }
       validateCollaborationTaskRequest(payload);
     } catch {
@@ -168,6 +169,7 @@ function validatePayload(type: TetiApplicationMessageType, payload: Record<strin
     else if (type === "teti.task.attachment.receipt") validateTaskAttachmentReceiptPayload(payload);
     else if (type === "teti.task.status") validateTaskStatusPayload(payload);
     else if (type === "teti.task.cancel") validateTaskCancelPayload(payload);
+    else if (type === "teti.task.input") validateTaskInputPayload(payload);
     else if (type === "teti.task.artifact") validateTaskArtifactPayload(payload);
   } catch {
     throw new TetiApplicationProtocolError("Task application payload is invalid.");
@@ -237,6 +239,7 @@ function isSupportedApplicationType(value: string): value is TetiApplicationMess
     "teti.task.attachment.receipt",
     "teti.task.status",
     "teti.task.cancel",
+    "teti.task.input",
     "teti.task.artifact"
   ].includes(value);
 }

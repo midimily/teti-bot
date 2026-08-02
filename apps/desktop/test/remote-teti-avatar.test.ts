@@ -125,9 +125,12 @@ test("confirmed peers use a stable identity-first semantic list summary", async 
   assert.match(passportView, /name\.textContent = agent\.name/);
   assert.match(passportView, /teti-peer-signal-summary/);
   assert.match(passportView, /createSummaryOverflow/);
-  assert.match(app, /connection\.compatibility !== "compatible"/);
+  assert.match(app, /connection\.compatibility === "compatible"/);
+  assert.match(app, /仅暂停此节点协作/);
+  assert.match(app, /本机功能保持可用/);
   assert.match(app, /setAttribute\("role", "alertdialog"\)/);
-  assert.match(app, /本机 Teti 的所有功能均暂停使用/);
+  assert.match(app, /本机版本已低于当前 Beta 支持门槛/);
+  assert.doesNotMatch(app, /已建联设备需要升级或完成版本检测/);
   assert.doesNotMatch(app, /teti-protocol-blocker-button/);
   assert.match(app, /const brand = createTetiBotBrandLink\(\{ ownerDocument: header\.ownerDocument \}\)/);
   assert.doesNotMatch(app, /teti-brand-dot/);

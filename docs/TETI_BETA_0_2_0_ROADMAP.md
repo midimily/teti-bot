@@ -1,18 +1,18 @@
 # Teti Beta 0.2 Roadmap
 
-Status: 0.2.7 Osaurus Native Child Agent implementation landed; current
-official Osaurus Insights retention and the locally modified/invalid app
-signature remain release blockers, and physical two-Mac sign-off remains
+Status: 0.2.10 Security and Recovery RC automated gates landed; current official
+Osaurus Insights retention and an untrusted local Osaurus signature remain
+release blockers for Osaurus publication, and physical two-Mac sign-off remains
 pending
 
-Current application version: `0.2.7`
+Current application version: `0.2.10`
 
 ## Release history clarification
 
 The public product line did not land Beta 0.1.6, 0.1.7, or 0.1.8. Work once
 described as 0.1.9–0.1.12 was folded into the Beta 0.1.13 product baseline rather
 than shipped as separate product releases. The effective sequence for this
-roadmap is therefore 0.1.5 → 0.1.13 → 0.1.14 → 0.1.15 → 0.2.0 → 0.2.1 → 0.2.2 → 0.2.3 → 0.2.4 → 0.2.5 → 0.2.6 → 0.2.7.
+roadmap is therefore 0.1.5 → 0.1.13 → 0.1.14 → 0.1.15 → 0.2.0 → 0.2.1 → 0.2.2 → 0.2.3 → 0.2.4 → 0.2.5 → 0.2.6 → 0.2.7 → 0.2.8 → 0.2.9 → 0.2.10.
 
 ## 0.2 product direction
 
@@ -180,7 +180,7 @@ Release gates:
 5. Task, Passport, ExecutionGrant, and network envelopes contain no local
    Workspace Snapshot path.
 6. Codex, CodeBuddy, cancellation, timeout, process cleanup, output bounds,
-   image delivery, and Artifact behavior remain green on Task v5.
+   image delivery, and Artifact behavior remain green on Task v6.
 
 ## 0.2.3 — Osaurus Local Runtime Child
 
@@ -344,19 +344,108 @@ Implemented:
 - a privacy-minimized `native_agent` Compute Offer and allow-once receiver
   resolution;
 - post-transition and post-native-resize measurement fixing Peer Passport
-  bottom clipping without restoring periodic flashing.
+  bottom clipping without restoring periodic flashing;
+- field-stability corrections that isolate Peer Passport polling from optional
+  local settings reads, keep toolbar panels inside the native viewport, and
+  hide absent Agent definitions and Osaurus-only configuration.
 
 The complete gate matrix is recorded in
 [`implementation/TETI_BETA_0_2_7_OSAURUS_NATIVE_CHILD_AGENT.md`](implementation/TETI_BETA_0_2_7_OSAURUS_NATIVE_CHILD_AGENT.md).
 Official Insights request-body retention and physical two-Mac acceptance remain
 release blockers.
 
-## Planned follow-on versions
+## 0.2.8 — Long-Horizon Collaboration
 
-### 0.2.8 — 0.2 stabilization
+Goal: upgrade one long-running invocation into a Host-owned, restart-safe
+collaboration whose Child Agents each execute exactly one bounded stage.
 
-- complete the post-upgrade multi-image review;
-- run the full compatibility, migration, restart, security, and physical Mac
-  matrix;
-- freeze the internal Connector, Workspace, Task, memory-reference, and Skill-
-  reference contracts for the Beta 0.3 open-source Agent expansion.
+Implemented:
+
+- Task protocol v6 with explicit `single_stage` or `long_horizon` execution;
+- receiver-local stages, Progress, Checkpoints, audit events, bounded renewal,
+  pause-at-stage-boundary and user-supplied continuation input;
+- durable Collaboration Workspace creation for temporary long-horizon requests,
+  optimistic per-stage revision checks and stage-specific execution IDs;
+- append-only intermediate Artifacts and an explicit final-Artifact decision;
+- privacy-minimized peer status plus `teti.task.input`; Child bindings, audit,
+  checkpoint details and provider execution identity remain receiver-local;
+- explicit Child selection for continuation, including failure recovery; Teti
+  never switches Child automatically;
+- execution-deadline enforcement before Artifact persistence and Workspace
+  commit, so expired work cannot write late output;
+- desktop controls and accessible stage/audit presentation for input, pause,
+  continuation, completion and one-hour bounded renewal.
+- a deployed local Release Policy authority for 0.2.8 and later, independent
+  from Peer compatibility and the Registry KV data plane; old Peers are
+  isolated without globally freezing the current supported Host.
+
+The full contract and gate matrix are recorded in
+[`implementation/TETI_BETA_0_2_8_LONG_HORIZON_COLLABORATION.md`](implementation/TETI_BETA_0_2_8_LONG_HORIZON_COLLABORATION.md).
+Release sign-off also requires the production policy smoke gate, cached-floor
+offline lock test, rollback/mutation rejection, and a non-production
+future-floor drill. This cannot claim retroactive self-lock for 0.2.7 or older
+binaries because that client code is absent from those builds.
+
+## 0.2.9 — Teti Host Agent Delegation Foundation
+
+Goal: establish the product structure in which Teti owns a bounded plan and
+Codex, CodeBuddy and Osaurus are local Child Agents, without introducing an
+autonomous Planner.
+
+Implemented:
+
+- receiver-local `DelegationPlan` schema v1 with an explicit-user source,
+  fixed depth one and one to four ordered Child execution steps;
+- a mandatory final `Teti Host` Artifact aggregation step;
+- exact local Child/Connector/Capability/Resource binding frozen into every
+  step, with independent input/output budget, timeout and Workspace access;
+- target re-resolution before every step so changed Readiness, binding,
+  capacity or authority fails closed;
+- one Child stage at a time through the existing Long-Horizon, Workspace,
+  Execution Handle and Authority path;
+- append-only Artifact provenance recording step, producer, Resource binding
+  and committed Workspace revision;
+- deterministic ordered text and image-reference aggregation, with no model
+  call hidden inside Host aggregation;
+- a `DelegationPlanner` interface plus a fail-closed disabled implementation;
+- explicit local lifecycle methods and desktop controls for selecting the
+  ordered plan; no remote message can submit a plan or local Connector field;
+- failure stops the frozen plan. No next Child, fallback or re-planning occurs
+  automatically.
+
+The complete contract and gate matrix are recorded in
+[`implementation/TETI_BETA_0_2_9_TETI_HOST_AGENT_DELEGATION_FOUNDATION.md`](implementation/TETI_BETA_0_2_9_TETI_HOST_AGENT_DELEGATION_FOUNDATION.md).
+Task protocol remains v6 because the plan, budgets, bindings, provenance and
+audit are receiver-local. The production Release Policy floor intentionally
+remains `0.2.8` until a separate release promotion changes it.
+
+## 0.2.10 — Security and Recovery RC
+
+Goal: freeze the Beta 0.2 behavior and run one concentrated security, recovery
+and migration gate without adding product features.
+
+Implemented:
+
+- one repeatable `test:security-recovery-rc` gate covering Codex, CodeBuddy,
+  Osaurus Runtime and Native, Workspace, Child Memory, durable execution,
+  Artifact handling, two-peer transport and Host delegation;
+- fail-closed SHA-256 integrity verification for receiver-local checkpoints
+  before every explicit resume;
+- atomic private checkpoint replacement and a local Execution Handle store v2
+  integrity ledger; migrated 0.2.9 handles receive no invented trust and a
+  legacy checkpoint cannot resume until recaptured;
+- explicit adversarial tests for checkpoint mutation, remote delegation,
+  per-step budget expansion, malicious Artifact path fields and oversized
+  Artifact text;
+- retained proofs for non-replay of side-effecting work, execution epoch races,
+  localhost PID/signature binding, bounded Osaurus concurrency/queueing,
+  Workspace symlink escape, optimistic revision conflicts, Memory scope
+  isolation, offline delivery and out-of-order message convergence.
+
+No Task, Passport, Application Envelope, Connector, Compute Offer or UI feature
+was added. Task remains v6, Passport remains schema 4, the collaboration epoch
+remains 2 and the production Release Policy floor remains `0.2.8` pending an
+explicit operator promotion.
+
+The complete gate matrix and residual physical sign-off are recorded in
+[`implementation/TETI_BETA_0_2_10_SECURITY_AND_RECOVERY_RC.md`](implementation/TETI_BETA_0_2_10_SECURITY_AND_RECOVERY_RC.md).

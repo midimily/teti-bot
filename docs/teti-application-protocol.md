@@ -10,12 +10,12 @@ Beta 0.2 establishes collaboration epoch 2:
 
 - Application Envelope: version 2 only;
 - Presence: `collaborationProtocolEpoch: 2`;
-- Task protocol: version 5 only;
+- Task protocol: version 6 only;
 - network Compute Passport: schema 4 only;
 - processed-message Store: version 2.
 
 Application Envelope v1 is rejected before its payload is dispatched. Task
-v1–v4 and Passport v1–v3 are not downgrade targets. Historical parsers may
+v1–v5 and Passport v1–v3 are not downgrade targets. Historical parsers may
 remain for read-only archive characterization, but are outside the 0.2 network
 ingress.
 
@@ -62,7 +62,7 @@ payload is never parsed as a Task, Passport, or other Application Message.
     "status": "online",
     "timestamp": "2026-07-28T00:00:00.000Z",
     "collaborationProtocolEpoch": 2,
-    "taskProtocolVersions": [5],
+    "taskProtocolVersions": [6],
     "passportSchemaVersions": [4]
   }
 }
@@ -87,32 +87,55 @@ capability, `local_model`, `receiver_local`, text modes, concurrency one,
 `allow_once`, and an observation timestamp. It contains no model name/file,
 Runtime endpoint, port, hardware detail, credential, token, local binding, or
 Agent configuration. A Passport is sent only after the Peer advertises epoch
-2, Task v5, and Passport schema 4; unknown and incompatible Peers receive no
+2, Task v6, and Passport schema 4; unknown and incompatible Peers receive no
 speculative payload.
 
-## Task v5
+## Task v6
 
 `teti.task.request` accepts only a `CollaborationTaskRequest` with
-`schemaVersion: 5`. It carries an immutable Task ID, requester/target IDs,
+`schemaVersion: 6`. It carries an immutable Task ID, requester/target IDs,
 selected offer and capability, bounded text plus up to four ordered PNG/JPEG
-descriptors, an abstract Workspace request, creation time, and expiry. The
+descriptors, an abstract Workspace request, an explicit `single_stage` or
+`long_horizon` execution mode, creation time, and expiry. The
 Workspace request can ask for temporary storage or reference a confirmed
 Workspace ID/revision and access list; it cannot contain a path. Image bytes
 travel only through the Chatmail file field.
 
 The protocol also defines:
 
-- `teti.task.receipt`: durable request ingestion and supported Task `[5]`;
+- `teti.task.receipt`: durable request ingestion and supported Task `[6]`;
 - `teti.task.attachment`: verified input or Artifact bytes;
 - `teti.task.attachment.receipt`: emitted only after durable verified storage;
 - `teti.task.status`: monotonic A2A-aligned Task state revision;
 - `teti.task.cancel`: idempotent cancellation request;
+- `teti.task.input`: one bounded requester instruction for the current stage;
 - `teti.task.artifact`: bounded text and/or verified image result manifest.
 
-Several Task-v5 component payloads retain `schemaVersion: 1` as their own
+Several Task-v6 component payloads retain `schemaVersion: 1` as their own
 structural schema. This does not mean Task protocol v1 is accepted; the
-containing Application Envelope v2 and an existing Task-v5 identity are
+containing Application Envelope v2 and an existing Task-v6 identity are
 required.
+
+Beta 0.2.8 long-horizon status uses status schema 2. It projects only phase,
+stage number, Workspace revision, bounded Progress, continuation expiry,
+input-request ID and optional final Artifact ID. The receiver-local Child,
+Connector, instruction digest, checkpoint digest, audit trail and provider
+execution identity never cross Chatmail. Intermediate Artifact payloads add
+only stage number and `intermediate`/`final` role. Duplicate Artifact IDs and
+input IDs are idempotent.
+
+Beta 0.2.9 does not add a network Delegation message or Task field. A
+`DelegationPlan` is created only after receiver-local approval of an incoming
+long-horizon Task. Ordered Child/Connector/Capability choices, Resource
+bindings, per-step budgets, Workspace access, producer provenance and Host audit
+remain in the receiver's Task store. The requester receives the already-defined
+Task-v6 stage status and Artifact stream only; it cannot distinguish or address
+the local plan's Child Agents through the wire contract.
+
+Beta 0.2.10 likewise adds no Application Message or schema field. Checkpoint
+integrity evidence, the Execution Handle store schema and the RC gate results
+are receiver-local. Peers cannot provide, replace, address or attest a local
+checkpoint, and no checkpoint digest or path crosses Chatmail.
 
 For `local.compute.general-text-assistance.v1`, the receiver resolves the
 abstract offer to its own locally qualified Connector. A `capability:` alias,

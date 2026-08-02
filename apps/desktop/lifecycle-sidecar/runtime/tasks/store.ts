@@ -9,14 +9,24 @@ import {
   type TetiTaskTransportStoreState
 } from "../../../../../core/task/transport.ts";
 import {
+  validateTaskInputPayload,
   validateTaskProtocolVersions,
-  validateTaskReceiptPayload
+  validateTaskReceiptPayload,
+  validateTaskStatusPayload
 } from "../../../../../core/task/transport-validation.ts";
 import {
   validateCollaborationTaskRequest,
   validateTaskArtifact
 } from "../../../../../core/task/validation.ts";
 import { validateTaskWorkspaceBinding } from "../../../../../core/workspace/validation.ts";
+import {
+  validateLongHorizonArtifactEntries,
+  validateLongHorizonTaskState
+} from "../../../../../core/task/long-horizon-validation.ts";
+import {
+  isWorkspaceAccessSubset,
+  validateDelegationPlanState
+} from "../../../../../core/delegation/validation.ts";
 
 export interface TaskTransportStore {
   load(): Promise<TetiTaskTransportStoreState>;
@@ -32,7 +42,7 @@ export class FileTaskTransportStore implements TaskTransportStore {
 
   async load(): Promise<TetiTaskTransportStoreState> {
     try {
-      const state = JSON.parse(await readFile(this.path, "utf8")) as unknown;
+      const state = migrateTaskStoreState(JSON.parse(await readFile(this.path, "utf8")));
       validateTaskTransportStoreState(state);
       return clone(state);
     } catch (error) {
@@ -58,8 +68,9 @@ export class MemoryTaskTransportStore implements TaskTransportStore {
   private state: TetiTaskTransportStoreState;
 
   constructor(state: TetiTaskTransportStoreState = emptyTaskTransportStoreState()) {
-    validateTaskTransportStoreState(state);
-    this.state = clone(state);
+    const migrated = migrateTaskStoreState(state);
+    validateTaskTransportStoreState(migrated);
+    this.state = clone(migrated);
   }
 
   async load(): Promise<TetiTaskTransportStoreState> {
@@ -67,9 +78,15 @@ export class MemoryTaskTransportStore implements TaskTransportStore {
   }
 
   async save(state: TetiTaskTransportStoreState): Promise<void> {
-    validateTaskTransportStoreState(state);
-    this.state = clone(state);
+    const migrated = migrateTaskStoreState(state);
+    validateTaskTransportStoreState(migrated);
+    this.state = clone(migrated);
   }
+}
+
+function migrateTaskStoreState(value: unknown): unknown {
+  if (!isRecord(value) || (value.schemaVersion !== 2 && value.schemaVersion !== 3)) return value;
+  return { ...value, schemaVersion: TETI_TASK_TRANSPORT_STORE_SCHEMA_VERSION };
 }
 
 export function emptyTaskTransportStoreState(): TetiTaskTransportStoreState {
@@ -136,9 +153,16 @@ function validateRecord(value: unknown): asserts value is CollaborationTaskTrans
     "cancelPending",
     "cancelSentAt",
     "artifactPending",
+    "sentArtifactIds",
     "artifactAttachmentsReady",
     "attachmentsReady",
     "artifacts",
+    "longHorizon",
+    "delegationPlan",
+    "peerLongHorizon",
+    "peerArtifactMetadata",
+    "inputPending",
+    "inputSentAt",
     "safeErrorCode"
   ], "Task transport record");
   if (value.direction !== "incoming" && value.direction !== "outgoing") {
@@ -149,7 +173,8 @@ function validateRecord(value: unknown): asserts value is CollaborationTaskTrans
       && value.protocolVersion !== 2
       && value.protocolVersion !== 3
       && value.protocolVersion !== 4
-      && value.protocolVersion !== 5)) {
+      && value.protocolVersion !== 5
+      && value.protocolVersion !== 6)) {
     throw new Error("Teti Task transport record peer is invalid.");
   }
   if (value.envelopeMessageId !== undefined
@@ -217,6 +242,7 @@ function validateRecord(value: unknown): asserts value is CollaborationTaskTrans
   if (value.artifactPending !== undefined && typeof value.artifactPending !== "boolean") {
     throw new Error("Teti Task Artifact outbox state is invalid.");
   }
+  validateStringArray(value.sentArtifactIds, "Teti Task sent Artifact IDs");
   if (value.artifactAttachmentsReady !== undefined && typeof value.artifactAttachmentsReady !== "boolean") {
     throw new Error("Teti Task Artifact attachment readiness is invalid.");
   }
@@ -224,14 +250,81 @@ function validateRecord(value: unknown): asserts value is CollaborationTaskTrans
     throw new Error("Teti Task attachment readiness is invalid.");
   }
   if (value.artifacts !== undefined) {
-    if (!Array.isArray(value.artifacts) || value.artifacts.length > 1) {
+    if (!Array.isArray(value.artifacts) || value.artifacts.length > 32) {
       throw new Error("Teti Task artifacts are invalid.");
     }
     for (const artifact of value.artifacts) validateTaskArtifact(artifact);
   }
+  if (value.longHorizon !== undefined) validateLongHorizonTaskState(value.longHorizon);
+  if (value.delegationPlan !== undefined) {
+    validateDelegationPlanState(value.delegationPlan);
+    if (value.delegationPlan.taskId !== value.request.taskId
+      || value.direction !== "incoming"
+      || value.request.executionMode !== "long_horizon"
+      || value.longHorizon === undefined) {
+      throw new Error("Teti Task Delegation Plan ownership boundary is invalid.");
+    }
+    const binding = value.workspaceBinding;
+    if (binding && value.delegationPlan.steps.some((step) =>
+      step.kind === "child_execution"
+      && (!isWorkspaceAccessSubset(step.workspaceAccess, binding.access)
+        || step.workspaceRevision > binding.workspaceRevision))) {
+      throw new Error("Teti Task Delegation Plan expanded Workspace authority.");
+    }
+    const artifacts = Array.isArray(value.artifacts) ? value.artifacts : [];
+    if (value.delegationPlan.artifacts.some((entry) =>
+      !artifacts.some((artifact) => artifact.artifactId === entry.artifactId))) {
+      throw new Error("Teti Task Delegation Artifact provenance is orphaned.");
+    }
+  }
+  if (value.peerLongHorizon !== undefined) {
+    const peerState = value.state === "submitted" ? "working" : value.state;
+    if (peerState === "unknown") throw new Error("Teti Task peer status state is invalid.");
+    validateTaskStatusPayload({
+      schemaVersion: 2,
+      taskId: value.request.taskId,
+      requesterTetiId: value.request.requesterTetiId,
+      targetTetiId: value.request.targetTetiId,
+      revision: 1,
+      state: peerState,
+      updatedAt: value.updatedAt,
+      longHorizon: value.peerLongHorizon
+    });
+  }
+  if (value.peerArtifactMetadata !== undefined) {
+    validateLongHorizonArtifactEntries(value.peerArtifactMetadata);
+    const peerArtifactMetadata = value.peerArtifactMetadata as NonNullable<
+      CollaborationTaskTransportRecord["peerArtifactMetadata"]
+    >;
+    const artifacts = Array.isArray(value.artifacts) ? value.artifacts : [];
+    if (peerArtifactMetadata.length !== artifacts.length
+      || peerArtifactMetadata.some((entry) =>
+        !artifacts.some((artifact) => artifact.artifactId === entry.artifactId))) {
+      throw new Error("Teti Task peer Artifact metadata is incomplete.");
+    }
+  }
+  if (value.inputPending !== undefined) validateTaskInputPayload(value.inputPending);
+  if (value.inputSentAt !== undefined) requireTimestamp(value.inputSentAt, "Task input sentAt");
   if (value.safeErrorCode !== undefined
     && (typeof value.safeErrorCode !== "string" || !/^[A-Z0-9_]{1,64}$/.test(value.safeErrorCode))) {
     throw new Error("Teti Task transport safe error code is invalid.");
+  }
+  if ((value.longHorizon !== undefined
+      && (value.direction !== "incoming" || value.request.executionMode !== "long_horizon"))
+    || (value.peerLongHorizon !== undefined
+      && (value.direction !== "outgoing" || value.request.executionMode !== "long_horizon"))
+    || (value.peerArtifactMetadata !== undefined
+      && (value.direction !== "outgoing" || value.request.executionMode !== "long_horizon"))
+    || (value.longHorizon !== undefined && value.peerLongHorizon !== undefined)
+    || (value.inputPending !== undefined
+      && (value.direction !== "outgoing" || value.request.executionMode !== "long_horizon"))) {
+    throw new Error("Teti Task long-horizon ownership boundary is invalid.");
+  }
+  if (Array.isArray(value.sentArtifactIds)
+    && value.sentArtifactIds.some((artifactId) =>
+      !(value.artifacts as CollaborationTaskTransportRecord["artifacts"] | undefined)
+        ?.some((artifact) => artifact.artifactId === artifactId))) {
+    throw new Error("Teti Task sent Artifact identity is invalid.");
   }
 }
 

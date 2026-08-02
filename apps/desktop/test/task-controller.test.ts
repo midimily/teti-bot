@@ -12,6 +12,10 @@ import {
   type TaskClient
 } from "../src/tasks/controller.ts";
 import { formatTaskTimestamp, taskPeerHeading } from "../src/tasks/view.ts";
+import type {
+  DelegationTargetOption,
+  DelegationTargetSelection
+} from "../../../core/delegation/types.ts";
 
 test("Task draft survives focus collapse and sends only staged descriptors", async () => {
   const client = new RecordingTaskClient();
@@ -108,6 +112,60 @@ test("Task UI keeps send state live and parents native image dialogs to the Teti
   assert.ok(native.match(/\.set_parent\(&window\)/g)?.length === 2);
   assert.match(native, /open_task_result_image/);
   assert.match(native, /save_task_result_image/);
+  assert.match(view, /Teti Host 委派计划/);
+  assert.match(view, /Planner 关闭/);
+  assert.match(view, /按计划委派/);
+});
+
+test("Task controller builds an explicit ordered Delegation selection and never invokes a Planner", async () => {
+  const client = new RecordingTaskClient();
+  const now = new Date().toISOString();
+  client.seed({
+    schemaVersion: 1,
+    direction: "incoming",
+    peerTetiId: "teti_alpha0001",
+    protocolVersion: 6,
+    request: {
+      schemaVersion: 6,
+      taskId: "task-delegation-ui",
+      requesterTetiId: "teti_alpha0001",
+      targetTetiId: "teti_beta00002",
+      offerId: "capability:code-analysis",
+      capabilityId: "code-analysis",
+      input: { kind: "text", text: "Analyze, then edit." },
+      workspace: { kind: "temporary", access: ["read", "write", "create_artifact"] },
+      executionMode: "long_horizon",
+      createdAt: now,
+      expiresAt: new Date(Date.now() + 60_000).toISOString()
+    },
+    state: "received",
+    approval: "pending",
+    delivery: "received",
+    attachmentsReady: true,
+    createdAt: now,
+    updatedAt: now
+  } as CollaborationTaskTransportRecord);
+  const controller = new TaskController({
+    client,
+    tauri: new RecordingTauriInvoker(),
+    notchWindow: { setMode: async () => undefined } as never,
+    onChange: () => undefined
+  });
+
+  await controller.select("task-delegation-ui");
+  assert.equal(controller.snapshot.delegationSelections.length, 1);
+  controller.addDelegationStep();
+  assert.deepEqual(controller.snapshot.delegationSelections.map((selection) => selection.childAgentId), [
+    "osaurus-runtime",
+    "codex"
+  ]);
+  await controller.approveDelegation();
+  assert.deepEqual(client.approvedDelegations[0]?.map((selection) => selection.childAgentId), [
+    "osaurus-runtime",
+    "codex"
+  ]);
+  assert.deepEqual(controller.snapshot.delegationSelections, []);
+  controller.dispose();
 });
 
 test("Task controller coalesces refresh requests into one poll timer", async () => {
@@ -286,7 +344,36 @@ class RecordingTaskClient implements TaskClient {
     safeFileName: "image-1.png"
   };
   readonly sent: SendCollaborationTaskInput[] = [];
+  readonly approvedDelegations: DelegationTargetSelection[][] = [];
+  readonly availableDelegationTargets: DelegationTargetOption[] = [
+    {
+      childAgentId: "osaurus-runtime",
+      connectorId: "osaurus.runtime",
+      capabilityId: "general-text-assistance",
+      resourceBindingId: "binding:osaurus.runtime",
+      workspacePolicy: "none",
+      inputModes: ["text"],
+      outputModes: ["text"],
+      timeoutMs: 60_000,
+      maxOutputBytes: 24 * 1_024
+    },
+    {
+      childAgentId: "codex",
+      connectorId: "codex.image",
+      capabilityId: "image-editing",
+      resourceBindingId: "binding:codex.image",
+      workspacePolicy: "snapshot",
+      inputModes: ["text", "image"],
+      outputModes: ["text", "image"],
+      timeoutMs: 120_000,
+      maxOutputBytes: 56 * 1_024
+    }
+  ];
   private record: CollaborationTaskTransportRecord | null = null;
+
+  seed(record: CollaborationTaskTransportRecord): void {
+    this.record = structuredClone(record);
+  }
 
   async summaries(): Promise<CollaborationTaskSummarySnapshot> {
     return structuredClone(this.summary);
@@ -333,6 +420,19 @@ class RecordingTaskClient implements TaskClient {
   }
 
   async approve(): Promise<CollaborationTaskTransportRecord> { return this.get(); }
+  async delegationTargets(): Promise<DelegationTargetOption[]> {
+    return structuredClone(this.availableDelegationTargets);
+  }
+  async approveDelegation(
+    _taskId: string,
+    selections: DelegationTargetSelection[]
+  ): Promise<CollaborationTaskTransportRecord> {
+    this.approvedDelegations.push(structuredClone(selections));
+    if (!this.record) throw new Error("TASK_NOT_FOUND");
+    this.record.approval = "consumed";
+    this.record.state = "working";
+    return structuredClone(this.record);
+  }
   async reject(): Promise<CollaborationTaskTransportRecord> { return this.get(); }
   async cancel(): Promise<CollaborationTaskTransportRecord> { return this.get(); }
 }

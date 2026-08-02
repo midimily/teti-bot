@@ -13,12 +13,15 @@ import type {
   ChildMemorySnapshot,
   MemoryExportResult
 } from "../../../../core/memory/types.ts";
+import type { LocalReleaseStatus } from "../../../../core/release/policy.ts";
+import type { DelegationTargetOption } from "../../../../core/delegation/types.ts";
 
 export const LIFECYCLE_PROTOCOL_VERSION = 1;
 export const LIFECYCLE_MAX_LINE_BYTES = 64 * 1024;
 
 export type LifecycleMethod =
   | "lifecycle.health"
+  | "release.status"
   | "account.status"
   | "account.load"
   | "account.create"
@@ -36,10 +39,17 @@ export type LifecycleMethod =
   | "task.attachment.stage"
   | "task.attachment.resolve"
   | "task.approve"
+  | "task.delegation.targets"
+  | "task.delegation.approve"
   | "task.reject"
   | "task.cancel"
   | "task.execution.get"
   | "task.execution.resume"
+  | "task.input.submit"
+  | "task.pause"
+  | "task.continue"
+  | "task.complete"
+  | "task.renew"
   | "memory.get"
   | "memory.authorization.set"
   | "memory.task.save"
@@ -55,6 +65,7 @@ export type LifecycleMethod =
 
 export const LIFECYCLE_METHODS: readonly LifecycleMethod[] = [
   "lifecycle.health",
+  "release.status",
   "account.status",
   "account.load",
   "account.create",
@@ -72,10 +83,17 @@ export const LIFECYCLE_METHODS: readonly LifecycleMethod[] = [
   "task.attachment.stage",
   "task.attachment.resolve",
   "task.approve",
+  "task.delegation.targets",
+  "task.delegation.approve",
   "task.reject",
   "task.cancel",
   "task.execution.get",
   "task.execution.resume",
+  "task.input.submit",
+  "task.pause",
+  "task.continue",
+  "task.complete",
+  "task.renew",
   "memory.get",
   "memory.authorization.set",
   "memory.task.save",
@@ -113,6 +131,7 @@ export type LifecycleResponse =
 
 export type LifecycleResult =
   | LifecycleHealthResult
+  | LocalReleaseStatus
   | LifecycleStatusResult
   | PublicTetiAccount
   | PublicTetiIdentity
@@ -125,6 +144,7 @@ export type LifecycleResult =
   | StagedTaskImageDto
   | ResolvedTaskImageDto
   | ExecutionHandle
+  | DelegationTargetOption[]
   | ChildMemorySnapshot
   | MemoryExportResult
   | OsaurusNativeChildSettingsDto
@@ -248,12 +268,14 @@ export type LifecycleErrorCode =
   | "CONNECTION_REQUEST_FAILED"
   | "TASK_TRANSPORT_FAILED"
   | "MEMORY_OPERATION_FAILED"
+  | "APP_UPDATE_REQUIRED"
   | "SIDECAR_UNAVAILABLE"
   | "REQUEST_TIMEOUT"
   | "INTERNAL_ERROR";
 
 export const LIFECYCLE_TIMEOUT_MS: Record<LifecycleMethod, number> = {
   "lifecycle.health": 2_000,
+  "release.status": 2_000,
   "account.status": 5_000,
   "account.load": 5_000,
   "account.create": 120_000,
@@ -271,10 +293,17 @@ export const LIFECYCLE_TIMEOUT_MS: Record<LifecycleMethod, number> = {
   "task.attachment.stage": 10_000,
   "task.attachment.resolve": 2_000,
   "task.approve": 10_000,
+  "task.delegation.targets": 2_000,
+  "task.delegation.approve": 10_000,
   "task.reject": 10_000,
   "task.cancel": 10_000,
   "task.execution.get": 2_000,
   "task.execution.resume": 10_000,
+  "task.input.submit": 10_000,
+  "task.pause": 10_000,
+  "task.continue": 10_000,
+  "task.complete": 10_000,
+  "task.renew": 10_000,
   "memory.get": 2_000,
   "memory.authorization.set": 5_000,
   "memory.task.save": 5_000,

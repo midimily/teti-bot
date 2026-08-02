@@ -40,17 +40,23 @@ import type {
   RuntimeAgentObserver
 } from "./agents/types.ts";
 import { RuntimePassportService } from "./passport/service.ts";
+import type { LocalReleaseStatus } from "../../../../core/release/policy.ts";
+import { TETI_RELEASE_POLICY_REFRESH_INTERVAL_MS } from "./release/service.ts";
 
 export const TETI_RUNTIME_JOB_IDS = {
+  releasePolicy: "release-policy",
   agentDiscovery: "agent-discovery",
   registryHeartbeat: "registry-heartbeat",
+  peerProfileRefresh: "peer-profile-refresh",
   chatmailPoll: "chatmail-poll",
   codexRefresh: "codex-refresh"
 } as const;
 
 export const TETI_RUNTIME_INTERVALS = {
+  releasePolicyMs: TETI_RELEASE_POLICY_REFRESH_INTERVAL_MS,
   agentDiscoveryMs: 5 * 60 * 1_000,
   registryHeartbeatMs: 5 * 60 * 1_000,
+  peerProfileRefreshMs: 15 * 60 * 1_000,
   chatmailPollMs: 3_000,
   codexRefreshMs: 10 * 60 * 1_000
 } as const;
@@ -93,6 +99,11 @@ export interface RuntimeChildMemoryService {
   export(): Promise<MemoryExportResult>;
 }
 
+export interface RuntimeLocalReleasePolicyService {
+  getStatus(): LocalReleaseStatus;
+  refresh(): Promise<LocalReleaseStatus>;
+}
+
 export interface TetiRuntimeDependencies {
   loadTetiAccount(): Promise<TetiAccount | null>;
   heartbeatDiscovery(): Promise<TetiAccount>;
@@ -103,6 +114,7 @@ export interface TetiRuntimeDependencies {
   agentConfiguration?: RuntimeAgentConfiguration;
   hostAgent?: RuntimeTetiHostAgent;
   memoryService?: RuntimeChildMemoryService;
+  releasePolicyService?: RuntimeLocalReleasePolicyService;
   dispose?(): Promise<void>;
 }
 
@@ -168,12 +180,27 @@ export class TetiRuntime {
       now: options.now
     });
     const jobs: TetiRuntimeScheduledJob[] = [];
+    const releasePolicyService = this.dependencies.releasePolicyService;
+    if (releasePolicyService) {
+      jobs.push({
+        id: TETI_RUNTIME_JOB_IDS.releasePolicy,
+        intervalMs: intervals.releasePolicyMs,
+        runOnStart: true,
+        run: async () => {
+          const status = await releasePolicyService.refresh();
+          if (status.state === "update_required") {
+            await this.dependencies.hostAgent?.shutdown();
+          }
+        }
+      });
+    }
     const agentObserver = this.dependencies.agentObserver;
     if (agentObserver) {
       jobs.push({
         id: TETI_RUNTIME_JOB_IDS.agentDiscovery,
         intervalMs: intervals.agentDiscoveryMs,
         runOnStart: true,
+        shouldRun: () => this.localReleaseAllowsWork(),
         run: async () => {
           await agentObserver.discover();
         }
@@ -184,7 +211,7 @@ export class TetiRuntime {
         id: TETI_RUNTIME_JOB_IDS.registryHeartbeat,
         intervalMs: intervals.registryHeartbeatMs,
         runOnStart: true,
-        shouldRun: () => this.hasLocalAccount(),
+        shouldRun: () => this.localReleaseAllowsWork() && this.hasLocalAccount(),
         run: async () => {
           this.registryAttempt += 1;
           try {
@@ -214,10 +241,32 @@ export class TetiRuntime {
           : intervals.registryHeartbeatMs
       },
       {
+        id: TETI_RUNTIME_JOB_IDS.peerProfileRefresh,
+        intervalMs: intervals.peerProfileRefreshMs,
+        runOnStart: true,
+        shouldRun: () => this.localReleaseAllowsWork() && this.hasLocalAccount(),
+        run: async () => {
+          const service = await this.rawPeerService();
+          const refresh = await service.refreshPeerProfiles?.();
+          if (!refresh) return;
+          // Publish every successful partial refresh before applying retry
+          // backoff, so one unavailable peer cannot hide another peer's name.
+          this.capturePeerResult(refresh.snapshot);
+          if (refresh.failedPeerCount > 0) {
+            throw new Error("One or more peer Registry profiles could not be refreshed.");
+          }
+        },
+        nextDelayMs: (snapshot) => snapshot.consecutiveFailures > 0
+          ? TETI_REGISTRY_RETRY_DELAYS_MS[
+              Math.min(snapshot.consecutiveFailures - 1, TETI_REGISTRY_RETRY_DELAYS_MS.length - 1)
+            ]
+          : intervals.peerProfileRefreshMs
+      },
+      {
         id: TETI_RUNTIME_JOB_IDS.chatmailPoll,
         intervalMs: intervals.chatmailPollMs,
         runOnStart: true,
-        shouldRun: () => this.hasLocalAccount(),
+        shouldRun: () => this.localReleaseAllowsWork() && this.hasLocalAccount(),
         run: async () => {
           const service = await this.rawPeerService();
           this.capturePeerResult(await service.poll());
@@ -227,7 +276,7 @@ export class TetiRuntime {
         id: TETI_RUNTIME_JOB_IDS.codexRefresh,
         intervalMs: intervals.codexRefreshMs,
         runOnStart: true,
-        shouldRun: () => this.hasLocalAccount(),
+        shouldRun: () => this.localReleaseAllowsWork() && this.hasLocalAccount(),
         run: async () => { await this.dependencies.codexUsageService.refreshNow(); }
       }
     );
@@ -268,6 +317,7 @@ export class TetiRuntime {
       this.setRegistryStatus({ state: "unknown" });
     }
     this.host.runNow(TETI_RUNTIME_JOB_IDS.registryHeartbeat);
+    this.host.runNow(TETI_RUNTIME_JOB_IDS.peerProfileRefresh);
     this.host.runNow(TETI_RUNTIME_JOB_IDS.chatmailPoll);
     this.host.runNow(TETI_RUNTIME_JOB_IDS.codexRefresh);
   }
@@ -312,6 +362,21 @@ export class TetiRuntime {
 
   getPassportSnapshot(): Promise<RuntimePassportSnapshot> {
     return this.passportService.getSnapshot();
+  }
+
+  getLocalReleaseStatus(): LocalReleaseStatus {
+    return this.dependencies.releasePolicyService?.getStatus() ?? {
+      schemaVersion: 1,
+      state: "temporarily_unavailable",
+      currentVersion: "unknown",
+      buildTimestamp: "unknown",
+      source: "none",
+      diagnosticCode: "RELEASE_POLICY_UNAVAILABLE"
+    };
+  }
+
+  private localReleaseAllowsWork(): boolean {
+    return this.dependencies.releasePolicyService?.getStatus().state !== "update_required";
   }
 
   async setPassportSharing(policy: PassportSharingPolicy): Promise<RuntimePassportSnapshot> {
@@ -528,6 +593,36 @@ export class TetiRuntime {
     return clone(await service.resumeTask(taskId));
   }
 
+  async submitTaskInput(taskId: string, instruction: string): Promise<CollaborationTaskTransportRecord> {
+    const service = await this.rawPeerService();
+    if (!service.submitTaskInput) throw new Error("Long-horizon Task input is unavailable.");
+    return clone(await service.submitTaskInput(taskId, instruction));
+  }
+
+  async pauseTask(taskId: string): Promise<CollaborationTaskTransportRecord> {
+    const service = await this.rawPeerService();
+    if (!service.pauseTask) throw new Error("Long-horizon Task pause is unavailable.");
+    return clone(await service.pauseTask(taskId));
+  }
+
+  async continueTask(taskId: string, childAgentId?: string): Promise<CollaborationTaskTransportRecord> {
+    const service = await this.rawPeerService();
+    if (!service.continueTask) throw new Error("Long-horizon Task continuation is unavailable.");
+    return clone(await service.continueTask(taskId, childAgentId));
+  }
+
+  async completeTask(taskId: string): Promise<CollaborationTaskTransportRecord> {
+    const service = await this.rawPeerService();
+    if (!service.completeTask) throw new Error("Long-horizon Task completion is unavailable.");
+    return clone(await service.completeTask(taskId));
+  }
+
+  async renewTask(taskId: string, ttlMs: number): Promise<CollaborationTaskTransportRecord> {
+    const service = await this.rawPeerService();
+    if (!service.renewTask) throw new Error("Long-horizon Task renewal is unavailable.");
+    return clone(await service.renewTask(taskId, ttlMs));
+  }
+
   async getChildMemory(): Promise<ChildMemorySnapshot> {
     if (!this.dependencies.memoryService) throw new Error("Child Memory is unavailable.");
     return clone(await this.dependencies.memoryService.list());
@@ -661,6 +756,26 @@ class RuntimePeerConnectionFacade implements PeerConnectionService {
 
   resumeTask(taskId: string): Promise<CollaborationTaskTransportRecord> {
     return this.runtime.resumeTask(taskId);
+  }
+
+  submitTaskInput(taskId: string, instruction: string): Promise<CollaborationTaskTransportRecord> {
+    return this.runtime.submitTaskInput(taskId, instruction);
+  }
+
+  pauseTask(taskId: string): Promise<CollaborationTaskTransportRecord> {
+    return this.runtime.pauseTask(taskId);
+  }
+
+  continueTask(taskId: string, childAgentId?: string): Promise<CollaborationTaskTransportRecord> {
+    return this.runtime.continueTask(taskId, childAgentId);
+  }
+
+  completeTask(taskId: string): Promise<CollaborationTaskTransportRecord> {
+    return this.runtime.completeTask(taskId);
+  }
+
+  renewTask(taskId: string, ttlMs: number): Promise<CollaborationTaskTransportRecord> {
+    return this.runtime.renewTask(taskId, ttlMs);
   }
 
   getPassportSharing(): Promise<PassportSharingPolicy> {

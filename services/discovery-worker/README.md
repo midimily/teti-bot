@@ -123,6 +123,24 @@ Returns one public identity card.
 
 The profile lookup accepts ASCII uppercase input for user-facing convenience and folds it to the lowercase canonical key. Registry writes remain strict and reject non-canonical casing.
 
+### GET /release-policy
+
+Returns the Beta release floor used by local Teti clients. This control-plane
+route is deliberately independent of the Registry KV binding, so a Registry
+data-plane failure does not remove the version authority.
+
+The production policy is declared in `wrangler.toml`. Every content change
+must also increase `TETI_RELEASE_POLICY_VERSION`; use a future
+`TETI_RELEASE_POLICY_EFFECTIVE_AT` when staging a new floor. After deployment,
+run:
+
+```sh
+npm run verify:release-policy
+```
+
+The check fails on redirects, non-HTTPS endpoints, unexpected schema/channel,
+floor or policy revision, and missing cache/CORS headers.
+
 ## Required Pre-deployment Audit
 
 Run the read-only KV key audit before deploying changes to the ID validation rule:

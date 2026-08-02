@@ -54,11 +54,12 @@ export interface OsaurusNativeAgentAudit {
   effectiveModel: string;
   updatedAt: string;
   configurationDigest: string;
+  /** Observed Osaurus settings. They are not permissions granted by Teti. */
   providerAuthority: {
-    tools: "deny";
-    memory: "deny";
-    hostWorkspace: "deny";
-    autonomousExec: "deny";
+    tools: "enabled" | "disabled";
+    memory: "enabled" | "disabled";
+    hostWorkspace: "disabled";
+    autonomousExec: "enabled" | "disabled";
   };
 }
 
@@ -85,12 +86,15 @@ export class FileOsaurusNativeAgentPolicyAuditor implements OsaurusNativeAgentPo
     }
     const data = await readFile(path);
     const record = asRecord(JSON.parse(data.toString("utf8")));
+    const tools = providerToggle(record?.toolsEnabled);
+    const memory = providerToggle(record?.memoryEnabled);
+    const autonomousExec = autonomousExecState(record?.autonomousExec);
     if (!record
       || normalizeAgentId(record.id) !== normalizedId
       || record.isBuiltIn !== false
-      || record.toolsEnabled !== false
-      || record.memoryEnabled !== false
-      || !autonomousExecDenied(record.autonomousExec)
+      || tools === null
+      || memory === null
+      || autonomousExec === null
       || !providerValueAbsent(record.hostWorkspaceBookmark)
       || !providerValueAbsent(record.hostWorkspacePath)
       || typeof record.name !== "string"
@@ -111,10 +115,10 @@ export class FileOsaurusNativeAgentPolicyAuditor implements OsaurusNativeAgentPo
       updatedAt: record.updatedAt,
       configurationDigest: `sha256:${createHash("sha256").update(data).digest("hex")}`,
       providerAuthority: {
-        tools: "deny",
-        memory: "deny",
-        hostWorkspace: "deny",
-        autonomousExec: "deny"
+        tools,
+        memory,
+        hostWorkspace: "disabled",
+        autonomousExec
       }
     };
   }
@@ -212,6 +216,7 @@ export interface OsaurusNativeConnectorQualification {
   identity: OsaurusRuntimeIdentity | null;
   audit: OsaurusNativeAgentAudit | null;
   releaseBlockers: string[];
+  acceptedRisks: string[];
 }
 
 export class OsaurusNativeAgentConnector implements AgentConnector {
@@ -279,7 +284,9 @@ export class OsaurusNativeAgentConnector implements AgentConnector {
       throw new CallableAdapterOutputError("ADAPTER_WORKSPACE_INVALID", "Workspace context exceeds its bound.");
     }
     const state = await this.refresh().catch(() => null);
-    if (!state || state.audit.agentId !== this.initial.audit.agentId) {
+    if (!state
+      || state.audit.agentId !== this.initial.audit.agentId
+      || state.audit.configurationDigest !== this.initial.audit.configurationDigest) {
       throw new CallableAdapterOutputError("ADAPTER_RUNTIME_UNTRUSTED", "Osaurus Agent readiness changed.");
     }
     return {
@@ -327,7 +334,9 @@ export async function qualifyOsaurusNativeConnector(
     return blocked(
       discovery.state === "not_running" ? "not_detected" : "degraded",
       checkedAt,
-      discovery.state === "not_running" ? "OSAURUS_TRUSTED_RUNTIME_NOT_RUNNING" : "OSAURUS_RUNTIME_UNTRUSTED"
+      discovery.state === "not_running"
+        ? "OSAURUS_TRUSTED_RUNTIME_NOT_RUNNING"
+        : discovery.reasonCode ?? "OSAURUS_RUNTIME_UNTRUSTED"
     );
   }
   const identity = discovery.identity;
@@ -363,15 +372,18 @@ export async function qualifyOsaurusNativeConnector(
 
   const insights = await (options.inspectInsightsRetention
     ?? inspectCurrentOsaurusInsightsRetention)(identity).catch(() => "unknown" as const);
-  if (insights !== "disabled") {
+  if (insights === "unknown") {
     return blocked(
       "degraded",
       checkedAt,
-      insights === "retained" ? "OSAURUS_INSIGHTS_BODY_RETENTION" : "OSAURUS_INSIGHTS_POLICY_UNVERIFIED",
+      "OSAURUS_INSIGHTS_POLICY_UNVERIFIED",
       identity,
       audit
     );
   }
+  const acceptedRisks = insights === "retained"
+    ? ["OSAURUS_INSIGHTS_BODY_RETENTION_ACCEPTED"]
+    : [];
 
   const state = { identity, audit };
   const refresh = async (): Promise<QualifiedNativeState> => {
@@ -380,11 +392,12 @@ export async function qualifyOsaurusNativeConnector(
     return { identity: result.identity, audit: result.audit };
   };
   return {
-    readiness: readiness("ready", checkedAt),
+    readiness: readiness("ready", checkedAt, acceptedRisks[0]),
     connector: new OsaurusNativeAgentConnector(state, refresh),
     identity,
     audit,
-    releaseBlockers: []
+    releaseBlockers: [],
+    acceptedRisks
   };
 }
 
@@ -400,7 +413,8 @@ function blocked(
     connector: null,
     identity,
     audit,
-    releaseBlockers: [reasonCode]
+    releaseBlockers: [reasonCode],
+    acceptedRisks: []
   };
 }
 
@@ -428,10 +442,16 @@ function normalizeAgentId(value: unknown): string {
   return value.toUpperCase();
 }
 
-function autonomousExecDenied(value: unknown): boolean {
-  if (value === null || value === undefined) return true;
+function autonomousExecState(value: unknown): "enabled" | "disabled" | null {
+  if (value === null || value === undefined) return "disabled";
   const record = asRecord(value);
-  return record?.enabled === false;
+  return providerToggle(record?.enabled);
+}
+
+function providerToggle(value: unknown): "enabled" | "disabled" | null {
+  if (value === true) return "enabled";
+  if (value === false) return "disabled";
+  return null;
 }
 
 function providerValueAbsent(value: unknown): boolean {

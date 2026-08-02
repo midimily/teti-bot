@@ -49,6 +49,10 @@ import type {
   MemoryContextSelection
 } from "../../../../../core/memory/types.ts";
 import { validateMemoryContextSelection } from "../../../../../core/memory/validation.ts";
+import type {
+  DelegationTargetOption,
+  DelegationTargetSelection
+} from "../../../../../core/delegation/types.ts";
 import {
   WorkspaceStoreError,
   type CollaborationWorkspaceStore
@@ -274,6 +278,14 @@ export class TetiHostAgentKernel implements TetiHostAgent {
     capabilityId: string,
     requiredInputModes: readonly ("text" | "image")[] = ["text"]
   ): TetiHostAgentTarget | null {
+    return this.listTargets(offerId, capabilityId, requiredInputModes)[0] ?? null;
+  }
+
+  listTargets(
+    offerId: string,
+    capabilityId: string,
+    requiredInputModes: readonly ("text" | "image")[] = ["text"]
+  ): TetiHostAgentTarget[] {
     const candidates = [...this.connectors.values()]
       .filter((connector) => connector.computeOffer
         ? connector.computeOffer.offerId === offerId
@@ -285,14 +297,45 @@ export class TetiHostAgentKernel implements TetiHostAgent {
         return requiredInputModes.every((mode) => modes.includes(mode));
       })
       .sort((left, right) => left.descriptor.connectorId.localeCompare(right.descriptor.connectorId));
-    const connector = candidates[0];
-    return connector
-      ? {
+    return candidates.map((connector) => ({
           connectorId: connector.descriptor.connectorId,
           childAgentId: connector.descriptor.childAgentId,
-          capabilityId
-        }
-      : null;
+          capabilityId,
+          workspacePolicy: connector.descriptor.workspacePolicy ?? "snapshot",
+          outputModes: [...connector.descriptor.outputModes]
+        }));
+  }
+
+  listDelegationTargets(): DelegationTargetOption[] {
+    return [...this.connectors.values()]
+      .flatMap((connector) => connector.descriptor.capabilityIds.map((capabilityId) => ({
+        childAgentId: connector.descriptor.childAgentId,
+        connectorId: connector.descriptor.connectorId,
+        capabilityId,
+        resourceBindingId: connector.resourceBinding.bindingId,
+        workspacePolicy: connector.descriptor.workspacePolicy ?? "snapshot",
+        inputModes: [...connector.descriptor.inputModes],
+        outputModes: [...connector.descriptor.outputModes],
+        timeoutMs: connector.descriptor.timeoutMs,
+        maxOutputBytes: connector.descriptor.maxOutputBytes
+      })))
+      .sort((left, right) => [
+        left.childAgentId,
+        left.connectorId,
+        left.capabilityId
+      ].join(":").localeCompare([
+        right.childAgentId,
+        right.connectorId,
+        right.capabilityId
+      ].join(":")));
+  }
+
+  resolveDelegationTarget(selection: DelegationTargetSelection): DelegationTargetOption | null {
+    return this.listDelegationTargets().find((target) =>
+      target.childAgentId === selection.childAgentId
+      && target.connectorId === selection.connectorId
+      && target.capabilityId === selection.capabilityId
+    ) ?? null;
   }
 
   async prepareExecution(input: PrepareExecutionHandleInput): Promise<ExecutionHandle> {
@@ -475,9 +518,10 @@ export class TetiHostAgentKernel implements TetiHostAgent {
   ): Promise<CallableAdapterTaskSnapshot> {
     const descriptor = connector.descriptor;
     control.machine.start();
+    const deadlineRemainingMs = Math.max(1, Date.parse(authority.executionDeadlineAt) - this.now().getTime());
     const timeout = setTimeout(() => {
       this.requestTermination(control, "timeout", descriptor.connectorId);
-    }, descriptor.timeoutMs);
+    }, Math.min(descriptor.timeoutMs, deadlineRemainingMs));
     let workspacePath: string | null = null;
     let workspaceSnapshot: WorkspaceSnapshot | null = null;
     let workspaceContext: string | null = null;
@@ -623,6 +667,9 @@ export class TetiHostAgentKernel implements TetiHostAgent {
         && !(await this.executionRegistry.isCurrent(request.taskId, authority.executionEpoch))) {
         return control.machine.cancel("ADAPTER_CANCELED");
       }
+      if (this.now().getTime() >= Date.parse(authority.executionDeadlineAt)) {
+        return control.machine.fail("ADAPTER_TASK_EXPIRED");
+      }
       let stdout: string;
       try {
         stdout = output.readStdout();
@@ -663,6 +710,9 @@ export class TetiHostAgentKernel implements TetiHostAgent {
         if (this.executionRegistry
           && !(await this.executionRegistry.isCurrent(request.taskId, authority.executionEpoch))) {
           return control.machine.cancel("ADAPTER_CANCELED");
+        }
+        if (this.now().getTime() >= Date.parse(authority.executionDeadlineAt)) {
+          return control.machine.fail("ADAPTER_TASK_EXPIRED");
         }
         if (stagedInput.stagingPath) {
           await rm(stagedInput.stagingPath, { recursive: true, force: true });

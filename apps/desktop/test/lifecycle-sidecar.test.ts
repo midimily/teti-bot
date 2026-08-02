@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 import type { TetiAccount, TetiStatus } from "../../../core/account/model.ts";
 import {
   LIFECYCLE_MAX_LINE_BYTES,
+  LIFECYCLE_METHODS,
   LIFECYCLE_PROTOCOL_VERSION,
   type LifecycleRequest
 } from "../src/lifecycle-bridge/protocol.ts";
@@ -28,6 +30,86 @@ test("sidecar returns health response", async () => {
   assert.equal(response.ok, true);
   assert.equal(response.id, "r1");
   assert.equal(response.ok && response.result.status, "ok");
+});
+
+test("the native Tauri bridge allows every lifecycle protocol method", async () => {
+  const source = await readFile(
+    new URL("../src-tauri/src/lifecycle_bridge.rs", import.meta.url),
+    "utf8"
+  );
+  const allowlist = source.slice(
+    source.indexOf("fn is_allowed_method"),
+    source.indexOf("fn failure", source.indexOf("fn is_allowed_method"))
+  );
+  assert.ok(allowlist.length > 0, "Rust lifecycle allowlist must remain inspectable");
+  for (const method of LIFECYCLE_METHODS) {
+    assert.match(allowlist, new RegExp(`"${method.replaceAll(".", "\\.")}"`));
+  }
+});
+
+test("Osaurus Native settings get and set requests reach their sidecar dependencies", async () => {
+  const deps = fakeDependencies();
+  let savedAgentId: string | null | undefined;
+  deps.getOsaurusNativeChildSettings = async () => ({
+    schemaVersion: 1,
+    agentId: null,
+    readiness: "unconfigured"
+  });
+  deps.setOsaurusNativeChildAgentId = async (agentId) => {
+    savedAgentId = agentId;
+    return {
+      schemaVersion: 1,
+      agentId,
+      readiness: agentId ? "checking" : "unconfigured"
+    };
+  };
+
+  const current = await handleLifecycleRequest(request("osaurus.native.get"), deps);
+  const updated = await handleLifecycleRequest(request("osaurus.native.set", {
+    agentId: "123E4567-E89B-42D3-A456-426614174000"
+  }), deps);
+
+  assert.equal(current.ok, true);
+  assert.equal(updated.ok, true);
+  assert.equal(savedAgentId, "123E4567-E89B-42D3-A456-426614174000");
+});
+
+test("local Release Policy locks obsolete builds without using peer compatibility", async () => {
+  const deps = fakeDependencies({ account: createAccount("Milo") });
+  deps.getLocalReleaseStatus = async () => ({
+    schemaVersion: 1,
+    state: "update_required",
+    currentVersion: "0.2.8",
+    buildTimestamp: "2026-08-02T09:00:00.000Z",
+    source: "cache",
+    minimumSupportedVersion: "0.2.9",
+    policyVersion: 2,
+    effectiveAt: "2026-08-02T00:00:00.000Z"
+  });
+
+  const status = await handleLifecycleRequest(request("release.status"), deps);
+  const account = await handleLifecycleRequest(request("account.load"), deps);
+  const blocked = await handleLifecycleRequest(request("passport.get"), deps);
+
+  assert.equal(status.ok && status.result.state, "update_required");
+  assert.equal(account.ok, true, "read-only identity remains available to render the upgrade screen");
+  assert.equal(blocked.ok, false);
+  assert.equal(!blocked.ok && blocked.error.code, "APP_UPDATE_REQUIRED");
+  assert.equal(!blocked.ok && blocked.error.diagnosticCode, "RELEASE-UPDATE-REQUIRED");
+});
+
+test("unknown or unavailable Release Policy never creates a false global lock", async () => {
+  const deps = fakeDependencies();
+  deps.getLocalReleaseStatus = async () => ({
+    schemaVersion: 1,
+    state: "temporarily_unavailable",
+    currentVersion: "0.2.8",
+    buildTimestamp: "2026-08-02T09:00:00.000Z",
+    source: "none",
+    diagnosticCode: "RELEASE_POLICY_UNAVAILABLE"
+  });
+
+  assert.equal((await handleLifecycleRequest(request("passport.get"), deps)).ok, true);
 });
 
 test("sidecar reports missing account without creating one", async () => {
@@ -225,6 +307,7 @@ test("sidecar keeps Task send/list bounded and rejects remote execution fields",
     taskId: "task-001",
     capabilityId: "code-analysis",
     text: "Review this explicit text.",
+    executionMode: "long_horizon",
     ttlMs: 60_000
   }), deps);
   const listed = await handleLifecycleRequest(request("task.list", { limit: 1 }), deps);
@@ -250,6 +333,7 @@ test("sidecar keeps Task send/list bounded and rejects remote execution fields",
   }), deps);
 
   assert.equal(sent.ok, true);
+  assert.equal(sent.ok && "request" in sent.result && sent.result.request.executionMode, "long_horizon");
   assert.equal(sent.ok && "request" in sent.result && sent.result.request.taskId, "task-001");
   assert.equal(listed.ok, true);
   assert.equal(listed.ok && "records" in listed.result && listed.result.records.length, 1);
@@ -258,6 +342,63 @@ test("sidecar keeps Task send/list bounded and rejects remote execution fields",
   assert.equal(unsafeWorkspace.ok, false);
   assert.equal(!unsafeWorkspace.ok && unsafeWorkspace.error.code, "TASK_TRANSPORT_FAILED");
   assert.equal(LIFECYCLE_PROTOCOL_VERSION, 1, "Task transport does not create a second lifecycle protocol");
+});
+
+test("sidecar accepts only local explicit Delegation selections and rejects injected transport fields", async () => {
+  const deps = fakeDependencies({ account: createAccount("Milo") });
+  const service = await deps.getPeerConnectionService();
+  const target = {
+    childAgentId: "osaurus-runtime",
+    connectorId: "osaurus.runtime",
+    capabilityId: "general-text-assistance",
+    resourceBindingId: "binding:osaurus.runtime",
+    workspacePolicy: "none" as const,
+    inputModes: ["text"] as Array<"text" | "image">,
+    outputModes: ["text"] as Array<"text" | "image">,
+    timeoutMs: 60_000,
+    maxOutputBytes: 24 * 1_024
+  };
+  let approved: unknown;
+  deps.getPeerConnectionService = async () => ({
+    ...service,
+    async listTaskDelegationTargets() { return [clone(target)]; },
+    async approveTaskDelegation(_taskId: string, selections: unknown) {
+      approved = clone(selections);
+      return taskRecord("task-delegation-001", "working");
+    }
+  });
+
+  const listed = await handleLifecycleRequest(request("task.delegation.targets", {
+    taskId: "task-delegation-001"
+  }), deps);
+  const accepted = await handleLifecycleRequest(request("task.delegation.approve", {
+    taskId: "task-delegation-001",
+    selections: [{
+      childAgentId: target.childAgentId,
+      connectorId: target.connectorId,
+      capabilityId: target.capabilityId
+    }]
+  }), deps);
+  const injected = await handleLifecycleRequest(request("task.delegation.approve", {
+    taskId: "task-delegation-001",
+    selections: [{
+      childAgentId: target.childAgentId,
+      connectorId: target.connectorId,
+      capabilityId: target.capabilityId,
+      endpoint: "http://remote.example/agent"
+    }]
+  }), deps);
+
+  assert.equal(listed.ok, true);
+  assert.equal(listed.ok && Array.isArray(listed.result) && listed.result.length, 1);
+  assert.equal(accepted.ok, true);
+  assert.deepEqual(approved, [{
+    childAgentId: target.childAgentId,
+    connectorId: target.connectorId,
+    capabilityId: target.capabilityId
+  }]);
+  assert.equal(injected.ok, false);
+  assert.equal(!injected.ok && injected.error.code, "TASK_TRANSPORT_FAILED");
 });
 
 test("sidecar exposes durable execution query and explicit resume only through local lifecycle methods", async () => {
@@ -461,6 +602,7 @@ function fakeDependencies(options: { account?: TetiAccount | null } = {}): Lifec
               targetTetiId: "teti_peer00001",
               offerId: input.offerId ?? `capability:${input.capabilityId}`,
               capabilityId: input.capabilityId,
+              executionMode: input.executionMode ?? "single_stage",
               input: { kind: "text", text: input.text },
               createdAt: now,
               expiresAt: "2026-07-26T01:00:00.000Z"

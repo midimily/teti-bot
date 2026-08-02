@@ -1,10 +1,11 @@
 {
   "name": "teti-bot",
-  "version": "0.2.7",
+  "version": "0.2.10",
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --experimental-strip-types --test apps/desktop/test/*.test.ts core/account/*.test.ts core/ai-status/*.test.ts core/application/*.test.ts core/callability/*.test.ts core/connection/*.test.ts core/environment/*.test.ts core/identity/*.test.ts core/observation/*.test.ts core/passport/*.test.ts core/task/*.test.ts integrations/chatmail/*.test.ts services/discovery/*.test.ts services/discovery-worker/test/*.test.js",
+    "test": "node --experimental-strip-types --test apps/desktop/test/*.test.ts core/account/*.test.ts core/ai-status/*.test.ts core/application/*.test.ts core/callability/*.test.ts core/connection/*.test.ts core/delegation/*.test.ts core/environment/*.test.ts core/identity/*.test.ts core/observation/*.test.ts core/passport/*.test.ts core/task/*.test.ts integrations/chatmail/*.test.ts services/discovery/*.test.ts services/discovery-worker/test/*.test.js",
+    "test:security-recovery-rc": "node --experimental-strip-types --test core/workspace/*.test.ts core/delegation/*.test.ts core/task/*.test.ts apps/desktop/test/callable-adapter-kernel.test.ts apps/desktop/test/host-child-agent-core.test.ts apps/desktop/test/codex-callable-adapter.test.ts apps/desktop/test/codex-adapter-jsonl.test.ts apps/desktop/test/codex-image-output.test.ts apps/desktop/test/codebuddy-callability.test.ts apps/desktop/test/codebuddy-adapter-jsonl.test.ts apps/desktop/test/osaurus-connector.test.ts apps/desktop/test/osaurus-native-agent.test.ts apps/desktop/test/osaurus-runtime-identity.test.ts apps/desktop/test/loopback-http-transport.test.ts apps/desktop/test/workspace-store.test.ts apps/desktop/test/child-memory.test.ts apps/desktop/test/durable-execution-handle.test.ts apps/desktop/test/task-attachment-store.test.ts apps/desktop/test/task-transport-store.test.ts apps/desktop/test/peer-runtime.test.ts",
     "desktop:dev": "npm --prefix apps/desktop run dev",
     "desktop:tauri-dev": "npm --prefix apps/desktop run tauri:dev",
     "desktop:build": "npm --prefix apps/desktop run build",

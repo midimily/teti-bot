@@ -83,6 +83,48 @@ test("Workspace-pure execution resumes only from a captured explicit checkpoint 
   assert.equal(second.checkpointRef, resumable?.checkpointRef);
 });
 
+test("a tampered private checkpoint is rejected and loses its resume capability", async () => {
+  const root = await mkdtemp(join(tmpdir(), "teti-execution-checkpoint-tamper-"));
+  const workspace = join(root, "workspace");
+  await mkdir(workspace, { recursive: true });
+  const checkpoint = join(workspace, "state.json");
+  await writeFile(checkpoint, "{\"step\":4}\n", { mode: 0o600 });
+  const service = new DurableExecutionRegistry({
+    store: new MemoryExecutionHandleStore(),
+    checkpointRoot: join(root, "private-checkpoints")
+  });
+  const first = await service.prepare(input("tampered-checkpoint-task"), checkpointResume, "workspace_pure_compute");
+  await service.markRunning(first.taskId, first.executionEpoch, "pid:42");
+  assert.equal(await service.captureCheckpoint({
+    taskId: first.taskId,
+    executionEpoch: first.executionEpoch,
+    sourcePath: checkpoint,
+    workspacePath: workspace,
+    resumeEligible: true
+  }), true);
+  await service.finish(first.taskId, first.executionEpoch, "failed", "CHILD_CRASHED");
+  const captured = await service.get(first.taskId);
+  await writeFile(captured!.checkpointRef!, "{\"step\":999,\"injected\":true}\n");
+
+  await assert.rejects(
+    () => service.prepare(input(first.taskId, true), checkpointResume, "workspace_pure_compute"),
+    /EXECUTION_CHECKPOINT_INTEGRITY_FAILED/
+  );
+  const quarantined = await service.get(first.taskId);
+  assert.equal(quarantined?.resumeCapability, "none");
+  assert.equal(quarantined?.checkpointRef, null);
+  assert.match(quarantined?.progress.message ?? "", /完整性验证失败/);
+});
+
+test("the 0.2.9 Execution Handle store migrates without trusting legacy checkpoint bytes", async () => {
+  const root = await mkdtemp(join(tmpdir(), "teti-execution-store-migration-"));
+  const path = join(root, "execution-handles.json");
+  await writeFile(path, JSON.stringify({ schemaVersion: 1, handles: [] }), "utf8");
+  const migrated = await new FileExecutionHandleStore(path).load();
+  assert.equal(migrated.schemaVersion, 2);
+  assert.deepEqual(migrated.checkpointIntegrity, []);
+});
+
 test("old completion, late Artifact epoch, and cancel/resume race cannot overwrite the current execution", async () => {
   const root = await mkdtemp(join(tmpdir(), "teti-execution-race-"));
   const workspace = join(root, "workspace");

@@ -22,6 +22,7 @@ export function createRuntimeOwnedLifecycleDependencies(
       runtime.notifyRegistryRegistered(account);
     },
     heartbeatDiscovery: () => runtime.readDiscoveryAccount(),
+    getLocalReleaseStatus: () => runtime.getLocalReleaseStatus(),
     getPeerConnectionService: async () => runtime.getPeerConnectionFacade(),
     getPassportSnapshot: () => runtime.getPassportSnapshot(),
     setPassportSharing: (policy) => runtime.setPassportSharing(policy),

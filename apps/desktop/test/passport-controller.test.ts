@@ -67,6 +67,46 @@ test("timestamp-only Passport polling does not rebuild an expanded peer detail U
   controller.stop();
 });
 
+test("peer Passport refresh survives unavailable local Agent and Osaurus settings", async () => {
+  const client = new FakePassportClient();
+  client.failAgentRead = true;
+  client.failOsaurusRead = true;
+  client.snapshot.connections = [{
+    requestId: "remote-passport",
+    connectionState: "Confirmed",
+    direction: "incoming",
+    identity: {
+      tetiId: "teti_remote001",
+      address: "remote001@mail.seep.im",
+      displayName: "Remote"
+    },
+    createdAt: "2026-07-22T00:00:00.000Z",
+    updatedAt: "2026-07-22T00:00:01.000Z",
+    lastSeen: "2026-07-22T00:00:01.000Z",
+    compatibility: "compatible",
+    passport: {
+      state: "fresh",
+      resources: [],
+      agents: [],
+      capabilities: [],
+      bindings: []
+    }
+  }];
+  let changes = 0;
+  const controller = new PassportController({
+    client,
+    onChange: () => { changes += 1; }
+  });
+
+  controller.start();
+  await flushPromises();
+
+  assert.equal(controller.snapshot.passport.connections.length, 1);
+  assert.equal(controller.snapshot.passport.connections[0]?.passport.state, "fresh");
+  assert.equal(changes, 1, "valid remote Passport data must reach the UI independently");
+  controller.stop();
+});
+
 test("Passport sharing updates optimistically and rolls back on persistence failure", async () => {
   const client = new FakePassportClient();
   const controller = new PassportController({ client, onChange: () => undefined });
@@ -143,6 +183,8 @@ test("Agent management supports explicit rescan and local path override", async 
 class FakePassportClient implements PassportClient {
   getCalls = 0;
   failSet = false;
+  failAgentRead = false;
+  failOsaurusRead = false;
   snapshot = emptyPassportSnapshot(new Date("2026-07-22T00:00:00.000Z"));
   agents = emptyAgentManagementSnapshot(new Date("2026-07-22T00:00:00.000Z"));
 
@@ -159,7 +201,13 @@ class FakePassportClient implements PassportClient {
   }
 
   async getAgentManagement(): Promise<AgentManagementSnapshot> {
+    if (this.failAgentRead) throw new Error("agent observation unavailable");
     return structuredClone(this.agents);
+  }
+
+  async getOsaurusNativeChildSettings() {
+    if (this.failOsaurusRead) throw new Error("Osaurus settings unavailable");
+    return { schemaVersion: 1 as const, agentId: null, readiness: "unconfigured" as const };
   }
 
   async rescanAgents(): Promise<AgentManagementSnapshot> {

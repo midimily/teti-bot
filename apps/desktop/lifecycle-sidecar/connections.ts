@@ -45,6 +45,7 @@ import {
   type TetiTaskAttachmentPayload,
   type TetiTaskAttachmentReceiptPayload,
   type TetiTaskCancelPayload,
+  type TetiTaskInputPayload,
   type TetiTaskReceiptPayload,
   type TetiTaskStatusPayload
 } from "../../../core/task/transport.ts";
@@ -106,10 +107,15 @@ import {
 } from "./runtime/tasks/attachments.ts";
 import type { CollaborationWorkspaceStore } from "./runtime/workspaces/store.ts";
 import type { ExecutionHandle } from "../../../core/callability/execution.ts";
+import type {
+  DelegationTargetOption,
+  DelegationTargetSelection
+} from "../../../core/delegation/types.ts";
 
 const HEARTBEAT_INTERVAL_MS = 5_000;
 const AI_STATUS_SYNC_INTERVAL_MS = 10 * 60 * 1_000;
 const AI_STATUS_TTL_MS = 30 * 60 * 1_000;
+const PEER_PROFILE_CACHE_TTL_MS = 15 * 60 * 1_000;
 const TETI_TASK_ATTACHMENT_FILENAME_PATTERN = /^(?:teti-task-)?[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}\.(?:png|jpe?g)$/i;
 
 export interface PeerConnectionService {
@@ -117,6 +123,7 @@ export interface PeerConnectionService {
   request(query: string): Promise<PeerConnectionResult>;
   list(): Promise<PeerConnectionResult>;
   poll(): Promise<PeerConnectionResult>;
+  refreshPeerProfiles?(): Promise<PeerProfileRefreshResult>;
   accept(requestId: string): Promise<PeerConnectionResult>;
   reject(requestId: string): Promise<PeerConnectionResult>;
   getPassportSharing(): Promise<PassportSharingPolicy>;
@@ -128,10 +135,25 @@ export interface PeerConnectionService {
   stageTaskImage?(sourcePath: string): Promise<StagedTaskImage>;
   resolveTaskImage?(taskId: string, attachmentId: string): Promise<string>;
   approveTask?(taskId: string): Promise<CollaborationTaskTransportRecord>;
+  listTaskDelegationTargets?(taskId: string): Promise<DelegationTargetOption[]>;
+  approveTaskDelegation?(
+    taskId: string,
+    selections: DelegationTargetSelection[]
+  ): Promise<CollaborationTaskTransportRecord>;
   rejectTask?(taskId: string): Promise<CollaborationTaskTransportRecord>;
   cancelTask?(taskId: string): Promise<CollaborationTaskTransportRecord>;
   getTaskExecution?(taskId: string): Promise<ExecutionHandle | null>;
   resumeTask?(taskId: string): Promise<CollaborationTaskTransportRecord>;
+  submitTaskInput?(taskId: string, instruction: string): Promise<CollaborationTaskTransportRecord>;
+  pauseTask?(taskId: string): Promise<CollaborationTaskTransportRecord>;
+  continueTask?(taskId: string, childAgentId?: string): Promise<CollaborationTaskTransportRecord>;
+  completeTask?(taskId: string): Promise<CollaborationTaskTransportRecord>;
+  renewTask?(taskId: string, ttlMs: number): Promise<CollaborationTaskTransportRecord>;
+}
+
+export interface PeerProfileRefreshResult {
+  snapshot: PeerConnectionResult;
+  failedPeerCount: number;
 }
 
 interface PeerConnectionRuntimeOptions {
@@ -174,9 +196,11 @@ export class PeerConnectionRuntime implements PeerConnectionService {
   private readonly aiStatusSent = new Map<string, { at: string; signature: string }>();
   private readonly remoteAiStatus = new Map<string, RemoteAiStatusSnapshot>();
   private readonly identityCache = new Map<string, TetiIdentity>();
+  private readonly identityRefreshedAt = new Map<string, number>();
   private readonly messageProcessingFailures = new Map<number, number>();
   private ready = false;
   private queue: Promise<void> = Promise.resolve();
+  private profileQueue: Promise<void> = Promise.resolve();
   private settingsQueue: Promise<void> = Promise.resolve();
   private pendingAiStatusBroadcast: PassportSharingPolicy | null = null;
   private aiStatusBroadcastQueued = false;
@@ -258,6 +282,39 @@ export class PeerConnectionRuntime implements PeerConnectionService {
     return this.serial(async () => {
       await this.removeLocalIdentityConnections();
       return this.snapshot();
+    });
+  }
+
+  refreshPeerProfiles(): Promise<PeerProfileRefreshResult> {
+    return this.serialProfiles(async () => {
+      const nowMs = this.now().getTime();
+      const connections = canonicalPeerConnections(await this.connectionStorage.loadAll());
+      const peers = new Map<string, TetiConnectionRecord>();
+      for (const connection of connections) peers.set(connection.remoteTetiId, connection);
+      const failures: unknown[] = [];
+      for (const connection of peers.values()) {
+        const refreshedAt = this.identityRefreshedAt.get(connection.remoteTetiId) ?? 0;
+        if (this.identityCache.has(connection.remoteTetiId)
+          && nowMs - refreshedAt < PEER_PROFILE_CACHE_TTL_MS) continue;
+        try {
+          const discovered = await this.registry.getIdentity(connection.remoteTetiId);
+          if (!discovered) {
+            throw new Error("The peer Registry profile is not available yet.");
+          }
+          const identity = toTetiIdentity(discovered);
+          if (identity.address.toLowerCase() !== connection.remoteAddress.toLowerCase()) {
+            throw new Error("The peer Registry profile does not match the confirmed address.");
+          }
+          this.identityCache.set(identity.id, identity);
+          this.identityRefreshedAt.set(identity.id, nowMs);
+        } catch (error) {
+          failures.push(error);
+        }
+      }
+      return {
+        snapshot: await this.snapshotConnections(connections),
+        failedPeerCount: failures.length
+      };
     });
   }
 
@@ -455,6 +512,17 @@ export class PeerConnectionRuntime implements PeerConnectionService {
     return this.serial(() => this.taskTransport.approve(taskId));
   }
 
+  listTaskDelegationTargets(taskId: string): Promise<DelegationTargetOption[]> {
+    return this.serial(() => this.taskTransport.listDelegationTargets(taskId));
+  }
+
+  approveTaskDelegation(
+    taskId: string,
+    selections: DelegationTargetSelection[]
+  ): Promise<CollaborationTaskTransportRecord> {
+    return this.serial(() => this.taskTransport.approveDelegation(taskId, selections));
+  }
+
   rejectTask(taskId: string): Promise<CollaborationTaskTransportRecord> {
     return this.serial(() => this.taskTransport.reject(taskId));
   }
@@ -469,6 +537,26 @@ export class PeerConnectionRuntime implements PeerConnectionService {
 
   resumeTask(taskId: string): Promise<CollaborationTaskTransportRecord> {
     return this.serial(() => this.taskTransport.resume(taskId));
+  }
+
+  submitTaskInput(taskId: string, instruction: string): Promise<CollaborationTaskTransportRecord> {
+    return this.serial(() => this.taskTransport.submitLongHorizonInput(taskId, instruction));
+  }
+
+  pauseTask(taskId: string): Promise<CollaborationTaskTransportRecord> {
+    return this.serial(() => this.taskTransport.pauseLongHorizon(taskId));
+  }
+
+  continueTask(taskId: string, childAgentId?: string): Promise<CollaborationTaskTransportRecord> {
+    return this.serial(() => this.taskTransport.continueLongHorizon(taskId, childAgentId));
+  }
+
+  completeTask(taskId: string): Promise<CollaborationTaskTransportRecord> {
+    return this.serial(() => this.taskTransport.completeLongHorizon(taskId));
+  }
+
+  renewTask(taskId: string, ttlMs: number): Promise<CollaborationTaskTransportRecord> {
+    return this.serial(() => this.taskTransport.renewLongHorizon(taskId, ttlMs));
   }
 
   private scheduleAiStatusBroadcast(policy: PassportSharingPolicy): void {
@@ -493,6 +581,7 @@ export class PeerConnectionRuntime implements PeerConnectionService {
   private async resolveRemote(query: string): Promise<TetiIdentity> {
     const identity = await resolveIdentityQuery(query, this.registry);
     this.identityCache.set(identity.id, identity);
+    this.identityRefreshedAt.set(identity.id, this.now().getTime());
     return identity;
   }
 
@@ -698,6 +787,15 @@ export class PeerConnectionRuntime implements PeerConnectionService {
       return true;
     }
 
+    if (envelope.type === "teti.task.input") {
+      await this.taskTransport.receiveLongHorizonInput({
+        envelope: envelope as TetiApplicationEnvelope<TetiTaskInputPayload>,
+        connection,
+        receivedAt
+      });
+      return true;
+    }
+
     if (envelope.type === "teti.task.cancel") {
       await this.taskTransport.receiveCancel({
         envelope: envelope as TetiApplicationEnvelope<TetiTaskCancelPayload>,
@@ -868,6 +966,22 @@ export class PeerConnectionRuntime implements PeerConnectionService {
     aiStatusCount = 0
   ): Promise<PeerConnectionResult> {
     const connections = await reconcileConfirmedPeerConnections(this.connectionStorage);
+    return this.snapshotConnections(
+      connections,
+      receivedCount,
+      heartbeatCount,
+      requestOutcome,
+      aiStatusCount
+    );
+  }
+
+  private async snapshotConnections(
+    connections: readonly TetiConnectionRecord[],
+    receivedCount = 0,
+    heartbeatCount = 0,
+    requestOutcome?: PeerConnectionRequestOutcome,
+    aiStatusCount = 0
+  ): Promise<PeerConnectionResult> {
     const dtos = await Promise.all(connections.map((connection) => this.toDto(connection)));
     const result: PeerConnectionResult = {
       connections: dtos.sort(comparePeerConnections),
@@ -880,14 +994,7 @@ export class PeerConnectionRuntime implements PeerConnectionService {
   }
 
   private async toDto(connection: TetiConnectionRecord): Promise<PeerConnectionDto> {
-    let identity = this.identityCache.get(connection.remoteTetiId);
-    if (!identity) {
-      const discovered = await this.registry.getIdentity(connection.remoteTetiId).catch(() => null);
-      if (discovered) {
-        identity = toTetiIdentity(discovered);
-        this.identityCache.set(identity.id, identity);
-      }
-    }
+    const identity = this.identityCache.get(connection.remoteTetiId);
     const protocolCapability = await this.peerProtocolCapabilities
       .get(connection.remoteTetiId)
       .catch(() => undefined);
@@ -952,6 +1059,12 @@ export class PeerConnectionRuntime implements PeerConnectionService {
     this.settingsQueue = pending.then(() => undefined, () => undefined);
     return pending;
   }
+
+  private serialProfiles<T>(operation: () => Promise<T>): Promise<T> {
+    const pending = this.profileQueue.then(operation, operation);
+    this.profileQueue = pending.then(() => undefined, () => undefined);
+    return pending;
+  }
 }
 
 function validReceivedHeartbeatTimestamp(receivedAt: string | undefined, now: Date): string {
@@ -961,6 +1074,23 @@ function validReceivedHeartbeatTimestamp(receivedAt: string | undefined, now: Da
     return now.toISOString();
   }
   return new Date(timestamp).toISOString();
+}
+
+function canonicalPeerConnections(
+  connections: readonly TetiConnectionRecord[]
+): TetiConnectionRecord[] {
+  const canonicalByPeer = new Map<string, TetiConnectionRecord>();
+  for (const connection of connections) {
+    if (connection.state !== TetiConnectionState.Confirmed) continue;
+    const canonical = canonicalByPeer.get(connection.remoteTetiId);
+    if (!canonical || connection.requestId.localeCompare(canonical.requestId) < 0) {
+      canonicalByPeer.set(connection.remoteTetiId, connection);
+    }
+  }
+  return connections.filter((connection) => {
+    const canonical = canonicalByPeer.get(connection.remoteTetiId);
+    return !canonical || connection.requestId === canonical.requestId;
+  });
 }
 
 function supportsCurrentTaskProtocol(versions: readonly number[] | undefined): boolean {

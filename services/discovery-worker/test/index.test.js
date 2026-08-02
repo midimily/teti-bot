@@ -2,6 +2,60 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { handleRequest } from "../src/index.js";
 
+test("release policy identifies the local app version floor without inspecting peers", async () => {
+  const response = await handleRequest(
+    new Request("https://registry.test/release-policy"),
+    {}
+  );
+
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get("cache-control"), /max-age=300/);
+  assert.deepEqual((await response.json()).data, {
+    schemaVersion: 1,
+    policyVersion: 1,
+    channel: "beta",
+    minimumSupportedVersion: "0.2.8",
+    effectiveAt: "2026-08-02T00:00:00.000Z"
+  });
+});
+
+test("release policy remains available when the Registry KV data plane is unavailable", async () => {
+  const policy = await handleRequest(
+    new Request("https://registry.test/release-policy"),
+    {}
+  );
+  const registry = await handleRequest(
+    new Request("https://registry.test/discover"),
+    {}
+  );
+
+  assert.equal(policy.status, 200);
+  assert.equal(registry.status, 500);
+  assert.equal((await registry.json()).error, "KV_BINDING_MISSING");
+});
+
+test("release policy accepts controlled deployment overrides and rejects malformed floors", async () => {
+  const env = {
+    ...createEnv(),
+    TETI_RELEASE_POLICY_VERSION: "2",
+    TETI_MINIMUM_SUPPORTED_VERSION: "0.2.9",
+    TETI_RELEASE_POLICY_EFFECTIVE_AT: "2026-08-10T12:30:00Z"
+  };
+  const response = await handleRequest(new Request("https://registry.test/release-policy"), env);
+  assert.deepEqual((await response.json()).data, {
+    schemaVersion: 1,
+    policyVersion: 2,
+    channel: "beta",
+    minimumSupportedVersion: "0.2.9",
+    effectiveAt: "2026-08-10T12:30:00.000Z"
+  });
+
+  env.TETI_MINIMUM_SUPPORTED_VERSION = "latest";
+  const invalid = await handleRequest(new Request("https://registry.test/release-policy"), env);
+  assert.equal(invalid.status, 500);
+  assert.equal((await invalid.json()).error, "RELEASE_POLICY_INVALID");
+});
+
 test("register stores a public identity card with timestamps and ttl", async () => {
   const env = createEnv();
   const response = await handleRequest(jsonRequest("https://registry.test/register", {

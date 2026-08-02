@@ -14,6 +14,10 @@ import {
 import type { AgentTaskContentMode, CallableAgent } from "./types.ts";
 import type { WorkspaceAccess } from "../workspace/types.ts";
 import { validateWorkspaceAccess } from "../workspace/validation.ts";
+import type {
+  DelegationTargetOption,
+  DelegationTargetSelection
+} from "../delegation/types.ts";
 import {
   validateConnectorExecutionCapabilities,
   type ConnectorExecutionCapabilities,
@@ -23,7 +27,7 @@ import {
 } from "./execution.ts";
 
 export const TETI_HOST_CHILD_AGENT_CORE_VERSION = 2;
-export const TETI_EXECUTION_AUTHORITY_SCHEMA_VERSION = 3;
+export const TETI_EXECUTION_AUTHORITY_SCHEMA_VERSION = 4;
 export const TETI_LOCAL_TEXT_COMPUTE_OFFER_ID = "local.compute.general-text-assistance.v1";
 export const TETI_OSAURUS_NATIVE_TEXT_OFFER_ID = "local.agent.osaurus-native-text.v1";
 
@@ -139,11 +143,12 @@ export interface OsaurusAgentExecutionSpec {
   listenerPid: number;
   codeIdentityHash: string;
   agentConfigurationDigest: string;
+  /** Observed provider configuration, not a Teti grant. */
   providerAuthority: {
-    tools: "deny";
-    memory: "deny";
-    hostWorkspace: "deny";
-    autonomousExec: "deny";
+    tools: "enabled" | "disabled";
+    memory: "enabled" | "disabled";
+    hostWorkspace: "disabled";
+    autonomousExec: "enabled" | "disabled";
   };
 }
 
@@ -173,7 +178,7 @@ export interface AgentConnector {
 }
 
 export interface ExecutionAuthority {
-  schemaVersion: 3;
+  schemaVersion: 4;
   authorityId: string;
   taskId: string;
   connectorId: string;
@@ -182,6 +187,8 @@ export interface ExecutionAuthority {
   inputDigest: string;
   issuedAt: string;
   expiresAt: string;
+  /** Hard Host write deadline; checked before Artifact and Workspace commit. */
+  executionDeadlineAt: string;
   singleUse: true;
   workspaceId: string;
   workspaceRevision: number;
@@ -219,6 +226,8 @@ export interface TetiHostAgentTarget {
   connectorId: string;
   childAgentId: string;
   capabilityId: string;
+  workspacePolicy: AgentWorkspacePolicy;
+  outputModes: AgentTaskContentMode[];
 }
 
 export interface TetiHostAgent {
@@ -232,6 +241,14 @@ export interface TetiHostAgent {
     capabilityId: string,
     requiredInputModes?: readonly AgentTaskContentMode[]
   ): TetiHostAgentTarget | null;
+  listTargets(
+    offerId: string,
+    capabilityId: string,
+    requiredInputModes?: readonly AgentTaskContentMode[]
+  ): TetiHostAgentTarget[];
+  /** Receiver-local complete target catalog used only by explicit Delegation Plans. */
+  listDelegationTargets(): DelegationTargetOption[];
+  resolveDelegationTarget(selection: DelegationTargetSelection): DelegationTargetOption | null;
   prepareExecution(input: PrepareExecutionHandleInput): Promise<ExecutionHandle>;
   getExecutionHandle(taskId: string): Promise<ExecutionHandle | null>;
   reconcileExecutionHandles(): Promise<ExecutionHandle[]>;
@@ -520,11 +537,18 @@ export function validateExecutionSpec(
         || value.listenerPid <= 0
         || !SHA256_PATTERN.test(value.codeIdentityHash)
         || !SHA256_PATTERN.test(value.agentConfigurationDigest)
-        || Object.values(value.providerAuthority).some((decision) => decision !== "deny")) {
+        || !isProviderToggleState(value.providerAuthority.tools)
+        || !isProviderToggleState(value.providerAuthority.memory)
+        || value.providerAuthority.hostWorkspace !== "disabled"
+        || !isProviderToggleState(value.providerAuthority.autonomousExec)) {
         throw agentCoreError("EXECUTION_SPEC_OSAURUS_AGENT", "Osaurus Agent execution specification is invalid.");
       }
       return;
   }
+}
+
+function isProviderToggleState(value: unknown): value is "enabled" | "disabled" {
+  return value === "enabled" || value === "disabled";
 }
 
 export function validateExecutionAuthority(
@@ -543,6 +567,7 @@ export function validateExecutionAuthority(
     "inputDigest",
     "issuedAt",
     "expiresAt",
+    "executionDeadlineAt",
     "singleUse",
     "workspaceId",
     "workspaceRevision",
@@ -584,11 +609,16 @@ export function validateExecutionAuthority(
   }
   const issuedAt = Date.parse(value.issuedAt);
   const expiresAt = Date.parse(value.expiresAt);
+  const executionDeadlineAt = Date.parse(value.executionDeadlineAt);
   if (!Number.isFinite(issuedAt)
     || !Number.isFinite(expiresAt)
     || expiresAt <= issuedAt
     || expiresAt - issuedAt > 5 * 60 * 1_000
     || now.getTime() > expiresAt
+    || !Number.isFinite(executionDeadlineAt)
+    || executionDeadlineAt <= issuedAt
+    || executionDeadlineAt - issuedAt > 24 * 60 * 60 * 1_000
+    || now.getTime() >= executionDeadlineAt
     || issuedAt > now.getTime() + 30_000) {
     throw agentCoreError("EXECUTION_AUTHORITY_EXPIRY", "Execution Authority is expired or invalid.");
   }
@@ -623,6 +653,7 @@ export function issueExecutionAuthority(
     authorityId?: string;
     issuedAt?: string;
     expiresAt?: string;
+    executionDeadlineAt?: string;
     now?: Date;
     ttlMs?: number;
     workspaceId?: string;
@@ -636,7 +667,7 @@ export function issueExecutionAuthority(
   const expiresAt = options.expiresAt
     ?? new Date(now.getTime() + (options.ttlMs ?? 2 * 60 * 1_000)).toISOString();
   return {
-    schemaVersion: 3,
+    schemaVersion: 4,
     authorityId: options.authorityId ?? randomUUID(),
     taskId: request.taskId,
     connectorId: request.adapterId,
@@ -645,6 +676,8 @@ export function issueExecutionAuthority(
     inputDigest: digestHostAgentTaskInput(request),
     issuedAt,
     expiresAt,
+    executionDeadlineAt: options.executionDeadlineAt
+      ?? new Date(now.getTime() + 15 * 60 * 1_000).toISOString(),
     singleUse: true,
     workspaceId: options.workspaceId ?? `workspace:${request.taskId}`,
     workspaceRevision: options.workspaceRevision ?? 1,

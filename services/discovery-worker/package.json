@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "audit:ids": "node scripts/audit-kv-public-ids.mjs",
-    "test": "node --test"
+    "test": "node --test",
+    "verify:release-policy": "node scripts/verify-release-policy.mjs https://teti-registry.seep2026.workers.dev/release-policy 0.2.8 1"
   }
 }

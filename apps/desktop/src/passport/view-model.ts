@@ -20,6 +20,7 @@ import type {
 import type { PassportControllerSnapshot } from "./controller.ts";
 import type { AgentObservation } from "../../../../core/observation/types.ts";
 import { emptyAgentManagementSnapshot } from "../../../../core/observation/management.ts";
+import { TETI_BUILD_INFO } from "../build-info.ts";
 
 export type ResourceTone = "free" | "plus" | "pro" | "unknown" | "unavailable";
 export type ResourceIcon = "codex" | "generic";
@@ -132,11 +133,14 @@ export interface PassportSettingsViewModel {
   busy: boolean;
   error?: string;
   agentManagement: AgentManagementViewModel;
+  showOsaurusNativeConfiguration: boolean;
   osaurusNativeAgentId: string;
   osaurusNativeBusy: boolean;
   osaurusNativeStatus: "未配置" | "安全资格检查中" | "安全资格未通过" | "可调用";
   osaurusNativeReason?: string;
   osaurusNativeError?: string;
+  appVersion: string;
+  buildTimestamp: string;
 }
 
 export interface RemotePassportViewModel {
@@ -208,6 +212,7 @@ export function toPassportViewModel(
       busy: snapshot.sharingBusy,
       ...(snapshot.sharingError ? { error: snapshot.sharingError } : {}),
       agentManagement: toAgentManagementViewModel(snapshot),
+      showOsaurusNativeConfiguration: isOsaurusLocallyAvailable(snapshot),
       osaurusNativeAgentId: snapshot.osaurusNative?.agentId ?? "",
       osaurusNativeBusy: snapshot.osaurusNativeBusy ?? false,
       osaurusNativeStatus: snapshot.osaurusNative?.readiness === "ready"
@@ -219,12 +224,21 @@ export function toPassportViewModel(
             ? "安全资格检查中"
             : "未配置",
       ...(snapshot.osaurusNative?.reasonCode
-        ? { osaurusNativeReason: snapshot.osaurusNative.reasonCode }
+        ? { osaurusNativeReason: formatOsaurusNativeReason(snapshot.osaurusNative.reasonCode) }
         : {}),
-      ...(snapshot.osaurusNativeError ? { osaurusNativeError: snapshot.osaurusNativeError } : {})
+      ...(snapshot.osaurusNativeError ? { osaurusNativeError: snapshot.osaurusNativeError } : {}),
+      appVersion: TETI_BUILD_INFO.appVersion,
+      buildTimestamp: TETI_BUILD_INFO.buildTimestamp
     },
     connections: snapshot.passport.connections.map((connection) => toConnectionCardViewModel(connection, now))
   };
+}
+
+export function formatOsaurusNativeReason(reasonCode: string): string {
+  if (reasonCode === "OSAURUS_INSIGHTS_BODY_RETENTION_ACCEPTED") {
+    return "Osaurus Insights 会保留请求正文；已按本机 Agent 信任策略允许调用。";
+  }
+  return reasonCode;
 }
 
 const BUILTIN_MANAGED_AGENT_IDS = new Set([
@@ -239,9 +253,12 @@ function toAgentManagementViewModel(snapshot: PassportControllerSnapshot): Agent
   const management = snapshot.agentManagement ?? emptyAgentManagementSnapshot();
   const readyToDisplay = management.revision > 0;
   const scanning = snapshot.agentBusy || management.state === "discovering";
-  const installedCount = management.agents.filter(
-    (agent) => agent.installation?.state === "installed"
-  ).length;
+  const availableAgents = readyToDisplay
+    ? management.agents.filter(isLocallyAvailableAgent)
+    : [];
+  const discoveryLabel = availableAgents.length > 0
+    ? `已发现 ${availableAgents.length}`
+    : "未发现本机 Agent";
   const statusLabel = !readyToDisplay
     ? "正在发现本机 Agent…"
     : management.state === "discovering"
@@ -249,8 +266,8 @@ function toAgentManagementViewModel(snapshot: PassportControllerSnapshot): Agent
       : management.state === "disabled"
         ? "Agent 发现已关闭"
         : management.state === "degraded"
-          ? `已发现 ${installedCount}/${management.agents.length} · 部分检测未完成`
-          : `已发现 ${installedCount}/${management.agents.length}`;
+          ? `${discoveryLabel} · 部分检测未完成`
+          : discoveryLabel;
   const safeError = snapshot.agentError
     ?? (readyToDisplay && management.errors.length > 0
       ? "部分检测器未完成，不影响其他 Agent。"
@@ -260,7 +277,7 @@ function toAgentManagementViewModel(snapshot: PassportControllerSnapshot): Agent
     scanning,
     statusLabel,
     agents: readyToDisplay
-      ? management.agents
+      ? availableAgents
           .map((agent) => toManagedAgentViewModel(
             agent,
             management.pathOverrides[agent.agentId] ?? "",
@@ -270,6 +287,17 @@ function toAgentManagementViewModel(snapshot: PassportControllerSnapshot): Agent
       : [],
     ...(safeError ? { error: safeError } : {})
   };
+}
+
+function isLocallyAvailableAgent(agent: AgentObservation): boolean {
+  return agent.installation?.state === "installed" || agent.runtime?.state === "running";
+}
+
+function isOsaurusLocallyAvailable(snapshot: PassportControllerSnapshot): boolean {
+  const management = snapshot.agentManagement ?? emptyAgentManagementSnapshot();
+  if (management.revision <= 0) return false;
+  const osaurus = management.agents.find((agent) => agent.agentId === "osaurus");
+  return osaurus ? isLocallyAvailableAgent(osaurus) : false;
 }
 
 const MANAGED_AGENT_TONE_PRIORITY: Record<AgentTone, number> = {

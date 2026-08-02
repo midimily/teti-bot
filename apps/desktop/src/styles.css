@@ -33,6 +33,7 @@
   --teti-notch-width: 0px;
   --teti-notch-height: 0px;
   --teti-screen-height: 0px;
+  --teti-header-panel-viewport-offset: calc(74px + var(--teti-safe-top-inset));
   --teti-scrollbar-thumb: rgba(45, 103, 151, 0.14);
   --teti-scrollbar-thumb-hover: rgba(45, 103, 151, 0.24);
   --teti-radius-island: 28px;
@@ -497,7 +498,7 @@ input {
 
 .teti-task-selectors {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
 }
 
@@ -779,6 +780,170 @@ input {
   white-space: pre-wrap;
 }
 
+.teti-task-long-horizon {
+  display: grid;
+  gap: 8px;
+  border-color: rgba(26, 136, 255, 0.26);
+  background: rgba(236, 247, 255, 0.68);
+}
+
+.teti-task-long-horizon-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 10px;
+}
+
+.teti-task-long-horizon-head span,
+.teti-task-long-horizon > p,
+.teti-task-stage-list span {
+  color: var(--teti-text-secondary);
+  font-size: 9px;
+}
+
+.teti-task-long-horizon-progress {
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: rgba(26, 136, 255, 0.08);
+}
+
+.teti-task-delegation-approval {
+  display: grid;
+  gap: 8px;
+  border-color: rgba(26, 136, 255, 0.32);
+  background: rgba(236, 247, 255, 0.76);
+}
+
+.teti-task-delegation-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 10px;
+}
+
+.teti-task-delegation-heading span {
+  padding: 3px 7px;
+  border-radius: 999px;
+  background: rgba(42, 77, 112, 0.08);
+  color: var(--teti-text-secondary);
+  font-size: 8px;
+  font-weight: 700;
+}
+
+.teti-task-delegation-editor {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+  padding-left: 20px;
+}
+
+.teti-task-delegation-editor li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 5px 8px;
+}
+
+.teti-task-delegation-editor li > small {
+  grid-column: 1;
+  color: var(--teti-text-secondary);
+  font-size: 8px;
+  overflow-wrap: anywhere;
+}
+
+.teti-task-delegation-editor .teti-task-secondary {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  min-width: 58px;
+}
+
+.teti-task-delegation-controls {
+  display: flex;
+  justify-content: flex-end;
+  gap: 7px;
+}
+
+.teti-task-delegation-boundary {
+  padding: 6px 8px;
+  border-left: 2px solid var(--teti-blue-primary);
+  background: rgba(255, 255, 255, 0.46);
+}
+
+.teti-task-delegation-plan small {
+  color: var(--teti-text-tertiary, var(--teti-text-secondary));
+  font-size: 8px;
+  overflow-wrap: anywhere;
+}
+
+.teti-task-stage-list,
+.teti-task-audit ol {
+  display: grid;
+  gap: 5px;
+  margin: 0;
+  padding-left: 18px;
+}
+
+.teti-task-stage-list li {
+  display: grid;
+  gap: 2px;
+}
+
+.teti-task-stage-list strong {
+  font-size: 9px;
+}
+
+.teti-task-stage-input,
+.teti-task-stage-controls {
+  display: flex;
+  align-items: end;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+
+.teti-task-stage-input textarea {
+  box-sizing: border-box;
+  min-width: 0;
+  min-height: 58px;
+  flex: 1 1 180px;
+  padding: 8px;
+  resize: vertical;
+  border: 1px solid var(--teti-border-strong);
+  border-radius: 9px;
+  outline: none;
+  background: rgba(255, 255, 255, 0.74);
+  color: var(--teti-text-primary);
+  font: inherit;
+  font-size: 10px;
+}
+
+.teti-task-stage-instruction {
+  padding: 7px 8px;
+  border-left: 2px solid var(--teti-blue-primary);
+  background: rgba(255, 255, 255, 0.52);
+}
+
+.teti-task-stage-controls .teti-task-select-label {
+  flex: 1 1 150px;
+}
+
+.teti-task-audit {
+  color: var(--teti-text-secondary);
+  font-size: 9px;
+}
+
+.teti-task-audit summary {
+  cursor: pointer;
+  font-weight: 650;
+}
+
+.teti-task-audit ol {
+  max-height: 110px;
+  margin-top: 7px;
+  overflow-y: auto;
+}
+
 .teti-task-image-pending {
   display: grid;
   width: 84px;
@@ -972,18 +1137,20 @@ input {
 
 .teti-sharing-panel {
   width: 330px;
-  max-height: min(430px, calc(100vh - 24px));
+  max-height: min(430px, calc(100vh - var(--teti-header-panel-viewport-offset)));
   overflow-y: auto;
   overscroll-behavior: contain;
+  scroll-padding-block: 12px;
   scrollbar-color: var(--teti-scrollbar-thumb) transparent;
   scrollbar-width: thin;
 }
 
 .teti-ai-status-panel {
   width: min(304px, calc(100vw - 112px));
-  max-height: min(380px, calc(100vh - 24px));
+  max-height: min(380px, calc(100vh - var(--teti-header-panel-viewport-offset)));
   overflow-y: auto;
   overscroll-behavior: contain;
+  scroll-padding-block: 12px;
   scrollbar-color: var(--teti-scrollbar-thumb) transparent;
   scrollbar-width: thin;
 }
@@ -1355,6 +1522,28 @@ input {
   color: var(--teti-error);
 }
 
+.teti-build-information {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 4px 10px;
+  margin-top: 10px;
+  padding: 9px 10px 4px;
+  border-top: 1px solid rgba(43, 135, 217, 0.11);
+  color: var(--teti-text-disabled);
+  font-size: 8px;
+  line-height: 12px;
+}
+
+.teti-build-information code,
+.teti-build-information time {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--teti-text-secondary);
+  font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+  font-size: inherit;
+  user-select: text;
+}
+
 .teti-sharing-error {
   color: var(--teti-error) !important;
 }
@@ -1594,6 +1783,19 @@ input {
 .teti-osaurus-native-error {
   color: var(--teti-error);
   font-size: 8px;
+}
+
+.teti-osaurus-native-reason {
+  font-size: 8px;
+  line-height: 1.4;
+}
+
+.teti-osaurus-native-reason.is-warning {
+  color: #8f681d;
+}
+
+.teti-osaurus-native-reason.is-error {
+  color: var(--teti-error);
 }
 
 .teti-child-memory {
@@ -2029,6 +2231,12 @@ input {
 
 :root[data-has-notch="true"] .teti-island--expanded {
   padding: calc(var(--teti-safe-top-inset) + 16px) 36px 20px;
+}
+
+:root[data-has-notch="true"] {
+  --teti-header-panel-viewport-offset: calc(
+    max(2px, calc((var(--teti-safe-top-inset) - 28px) / 2)) + 48px
+  );
 }
 
 :root[data-has-notch="true"] .teti-header {
@@ -2635,6 +2843,36 @@ input {
   color: var(--teti-text-secondary);
   text-align: left;
   white-space: normal;
+}
+
+.teti-peer-compatibility {
+  display: grid;
+  height: 100%;
+  align-content: center;
+  gap: 1px;
+}
+
+.teti-peer-compatibility strong,
+.teti-peer-compatibility small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.teti-peer-compatibility strong {
+  color: #a86012;
+  font-size: 9px;
+  line-height: 12px;
+}
+
+.teti-peer-compatibility small {
+  color: var(--teti-text-disabled);
+  font-size: 7px;
+  line-height: 10px;
+}
+
+.teti-peer-compatibility.is-unknown strong {
+  color: #8a6b22;
 }
 
 .teti-connection-row.is-confirmed .teti-peer-ai-status {

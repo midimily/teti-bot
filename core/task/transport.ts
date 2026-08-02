@@ -9,16 +9,168 @@ import type {
   TaskWorkspaceBinding,
   TaskWorkspaceRequest
 } from "../workspace/types.ts";
+import type { ExecutionProgress } from "../callability/execution.ts";
+import type { DelegationPlanState } from "../delegation/types.ts";
 
 export const TETI_TASK_TRANSPORT_SCHEMA_VERSION = 1;
-export const TETI_TASK_TRANSPORT_STORE_SCHEMA_VERSION = 2;
-export const TETI_SUPPORTED_TASK_PROTOCOL_VERSIONS = [5] as const;
+export const TETI_TASK_TRANSPORT_STORE_SCHEMA_VERSION = 4;
+export const TETI_SUPPORTED_TASK_PROTOCOL_VERSIONS = [6] as const;
 export const DEFAULT_TASK_REQUEST_TTL_MS = 60 * 60 * 1_000;
 export const MAX_TASK_CLOCK_SKEW_MS = 5 * 60 * 1_000;
 export const MAX_TASK_PROTOCOL_VERSIONS = 8;
 export const MAX_TASK_TRANSPORT_RECORDS = 512;
 
-export type TetiTaskProtocolVersion = 1 | 2 | 3 | 4 | 5;
+export type TetiTaskProtocolVersion = 1 | 2 | 3 | 4 | 5 | 6;
+
+export const LONG_HORIZON_LIMITS = {
+  maximumStages: 16,
+  maximumArtifacts: 32,
+  maximumAuditEvents: 256,
+  maximumInputs: 32,
+  maximumInstructionBytes: 8 * 1024,
+  maximumRenewals: 8,
+  maximumRenewalMs: 24 * 60 * 60 * 1_000,
+  maximumLifetimeMs: 7 * 24 * 60 * 60 * 1_000
+} as const;
+
+export type LongHorizonPhase =
+  | "pending_approval"
+  | "working"
+  | "input_required"
+  | "paused"
+  | "completed"
+  | "failed"
+  | "canceled"
+  | "expired";
+
+export type LongHorizonStageState =
+  | "queued"
+  | "working"
+  | "completed"
+  | "failed"
+  | "canceled"
+  | "interrupted";
+
+export interface LongHorizonChildTarget {
+  childAgentId: string;
+  connectorId: string;
+}
+
+export interface LongHorizonStage {
+  stageId: string;
+  stageIndex: number;
+  executionTaskId: string;
+  childAgentId: string;
+  connectorId: string;
+  state: LongHorizonStageState;
+  workspaceRevision: number;
+  workspaceMutation: "none" | "snapshot_commit";
+  inputId: string | null;
+  instructionDigest: string;
+  progress: ExecutionProgress;
+  artifactIds: string[];
+  checkpointAvailable: boolean;
+  startedAt: string;
+  updatedAt: string;
+  completedAt?: string;
+  safeErrorCode?: string;
+}
+
+export interface LongHorizonInput {
+  inputId: string;
+  instruction: string;
+  instructionDigest: string;
+  source: "remote_requester" | "local_user";
+  createdAt: string;
+  consumedAt?: string;
+}
+
+export interface LongHorizonInputRequest {
+  requestId: string;
+  prompt: string;
+  createdAt: string;
+}
+
+export interface LongHorizonCheckpoint {
+  checkpointId: string;
+  stageIndex: number;
+  workspaceRevision: number;
+  artifactIds: string[];
+  digest: string;
+  createdAt: string;
+}
+
+export interface LongHorizonArtifactEntry {
+  artifactId: string;
+  stageIndex: number;
+  role: "intermediate" | "final";
+  createdAt: string;
+}
+
+export interface LongHorizonAuditEvent {
+  eventId: string;
+  sequence: number;
+  action:
+    | "session_created"
+    | "stage_started"
+    | "progress_updated"
+    | "artifact_published"
+    | "checkpoint_created"
+    | "input_requested"
+    | "input_received"
+    | "pause_requested"
+    | "paused"
+    | "resumed"
+    | "child_selected"
+    | "stage_failed"
+    | "renewed"
+    | "completed"
+    | "canceled"
+    | "expired"
+    | "restart_reconciled";
+  actor: "host" | "local_user" | "remote_peer" | "child_agent";
+  stageIndex: number | null;
+  timestamp: string;
+  childAgentId?: string;
+  artifactId?: string;
+  inputId?: string;
+  workspaceRevision?: number;
+  safeErrorCode?: string;
+}
+
+/** Receiver-local durable orchestration record; instructions never enter Passport. */
+export interface LongHorizonTaskState {
+  schemaVersion: 1;
+  phase: LongHorizonPhase;
+  currentStageIndex: number;
+  workspaceRevision: number;
+  progress: ExecutionProgress;
+  continuationExpiresAt: string;
+  renewalCount: number;
+  pauseRequested: boolean;
+  pendingInput: LongHorizonInput | null;
+  inputRequest: LongHorizonInputRequest | null;
+  availableChildAgents: LongHorizonChildTarget[];
+  stages: LongHorizonStage[];
+  checkpoints: LongHorizonCheckpoint[];
+  artifacts: LongHorizonArtifactEntry[];
+  audit: LongHorizonAuditEvent[];
+  updatedAt: string;
+}
+
+/** Privacy-minimized peer projection. Audit and Child bindings stay receiver-local. */
+export interface TetiTaskLongHorizonStatus {
+  schemaVersion: 1;
+  phase: Exclude<LongHorizonPhase, "pending_approval">;
+  currentStageIndex: number;
+  workspaceRevision: number;
+  completedUnits: number | null;
+  totalUnits: number | null;
+  progressMessage: string | null;
+  continuationExpiresAt: string;
+  inputRequestId?: string;
+  finalArtifactId?: string;
+}
 
 export type TetiTaskReceiptStatus =
   | "received"
@@ -111,7 +263,7 @@ export interface TaskAttachmentDiagnostic {
 }
 
 export interface TetiTaskStatusPayload {
-  schemaVersion: 1;
+  schemaVersion: 1 | 2;
   taskId: string;
   requesterTetiId: string;
   targetTetiId: string;
@@ -119,6 +271,18 @@ export interface TetiTaskStatusPayload {
   state: Exclude<CollaborationTaskState, "unknown" | "submitted">;
   updatedAt: string;
   safeErrorCode?: string;
+  longHorizon?: TetiTaskLongHorizonStatus;
+}
+
+export interface TetiTaskInputPayload {
+  schemaVersion: 1;
+  taskId: string;
+  requesterTetiId: string;
+  targetTetiId: string;
+  inputId: string;
+  expectedStageIndex: number;
+  instruction: string;
+  createdAt: string;
 }
 
 export interface TetiTaskCancelPayload {
@@ -130,12 +294,14 @@ export interface TetiTaskCancelPayload {
 }
 
 export interface TetiTaskArtifactPayload {
-  schemaVersion: 1;
+  schemaVersion: 1 | 2;
   taskId: string;
   requesterTetiId: string;
   targetTetiId: string;
   artifact: CollaborationTaskArtifact;
   createdAt: string;
+  stageIndex?: number;
+  role?: "intermediate" | "final";
 }
 
 export interface SendCollaborationTaskInput {
@@ -147,6 +313,7 @@ export interface SendCollaborationTaskInput {
   attachments?: TaskImagePart[];
   workspace?: TaskWorkspaceRequest;
   ttlMs?: number;
+  executionMode?: "single_stage" | "long_horizon";
 }
 
 export type TaskTransportDirection = "incoming" | "outgoing";
@@ -193,9 +360,19 @@ export interface CollaborationTaskTransportRecord {
   cancelPending?: boolean;
   cancelSentAt?: string;
   artifactPending?: boolean;
+  sentArtifactIds?: string[];
   artifactAttachmentsReady?: boolean;
   attachmentsReady?: boolean;
   artifacts?: CollaborationTaskArtifact[];
+  longHorizon?: LongHorizonTaskState;
+  /** Receiver-local deterministic Host delegation; never enters Task or Passport. */
+  delegationPlan?: DelegationPlanState;
+  /** Requester-local projection received from the Host; never contains Child bindings or audit. */
+  peerLongHorizon?: TetiTaskLongHorizonStatus;
+  /** Requester-local stage labels for append-only Artifacts; safe under message reordering. */
+  peerArtifactMetadata?: LongHorizonArtifactEntry[];
+  inputPending?: TetiTaskInputPayload;
+  inputSentAt?: string;
   safeErrorCode?: string;
 }
 
@@ -241,7 +418,7 @@ export interface CollaborationTaskTransportSnapshot {
 }
 
 export interface TetiTaskTransportStoreState {
-  schemaVersion: 2;
+  schemaVersion: 4;
   records: CollaborationTaskTransportRecord[];
   peers: TetiTaskPeerProtocolCapability[];
 }

@@ -4,6 +4,13 @@ const MAX_JSON_BYTES = 16 * 1024;
 const MAX_PUBLIC_PROFILE_BYTES = 4 * 1024;
 const MAX_PUBLIC_KEY_BYTES = 12 * 1024;
 const MAX_DISPLAY_NAME_CHARACTERS = 10;
+const DEFAULT_RELEASE_POLICY = Object.freeze({
+  schemaVersion: 1,
+  policyVersion: 1,
+  channel: "beta",
+  minimumSupportedVersion: "0.2.8",
+  effectiveAt: "2026-08-02T00:00:00.000Z"
+});
 const ID_PATTERN = /^teti_[a-z0-9]{9}$/;
 const CHATMAIL_LOCAL_PART_PATTERN = /^[a-z0-9]{9}$/;
 const CHATMAIL_DOMAIN = "mail.seep.im";
@@ -46,10 +53,16 @@ export async function handleRequest(request, env) {
   }
 
   try {
-    assertRegistry(env);
-
     const url = new URL(request.url);
     const pathname = normalizePathname(url.pathname);
+
+    // Release compatibility is a control-plane concern and must remain
+    // available even when the Registry KV data plane is unavailable.
+    if (request.method === "GET" && pathname === "/release-policy") {
+      return releasePolicy(env);
+    }
+
+    assertRegistry(env);
 
     if (request.method === "POST" && pathname === "/register") {
       return await registerIdentity(request, env);
@@ -76,6 +89,54 @@ export async function handleRequest(request, env) {
 
     return errorResponse(500, "INTERNAL_ERROR", "Unexpected registry error.");
   }
+}
+
+function releasePolicy(env) {
+  const policy = {
+    schemaVersion: 1,
+    policyVersion: readPositiveInteger(
+      env.TETI_RELEASE_POLICY_VERSION,
+      DEFAULT_RELEASE_POLICY.policyVersion,
+      "TETI_RELEASE_POLICY_VERSION"
+    ),
+    channel: "beta",
+    minimumSupportedVersion: readTetiVersion(
+      env.TETI_MINIMUM_SUPPORTED_VERSION,
+      DEFAULT_RELEASE_POLICY.minimumSupportedVersion
+    ),
+    effectiveAt: readIsoTimestamp(
+      env.TETI_RELEASE_POLICY_EFFECTIVE_AT,
+      DEFAULT_RELEASE_POLICY.effectiveAt
+    )
+  };
+  return jsonResponse(200, { success: true, data: policy }, {
+    "cache-control": "public, max-age=300"
+  });
+}
+
+function readPositiveInteger(value, fallback, label) {
+  if (value === undefined || value === null || value === "") return fallback;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 1) {
+    throw new RegistryError(500, "RELEASE_POLICY_INVALID", `${label} is invalid.`);
+  }
+  return parsed;
+}
+
+function readTetiVersion(value, fallback) {
+  const version = value === undefined || value === null || value === "" ? fallback : value;
+  if (typeof version !== "string" || !/^\d+\.\d+\.\d+$/.test(version)) {
+    throw new RegistryError(500, "RELEASE_POLICY_INVALID", "TETI_MINIMUM_SUPPORTED_VERSION is invalid.");
+  }
+  return version;
+}
+
+function readIsoTimestamp(value, fallback) {
+  const timestamp = value === undefined || value === null || value === "" ? fallback : value;
+  if (typeof timestamp !== "string" || !Number.isFinite(Date.parse(timestamp))) {
+    throw new RegistryError(500, "RELEASE_POLICY_INVALID", "TETI_RELEASE_POLICY_EFFECTIVE_AT is invalid.");
+  }
+  return new Date(timestamp).toISOString();
 }
 
 async function registerIdentity(request, env) {
@@ -498,10 +559,13 @@ function invalid(message) {
   return { valid: false, message };
 }
 
-function jsonResponse(status, body) {
+function jsonResponse(status, body, extraHeaders = {}) {
   return new Response(JSON.stringify(body), {
     status,
-    headers: responseHeaders({ "content-type": "application/json; charset=utf-8" })
+    headers: responseHeaders({
+      "content-type": "application/json; charset=utf-8",
+      ...extraHeaders
+    })
   });
 }
 

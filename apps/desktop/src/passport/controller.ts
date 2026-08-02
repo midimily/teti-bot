@@ -42,6 +42,7 @@ export class PassportController {
   private active = false;
   private timer: unknown;
   private readInFlight?: Promise<void>;
+  private localSettingsReadInFlight?: Promise<void>;
   private sharingRevision = 0;
   private persistedSharing: PassportSharingPolicy;
   private sharingWrite?: Promise<void>;
@@ -197,25 +198,14 @@ export class PassportController {
   }
 
   private async readSnapshot(): Promise<void> {
+    // Agent discovery and provider-specific settings are local enhancements. They must
+    // never delay or suppress a valid peer Passport snapshot.
+    void this.refreshLocalSettings();
     try {
-      const [passport, agentManagement, osaurusNative] = await Promise.all([
-        this.client.getSnapshot(),
-        this.client.getAgentManagement(),
-        this.client.getOsaurusNativeChildSettings?.()
-          ?? Promise.resolve(this.snapshotValue.osaurusNative ?? {
-            schemaVersion: 1 as const,
-            agentId: null,
-            readiness: "unconfigured" as const
-          })
-      ]);
+      const passport = await this.client.getSnapshot();
       if (!this.active) return;
       const desiredSharing = this.snapshotValue.passport.sharing;
       this.snapshotValue.passport = passport;
-      this.snapshotValue.agentManagement = agentManagement;
-      if (!this.snapshotValue.osaurusNativeBusy) {
-        this.snapshotValue.osaurusNative = osaurusNative;
-        this.snapshotValue.osaurusNativeError = undefined;
-      }
       if (this.snapshotValue.sharingBusy) {
         this.snapshotValue.passport.sharing = desiredSharing;
       } else {
@@ -228,8 +218,39 @@ export class PassportController {
         this.onChange();
       }
     } catch {
-      // A later local-only read retries; transport details are never shown.
+      // A later Passport read retries; transport details are never shown.
     }
+  }
+
+  private refreshLocalSettings(): Promise<void> {
+    if (this.localSettingsReadInFlight) return this.localSettingsReadInFlight;
+    const nativeFallback = this.snapshotValue.osaurusNative ?? {
+      schemaVersion: 1 as const,
+      agentId: null,
+      readiness: "unconfigured" as const
+    };
+    const read = Promise.allSettled([
+      this.client.getAgentManagement(),
+      this.client.getOsaurusNativeChildSettings?.() ?? Promise.resolve(nativeFallback)
+    ]).then(([agentManagement, osaurusNative]) => {
+      if (!this.active) return;
+      if (agentManagement.status === "fulfilled" && !this.snapshotValue.agentBusy) {
+        this.snapshotValue.agentManagement = agentManagement.value;
+      }
+      if (osaurusNative.status === "fulfilled" && !this.snapshotValue.osaurusNativeBusy) {
+        this.snapshotValue.osaurusNative = osaurusNative.value;
+        this.snapshotValue.osaurusNativeError = undefined;
+      }
+      const presentationKey = this.presentationKey();
+      if (presentationKey !== this.lastPresentationKey) {
+        this.lastPresentationKey = presentationKey;
+        this.onChange();
+      }
+    }).finally(() => {
+      if (this.localSettingsReadInFlight === read) this.localSettingsReadInFlight = undefined;
+    });
+    this.localSettingsReadInFlight = read;
+    return read;
   }
 
   private async flushSharingWrites(): Promise<void> {

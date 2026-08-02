@@ -7,11 +7,29 @@ import {
   OSAURUS_BUNDLE_IDENTIFIER,
   OSAURUS_DEVELOPER_TEAM_ID,
   OsaurusRuntimeIdentityVerifier,
+  selectProcessExecutablePath,
   type OsaurusRuntimeIdentitySystem
 } from "../../../integrations/agents/osaurus/runtime-identity.ts";
 
 const INSTANCE_ID = "11111111-1111-4111-8111-111111111111";
 const NOW = new Date("2026-07-29T04:00:00.000Z");
+
+test("macOS process identity selects the kernel executable among many mapped text files", () => {
+  const executable = "/Applications/osaurus.app/Contents/MacOS/osaurus";
+  assert.equal(selectProcessExecutablePath(executable, [
+    "p10919",
+    "ftxt",
+    `n${executable}`,
+    "ftxt",
+    "n/Applications/osaurus.app/Contents/Frameworks/Sparkle.framework/Sparkle",
+    "ftxt",
+    "n/Users/example/MLXModels/model.safetensors"
+  ].join("\n")), executable);
+  assert.throws(() => selectProcessExecutablePath(
+    "/tmp/impostor",
+    `n${executable}`
+  ));
+});
 
 test("Osaurus identity binds fresh shared config, listener PID, app bundle, and signature", async () => {
   const fixture = await runtimeFixture();
@@ -63,7 +81,44 @@ test("localhost metadata cannot bless a port owned by a differently signed proce
     });
     assert.deepEqual(await verifier.discoverRuntime(), {
       state: "untrusted",
-      identity: null
+      identity: null,
+      reasonCode: "OSAURUS_RUNTIME_SIGNATURE_MISMATCH"
+    });
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("canonical Osaurus bundle matching accepts the provider's lowercase app name", async () => {
+  const fixture = await runtimeFixture({}, "osaurus.app");
+  try {
+    const verifier = new OsaurusRuntimeIdentityVerifier({
+      runtimeRoot: fixture.runtimeRoot,
+      homeDirectory: fixture.home,
+      now: () => NOW,
+      system: fakeSystem(fixture.executablePath)
+    });
+
+    assert.equal((await verifier.discoverRuntime()).state, "trusted");
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("a modified Osaurus signature remains blocked with a precise diagnostic", async () => {
+  const fixture = await runtimeFixture();
+  try {
+    const verifier = new OsaurusRuntimeIdentityVerifier({
+      runtimeRoot: fixture.runtimeRoot,
+      homeDirectory: fixture.home,
+      now: () => NOW,
+      system: fakeSystem(fixture.executablePath, { signatureInvalid: true })
+    });
+
+    assert.deepEqual(await verifier.discoverRuntime(), {
+      state: "untrusted",
+      identity: null,
+      reasonCode: "OSAURUS_RUNTIME_SIGNATURE_INVALID"
     });
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
@@ -128,10 +183,13 @@ test("exposed, hostname, future-dated, and wrong-PID runtime claims fail closed"
   }
 });
 
-async function runtimeFixture(mutation: Record<string, unknown> = {}) {
+async function runtimeFixture(
+  mutation: Record<string, unknown> = {},
+  appBundleName = "Osaurus.app"
+) {
   const root = await mkdtemp(join(tmpdir(), "teti-osaurus-identity-"));
   const home = join(root, "home");
-  const appPath = join(home, "Applications", "Osaurus.app");
+  const appPath = join(home, "Applications", appBundleName);
   const executablePath = join(appPath, "Contents", "MacOS", "osaurus");
   const runtimeRoot = join(home, ".osaurus", "runtime");
   const instancePath = join(runtimeRoot, INSTANCE_ID);
@@ -157,6 +215,7 @@ function fakeSystem(
     listenerPids?: number[];
     establishedPids?: number[];
     teamIdentifier?: string;
+    signatureInvalid?: boolean;
   } = {}
 ): OsaurusRuntimeIdentitySystem {
   return {
@@ -164,6 +223,7 @@ function fakeSystem(
     async establishedServerPids() { return overrides.establishedPids ?? [4242]; },
     async executablePath() { return executablePath; },
     async verifySignature() {
+      if (overrides.signatureInvalid) throw new Error("invalid signature");
       return {
         bundleIdentifier: OSAURUS_BUNDLE_IDENTIFIER,
         teamIdentifier: overrides.teamIdentifier ?? OSAURUS_DEVELOPER_TEAM_ID,

@@ -128,8 +128,8 @@ test("a delayed legacy epoch can never downgrade a peer that proved Beta 0.2", a
 test("peer compatibility requires the exact current Task and Passport protocols", () => {
   const now = new Date("2026-07-27T00:05:00.000Z");
 
-  assert.equal(mapPeerConnection(peerWithProtocols([5], [4]), now).compatibility, "compatible");
-  assert.equal(mapPeerConnection(peerWithProtocols([4], [4]), now).compatibility, "upgrade_required");
-  assert.equal(mapPeerConnection(peerWithProtocols([5], [2]), now).compatibility, "upgrade_required");
+  assert.equal(mapPeerConnection(peerWithProtocols([6], [4]), now).compatibility, "compatible");
+  assert.equal(mapPeerConnection(peerWithProtocols([5], [4]), now).compatibility, "upgrade_required");
+  assert.equal(mapPeerConnection(peerWithProtocols([6], [2]), now).compatibility, "upgrade_required");
   assert.equal(mapPeerConnection(peerWithProtocols(undefined, [4]), now).compatibility, "unknown");
 });

@@ -118,9 +118,34 @@ export function createPassportSettingsPanel(
     panel.append(error);
   }
   panel.append(createAgentManagementSection(viewModel, controller));
-  panel.append(createOsaurusNativeChildSection(viewModel, controller));
+  if (viewModel.showOsaurusNativeConfiguration) {
+    panel.append(createOsaurusNativeChildSection(viewModel, controller));
+  }
   if (memoryController) panel.append(createChildMemorySection(memoryController, childAgents));
+  panel.append(createBuildInformation(viewModel));
   return panel;
+}
+
+function createBuildInformation(viewModel: PassportSettingsViewModel): HTMLElement {
+  const footer = document.createElement("footer");
+  footer.className = "teti-build-information";
+  footer.setAttribute("aria-label", "Teti 程序版本与构建信息");
+
+  const versionLabel = document.createElement("span");
+  versionLabel.textContent = "程序版本";
+  const version = document.createElement("code");
+  version.textContent = viewModel.appVersion;
+
+  const timestampLabel = document.createElement("span");
+  timestampLabel.textContent = "构建时间（UTC）";
+  const timestamp = document.createElement("time");
+  timestamp.textContent = viewModel.buildTimestamp;
+  if (Number.isFinite(Date.parse(viewModel.buildTimestamp))) {
+    timestamp.dateTime = viewModel.buildTimestamp;
+  }
+
+  footer.append(versionLabel, version, timestampLabel, timestamp);
+  return footer;
 }
 
 function createOsaurusNativeChildSection(
@@ -136,7 +161,7 @@ function createOsaurusNativeChildSection(
   const title = document.createElement("strong");
   title.textContent = "Osaurus Native Child";
   const hint = document.createElement("small");
-  hint.textContent = "固定专用 Agent ID · 权限默认拒绝";
+  hint.textContent = "固定专用 Agent ID · 沿用本机 Agent 配置";
   copy.append(title, hint);
   const status = document.createElement("span");
   status.className = `teti-osaurus-native-status is-${
@@ -184,8 +209,16 @@ function createOsaurusNativeChildSection(
     form.append(clear);
   }
   const policy = document.createElement("p");
-  policy.textContent = "只有 Tools、Osaurus Memory、Host Workspace 与 Autonomous Exec 全部关闭，且 Runtime 身份通过校验后才会进入 Passport。";
+  policy.textContent = "Teti 不修改 Tools、Osaurus Memory 与 Autonomous Exec；直接 Host Workspace 挂载仍被拒绝，且 Runtime 身份通过校验后才会进入 Passport。";
   section.append(header, form, policy);
+  if (viewModel.osaurusNativeReason) {
+    const reason = document.createElement("small");
+    reason.className = `teti-osaurus-native-reason ${
+      viewModel.osaurusNativeStatus === "可调用" ? "is-warning" : "is-error"
+    }`;
+    reason.textContent = viewModel.osaurusNativeReason;
+    section.append(reason);
+  }
   if (viewModel.osaurusNativeError) {
     const error = document.createElement("small");
     error.className = "teti-osaurus-native-error";
@@ -369,7 +402,7 @@ function createAgentManagementSection(
     for (const agent of management.agents) list.append(createManagedAgentRow(agent, controller));
     if (management.agents.length === 0) {
       const empty = document.createElement("small");
-      empty.textContent = "当前没有启用的 Agent 定义。";
+      empty.textContent = "当前未检测到已安装的 Agent。";
       list.append(empty);
     }
     section.append(list);

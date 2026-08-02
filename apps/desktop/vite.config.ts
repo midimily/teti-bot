@@ -1,4 +1,11 @@
 import { defineConfig } from "vite";
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const desktopRoot = resolve(dirname(fileURLToPath(import.meta.url)));
+const packageVersion = readPackageVersion();
+const buildTimestamp = resolveBuildTimestamp();
 
 export default defineConfig({
   clearScreen: false,
@@ -7,9 +14,29 @@ export default defineConfig({
     strictPort: true
   },
   envPrefix: ["VITE_", "TETI_"],
+  define: {
+    __TETI_APP_VERSION__: JSON.stringify(packageVersion),
+    __TETI_BUILD_TIMESTAMP__: JSON.stringify(buildTimestamp)
+  },
   build: {
     target: "es2022",
     outDir: "dist",
     emptyOutDir: true
   }
 });
+
+function readPackageVersion(): string {
+  const value = JSON.parse(readFileSync(resolve(desktopRoot, "package.json"), "utf8")) as {
+    version?: unknown;
+  };
+  if (typeof value.version !== "string" || !/^\d+\.\d+\.\d+$/.test(value.version)) {
+    throw new Error("Desktop package version must use major.minor.patch.");
+  }
+  return value.version;
+}
+
+function resolveBuildTimestamp(): string {
+  const input = process.env.TETI_BUILD_TIMESTAMP ?? new Date().toISOString();
+  if (!Number.isFinite(Date.parse(input))) throw new Error("TETI_BUILD_TIMESTAMP must be an ISO timestamp.");
+  return new Date(input).toISOString();
+}

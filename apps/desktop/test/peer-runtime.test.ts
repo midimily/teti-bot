@@ -53,6 +53,9 @@ import type {
 } from "../../../core/callability/adapter.ts";
 import type { TetiTaskTransportStoreState } from "../../../core/task/transport.ts";
 import type { TaskImagePart } from "../../../core/task/types.ts";
+import type { ExecutionHandle, PrepareExecutionHandleInput } from "../../../core/callability/execution.ts";
+import type { ExecutionAuthority } from "../../../core/callability/agent-core.ts";
+import { FileCollaborationWorkspaceStore } from "../lifecycle-sidecar/runtime/workspaces/store.ts";
 
 test("two Teti runtimes confirm a Chatmail handshake and exchange alpha heartbeats", async () => {
   const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
@@ -201,6 +204,32 @@ test("confirmed peers sort by confirmation time and waiting records stay last", 
   assert.equal(listed.connections[0]?.confirmedAt, "2026-07-17T03:00:00.000Z");
 });
 
+test("peer profile refresh recovers a nickname after Registry connectivity returns and stays outside Chatmail poll", async () => {
+  const local = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
+  const remote = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
+  const registry = new RecoveringRegistry([toIdentity(local), toIdentity(remote)]);
+  const storage = new MemoryTetiConnectionStorage();
+  await storage.saveAll([
+    makeConnectionRecord(remote, "Confirmed", "2026-07-17T01:00:00.000Z")
+  ]);
+  const runtime = await makeRuntime(
+    local,
+    new MemoryChatmailRelay().adapter(local.address),
+    registry,
+    storage
+  );
+
+  assert.equal((await runtime.list()).connections[0]?.remoteDisplayName, undefined);
+  assert.equal((await runtime.refreshPeerProfiles()).failedPeerCount, 1);
+  registry.online = true;
+  assert.equal((await runtime.refreshPeerProfiles()).failedPeerCount, 0);
+  assert.equal((await runtime.list()).connections[0]?.remoteDisplayName, "Beta");
+
+  const profileCalls = registry.profileCalls;
+  await runtime.poll();
+  assert.equal(registry.profileCalls, profileCalls, "Chatmail polling must not perform Registry Profile I/O");
+});
+
 test("AI status is opt-in, sent only to confirmed peers, and revoked independently of heartbeats", async () => {
   const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
   const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
@@ -231,7 +260,7 @@ test("AI status is opt-in, sent only to confirmed peers, and revoked independent
   );
   assert.deepEqual(
     confirmed.connections[0]?.remoteProtocolCapabilities?.taskProtocolVersions,
-    [5]
+    [6]
   );
   assert.deepEqual(await runtimeA.getPassportSharing(), resourceSharingPolicy(false));
 
@@ -488,7 +517,7 @@ test("Chatmail keeps a Task offline, receiver stores it once, and returns a rece
   const acknowledged = await runtimeA.listTasks();
   assert.equal(acknowledged.records.length, 1);
   assert.equal(acknowledged.records[0]?.delivery, "acknowledged");
-  assert.deepEqual(acknowledged.peers[0]?.supportedVersions, [5]);
+  assert.deepEqual(acknowledged.peers[0]?.supportedVersions, [6]);
 });
 
 test("Task ID retry is idempotent and conflicting immutable content is rejected", async () => {
@@ -652,6 +681,316 @@ test("two peers execute an abstract receiver-local Compute Offer without sharing
   assert.match(JSON.stringify(result?.artifacts), /receiver-local answer/);
 });
 
+test("long-horizon collaboration survives Host restart, accepts input, and switches Child only explicitly", async () => {
+  const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
+  const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
+  const registry = new StaticRegistry([toIdentity(accountA), toIdentity(accountB)]);
+  const relay = new MemoryChatmailRelay();
+  const connectionsA = new MemoryTetiConnectionStorage();
+  const connectionsB = new MemoryTetiConnectionStorage();
+  const tasksA = new MemoryTaskTransportStore();
+  const tasksB = new MemoryTaskTransportStore();
+  const firstExecutor = new LongHorizonTaskExecutor();
+  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), registry, connectionsA, {
+    taskTransportStore: tasksA
+  });
+  let runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), registry, connectionsB, {
+    taskTransportStore: tasksB,
+    taskExecutor: firstExecutor
+  });
+  const connection = await confirmPeers(runtimeA, runtimeB, "beta00002");
+  const sent = await runtimeA.sendTask({
+    connectionRequestId: connection.requestId,
+    taskId: "long-horizon-restart-001",
+    capabilityId: "code-analysis",
+    text: "分阶段分析并等待我的下一步指令。",
+    ttlMs: 60_000,
+    executionMode: "long_horizon"
+  });
+  await runtimeB.poll();
+  await runtimeB.approveTask(sent.request.taskId);
+  await flushBackgroundWork();
+  let host = await runtimeB.getTask(sent.request.taskId);
+  assert.equal(host.state, "input_required");
+  assert.equal(host.longHorizon?.stages.length, 1);
+  assert.equal(host.longHorizon?.checkpoints.length, 1);
+  assert.equal(host.longHorizon?.artifacts[0]?.role, "intermediate");
+  const originalExpiry = host.longHorizon!.continuationExpiresAt;
+  host = await runtimeB.pauseTask(sent.request.taskId);
+  assert.equal(host.longHorizon?.phase, "paused");
+  host = await runtimeB.renewTask(sent.request.taskId, 2 * 60 * 60 * 1_000);
+  assert.ok(Date.parse(host.longHorizon!.continuationExpiresAt) > Date.parse(originalExpiry));
+  assert.ok(host.longHorizon?.audit.some((event) => event.action === "paused"));
+  assert.ok(host.longHorizon?.audit.some((event) => event.action === "renewed"));
+
+  // Recreate the receiver Runtime at a stage boundary. The persisted Host
+  // session, Workspace revision and audit are the recovery source of truth.
+  const restartedExecutor = new LongHorizonTaskExecutor();
+  runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), registry, connectionsB, {
+    taskTransportStore: tasksB,
+    taskExecutor: restartedExecutor
+  });
+  await runtimeA.poll();
+  const requester = await runtimeA.getTask(sent.request.taskId);
+  assert.equal(requester.peerLongHorizon?.phase, "paused");
+  assert.equal(requester.artifacts?.length, 1);
+  assert.deepEqual(requester.peerArtifactMetadata?.map((entry) => entry.stageIndex), [1]);
+  await runtimeA.submitTaskInput(sent.request.taskId, "第二阶段改用备用 Child，综合第一阶段结果。 ");
+  await runtimeB.poll();
+  host = await runtimeB.getTask(sent.request.taskId);
+  assert.equal(host.longHorizon?.pendingInput?.source, "remote_requester");
+  assert.equal(restartedExecutor.requests.length, 0, "input delivery must not auto-run or auto-switch");
+
+  restartedExecutor.availableSuffixes = ["b"];
+  await assert.rejects(
+    () => runtimeB.continueTask(sent.request.taskId),
+    /explicitly select another Child Agent/,
+    "an unavailable previous Child must never fall through to the first ready alternative"
+  );
+  await runtimeB.continueTask(sent.request.taskId, "fake-agent-b");
+  await flushBackgroundWork();
+  host = await runtimeB.getTask(sent.request.taskId);
+  assert.equal(host.longHorizon?.stages.length, 2);
+  assert.equal(host.longHorizon?.stages[1]?.childAgentId, "fake-agent-b");
+  assert.equal(host.artifacts?.length, 2);
+  assert.equal(host.longHorizon?.checkpoints.length, 2);
+  assert.ok(host.longHorizon?.audit.some((event) =>
+    event.action === "child_selected" && event.childAgentId === "fake-agent-b"
+  ));
+  await runtimeB.completeTask(sent.request.taskId);
+  await runtimeA.poll();
+  const completed = await runtimeA.getTask(sent.request.taskId);
+  assert.equal(completed.state, "completed");
+  assert.equal(completed.artifacts?.length, 2, "final status must not overwrite intermediate Artifacts");
+  assert.deepEqual(completed.peerArtifactMetadata?.map((entry) => entry.stageIndex), [1, 2]);
+  assert.equal(completed.peerLongHorizon?.finalArtifactId, completed.artifacts?.[1]?.artifactId);
+});
+
+test("Teti Host executes an explicit depth-one Delegation Plan and deterministically aggregates provenance", async () => {
+  const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
+  const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
+  const registry = new StaticRegistry([toIdentity(accountA), toIdentity(accountB)]);
+  const relay = new MemoryChatmailRelay();
+  const executor = new DelegationTaskExecutor();
+  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), registry);
+  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), registry, undefined, {
+    taskExecutor: executor
+  });
+  const connection = await confirmPeers(runtimeA, runtimeB, "beta00002");
+  const sent = await runtimeA.sendTask({
+    connectionRequestId: connection.requestId,
+    taskId: "delegation-plan-001",
+    capabilityId: "code-analysis",
+    text: "先做低成本分析，再执行最终处理。",
+    executionMode: "long_horizon"
+  });
+
+  await runtimeB.poll();
+  const targets = await runtimeB.listTaskDelegationTargets(sent.request.taskId);
+  assert.deepEqual(targets.map((target) => target.childAgentId), ["osaurus-runtime", "codex"]);
+  await runtimeB.approveTaskDelegation(sent.request.taskId, targets.map((target) => ({
+    childAgentId: target.childAgentId,
+    connectorId: target.connectorId,
+    capabilityId: target.capabilityId
+  })));
+  await flushBackgroundWork();
+  await flushBackgroundWork();
+  await flushBackgroundWork();
+
+  const host = await runtimeB.getTask(sent.request.taskId);
+  assert.equal(host.state, "completed");
+  assert.equal(host.delegationPlan?.phase, "completed");
+  assert.equal(host.delegationPlan?.delegationDepth, 1);
+  assert.equal(host.delegationPlan?.plannerMode, "disabled");
+  assert.deepEqual(executor.requests.map((request) => [request.agentId, request.capabilityId]), [
+    ["osaurus-runtime", "general-text-assistance"],
+    ["codex", "image-editing"]
+  ]);
+  assert.match(executor.requests[1]?.input.text ?? "", /safe:osaurus-runtime:1/);
+  assert.deepEqual(executor.authorities.map((authority) => authority.workspaceAccess), [
+    ["read"],
+    ["read", "write", "create_artifact"]
+  ]);
+  assert.deepEqual(executor.authorities.map((authority) => authority.capabilityId), [
+    "general-text-assistance",
+    "image-editing"
+  ]);
+  const childSteps = host.delegationPlan?.steps.filter((step) => step.kind === "child_execution") ?? [];
+  assert.equal(childSteps.length, 2);
+  assert.ok(childSteps.every((step) => step.state === "completed" && step.remoteAgentAccess === "deny"));
+  assert.ok(childSteps.every((step) => step.budget.timeoutMs <= 15 * 60 * 1_000));
+  assert.equal(host.artifacts?.length, 3);
+  assert.deepEqual(host.delegationPlan?.artifacts.map((entry) => entry.producer.kind), [
+    "child_agent",
+    "child_agent",
+    "teti_host"
+  ]);
+  const final = host.artifacts?.at(-1);
+  assert.match(JSON.stringify(final), /Teti Host 已按冻结顺序完成 2 个 Child Agent 步骤/);
+  assert.match(JSON.stringify(final), /safe:osaurus-runtime:1/);
+  assert.match(JSON.stringify(final), /safe:codex:2/);
+
+  await runtimeA.poll();
+  const requester = await runtimeA.getTask(sent.request.taskId);
+  assert.equal(requester.state, "completed");
+  assert.equal(requester.delegationPlan, undefined, "receiver-local Delegation Plan must never enter the peer record");
+  assert.equal(requester.artifacts?.length, 3);
+});
+
+test("a failed Delegation step stops the frozen plan and never auto-switches to the next Child", async () => {
+  const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
+  const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
+  const registry = new StaticRegistry([toIdentity(accountA), toIdentity(accountB)]);
+  const relay = new MemoryChatmailRelay();
+  const executor = new FailingDelegationTaskExecutor();
+  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), registry);
+  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), registry, undefined, {
+    taskExecutor: executor
+  });
+  const connection = await confirmPeers(runtimeA, runtimeB, "beta00002");
+  const sent = await runtimeA.sendTask({
+    connectionRequestId: connection.requestId,
+    taskId: "delegation-plan-failure-001",
+    capabilityId: "code-analysis",
+    text: "按两个步骤处理。",
+    executionMode: "long_horizon"
+  });
+  await runtimeB.poll();
+  const targets = await runtimeB.listTaskDelegationTargets(sent.request.taskId);
+  await runtimeB.approveTaskDelegation(sent.request.taskId, targets.map((target) => ({
+    childAgentId: target.childAgentId,
+    connectorId: target.connectorId,
+    capabilityId: target.capabilityId
+  })));
+  await flushBackgroundWork();
+  await flushBackgroundWork();
+
+  const host = await runtimeB.getTask(sent.request.taskId);
+  assert.equal(executor.requests.length, 1);
+  assert.equal(host.delegationPlan?.phase, "failed");
+  assert.deepEqual(host.delegationPlan?.steps.slice(0, 2).map((step) => step.state), ["failed", "pending"]);
+  assert.equal(host.artifacts?.length ?? 0, 0);
+  assert.ok(host.delegationPlan?.audit.some((event) => event.action === "step_failed"));
+});
+
+test("a Delegation target change between steps preserves prior Artifact and fails closed", async () => {
+  const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
+  const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
+  const registry = new StaticRegistry([toIdentity(accountA), toIdentity(accountB)]);
+  const relay = new MemoryChatmailRelay();
+  const executor = new ChangingDelegationTaskExecutor();
+  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), registry);
+  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), registry, undefined, {
+    taskExecutor: executor
+  });
+  const connection = await confirmPeers(runtimeA, runtimeB, "beta00002");
+  const sent = await runtimeA.sendTask({
+    connectionRequestId: connection.requestId,
+    taskId: "delegation-plan-target-change-001",
+    capabilityId: "code-analysis",
+    text: "冻结两步后执行。",
+    executionMode: "long_horizon"
+  });
+  await runtimeB.poll();
+  const targets = await runtimeB.listTaskDelegationTargets(sent.request.taskId);
+  await runtimeB.approveTaskDelegation(sent.request.taskId, targets.map((target) => ({
+    childAgentId: target.childAgentId,
+    connectorId: target.connectorId,
+    capabilityId: target.capabilityId
+  })));
+  await flushBackgroundWork();
+  await flushBackgroundWork();
+
+  const host = await runtimeB.getTask(sent.request.taskId);
+  assert.equal(executor.requests.length, 1);
+  assert.equal(host.state, "failed");
+  assert.equal(host.safeErrorCode, "TASK_DELEGATION_TARGET_CHANGED");
+  assert.equal(host.artifacts?.length, 1);
+  assert.deepEqual(host.delegationPlan?.steps.slice(0, 2).map((step) => step.state), ["completed", "failed"]);
+  assert.deepEqual(host.delegationPlan?.artifacts.map((entry) => entry.role), ["intermediate"]);
+});
+
+test("long-horizon stage rejects a changed Workspace revision and publishes no stale Artifact", async () => {
+  const root = await mkdtemp(join(tmpdir(), "teti-long-horizon-conflict-"));
+  try {
+    const workspaceStore = new FileCollaborationWorkspaceStore(join(root, "workspaces"));
+    await workspaceStore.initialize();
+    const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
+    const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
+    const registry = new StaticRegistry([toIdentity(accountA), toIdentity(accountB)]);
+    const relay = new MemoryChatmailRelay();
+    const executor = new DeferredLongHorizonTaskExecutor();
+    const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), registry);
+    const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), registry, undefined, {
+      taskExecutor: executor,
+      workspaceStore
+    });
+    const connection = await confirmPeers(runtimeA, runtimeB, "beta00002");
+    const sent = await runtimeA.sendTask({
+      connectionRequestId: connection.requestId,
+      taskId: "long-horizon-conflict-001",
+      capabilityId: "code-analysis",
+      text: "在固定 revision 上执行。",
+      executionMode: "long_horizon"
+    });
+    await runtimeB.poll();
+    await runtimeB.approveTask(sent.request.taskId);
+    const working = await runtimeB.getTask(sent.request.taskId);
+    const binding = working.workspaceBinding!;
+    const foreignSnapshot = await workspaceStore.createSnapshot({
+      workspaceId: binding.workspaceId,
+      workspaceRevision: binding.workspaceRevision,
+      access: ["read", "write"]
+    });
+    await workspaceStore.commitSnapshot(foreignSnapshot);
+    executor.finish("stale result");
+    await flushBackgroundWork();
+    const conflicted = await runtimeB.getTask(sent.request.taskId);
+    assert.equal(conflicted.state, "input_required");
+    assert.equal(conflicted.safeErrorCode, "TASK_WORKSPACE_REVISION_CONFLICT");
+    assert.equal(conflicted.artifacts?.length ?? 0, 0);
+    assert.equal(conflicted.longHorizon?.checkpoints.length, 0);
+    assert.ok(conflicted.longHorizon?.audit.some((event) =>
+      event.safeErrorCode === "TASK_WORKSPACE_REVISION_CONFLICT"
+    ));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("an expired long-horizon stage cannot publish an Artifact after its lease", async () => {
+  let nowMs = Date.now();
+  const now = () => new Date(nowMs);
+  const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
+  const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
+  const registry = new StaticRegistry([toIdentity(accountA), toIdentity(accountB)]);
+  const relay = new MemoryChatmailRelay();
+  const executor = new DeferredLongHorizonTaskExecutor();
+  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), registry, undefined, { now });
+  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), registry, undefined, {
+    now,
+    taskExecutor: executor
+  });
+  const connection = await confirmPeers(runtimeA, runtimeB, "beta00002");
+  const sent = await runtimeA.sendTask({
+    connectionRequestId: connection.requestId,
+    taskId: "long-horizon-expiry-001",
+    capabilityId: "code-analysis",
+    text: "过期后不得回写。",
+    ttlMs: 60_000,
+    executionMode: "long_horizon"
+  });
+  await runtimeB.poll();
+  await runtimeB.approveTask(sent.request.taskId);
+  nowMs += 61_000;
+  executor.finish("late result");
+  await flushBackgroundWork();
+  const expired = await runtimeB.getTask(sent.request.taskId);
+  assert.equal(expired.longHorizon?.phase, "expired");
+  assert.equal(expired.artifacts?.length ?? 0, 0);
+  assert.equal(expired.safeErrorCode, "TASK_EXPIRED");
+});
+
 test("two peers deliver a verified image Task, approve once, execute, and return an Artifact", async () => {
   const root = await mkdtemp(join(tmpdir(), "teti-task-e2e-"));
   try {
@@ -680,7 +1019,7 @@ test("two peers deliver a verified image Task, approve once, execute, and return
       text: "Read the attached pixel.",
       attachments: [staged.part]
     });
-    assert.equal(sent.protocolVersion, 5);
+    assert.equal(sent.protocolVersion, 6);
 
     await runtimeB.poll();
     const inbox = await runtimeB.listTasks();
@@ -734,7 +1073,7 @@ test("two-image editing returns a verified image Artifact after completed status
       text: "Merge these two reference images and return the edited image.",
       attachments: [first.part, second.part]
     });
-    assert.equal(sent.protocolVersion, 5);
+    assert.equal(sent.protocolVersion, 6);
 
     await runtimeB.poll();
     await runtimeB.approveTask(sent.request.taskId);
@@ -771,7 +1110,7 @@ test("two-image editing returns a verified image Artifact after completed status
   }
 });
 
-test("Task v5 resends only missing images until a four-image request is complete", async () => {
+test("Task v6 resends only missing images until a four-image request is complete", async () => {
   const root = await mkdtemp(join(tmpdir(), "teti-task-v4-image-retry-"));
   try {
     const source = join(root, "source.png");
@@ -798,12 +1137,12 @@ test("Task v5 resends only missing images until a four-image request is complete
     }
     const sent = await runtimeA.sendTask({
       connectionRequestId: connection.requestId,
-      taskId: "task-v5-four-image-retry",
+      taskId: "task-v6-four-image-retry",
       capabilityId: "image-editing",
       text: "Use all four reference images.",
       attachments
     });
-    assert.equal(sent.protocolVersion, 5);
+    assert.equal(sent.protocolVersion, 6);
     assert.equal(relay.dropFirstApplicationMessage(accountB.address, "teti.task.attachment"), true);
     assert.equal(relay.dropFirstApplicationMessage(accountB.address, "teti.task.attachment"), true);
 
@@ -1475,7 +1814,7 @@ test("an oversized malicious envelope is isolated without blocking the next vali
       status: "alpha-heartbeat",
       timestamp: new Date().toISOString(),
       collaborationProtocolEpoch: 2,
-      taskProtocolVersions: [5],
+      taskProtocolVersions: [6],
       passportSchemaVersions: [4]
     }
   });
@@ -1498,6 +1837,7 @@ async function makeRuntime(
     peerProtocolCapabilities?: PeerProtocolCapabilityStore;
     taskTransportStore?: MemoryTaskTransportStore;
     taskAttachmentStore?: FileTaskAttachmentStore;
+    workspaceStore?: FileCollaborationWorkspaceStore;
     taskExecutor?: TaskExecutionBridge;
     taskIdFactory?: () => string;
     now?: () => Date;
@@ -1655,6 +1995,26 @@ class StaticRegistry implements TetiRegistryReader {
   constructor(identities: DiscoveryIdentity[]) { this.identities = identities; }
   async discover(): Promise<DiscoveryIdentity[]> { return this.identities; }
   async getIdentity(id: string): Promise<DiscoveryIdentity | null> {
+    return this.identities.find((identity) => identity.id === id) ?? null;
+  }
+}
+
+class RecoveringRegistry implements TetiRegistryReader {
+  online = false;
+  profileCalls = 0;
+  private readonly identities: DiscoveryIdentity[];
+
+  constructor(identities: DiscoveryIdentity[]) {
+    this.identities = identities;
+  }
+
+  async discover(): Promise<DiscoveryIdentity[]> {
+    return this.identities;
+  }
+
+  async getIdentity(id: string): Promise<DiscoveryIdentity | null> {
+    this.profileCalls += 1;
+    if (!this.online) throw new Error("registry offline");
     return this.identities.find((identity) => identity.id === id) ?? null;
   }
 }
@@ -1910,6 +2270,204 @@ class FakeTaskExecutor implements TaskExecutionBridge {
 
   cancel(taskId: string): boolean {
     return this.tasks.delete(taskId);
+  }
+}
+
+class LongHorizonTaskExecutor implements TaskExecutionBridge {
+  readonly requests: CallableAdapterTaskRequest[] = [];
+  availableSuffixes: Array<"a" | "b"> = ["a", "b"];
+  private readonly tasks = new Map<string, CallableAdapterTaskSnapshot>();
+  private readonly handles = new Map<string, ExecutionHandle>();
+
+  resolveTarget(_offerId: string, capabilityId: string) {
+    return this.listTargets("", capabilityId, ["text"])[0] ?? null;
+  }
+
+  listTargets(_offerId: string, capabilityId: string, requiredInputModes: readonly ("text" | "image")[]) {
+    if (capabilityId !== "code-analysis" || requiredInputModes.some((mode) => mode !== "text")) return [];
+    return this.availableSuffixes.map((suffix) => ({
+      connectorId: `fake.connector-${suffix}`,
+      childAgentId: `fake-agent-${suffix}`,
+      capabilityId,
+      workspacePolicy: "none" as const
+    }));
+  }
+
+  async prepareExecution(input: PrepareExecutionHandleInput): Promise<ExecutionHandle> {
+    const handle: ExecutionHandle = {
+      schemaVersion: 1,
+      taskId: input.taskId,
+      workspaceId: input.workspaceId,
+      childAgentId: input.childAgentId,
+      connectorId: input.connectorId,
+      executionEpoch: (this.handles.get(input.taskId)?.executionEpoch ?? 0) + 1,
+      providerExecutionId: null,
+      leaseExpiresAt: new Date(Date.now() + 30_000).toISOString(),
+      progress: {
+        state: "queued",
+        completedUnits: 0,
+        totalUnits: 1,
+        message: "queued",
+        updatedAt: new Date().toISOString()
+      },
+      checkpointRef: null,
+      resumeCapability: "none"
+    };
+    this.handles.set(input.taskId, handle);
+    return structuredClone(handle);
+  }
+
+  async getExecutionHandle(taskId: string): Promise<ExecutionHandle | null> {
+    return structuredClone(this.handles.get(taskId) ?? null);
+  }
+
+  async reconcileExecutionHandles(): Promise<ExecutionHandle[]> {
+    return [...this.handles.values()].map((handle) => structuredClone(handle));
+  }
+
+  async execute(request: CallableAdapterTaskRequest): Promise<CallableAdapterTaskSnapshot> {
+    this.requests.push(structuredClone(request));
+    const completed: CallableAdapterTaskSnapshot = {
+      ...workingSnapshot(request),
+      state: "completed",
+      updatedAt: new Date().toISOString(),
+      completedAt: new Date().toISOString(),
+      artifact: { kind: "text", text: `safe:${request.agentId}:${this.requests.length}` }
+    };
+    this.tasks.set(request.taskId, completed);
+    const handle = this.handles.get(request.taskId);
+    if (handle) {
+      handle.progress = {
+        state: "completed",
+        completedUnits: 1,
+        totalUnits: 1,
+        message: "completed",
+        updatedAt: completed.updatedAt
+      };
+    }
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    return structuredClone(completed);
+  }
+
+  getTask(taskId: string): CallableAdapterTaskSnapshot | null {
+    return structuredClone(this.tasks.get(taskId) ?? null);
+  }
+
+  cancel(taskId: string): boolean {
+    return this.tasks.delete(taskId);
+  }
+}
+
+class DelegationTaskExecutor extends LongHorizonTaskExecutor {
+  readonly authorities: ExecutionAuthority[] = [];
+  private readonly delegationTargets = [
+    {
+      childAgentId: "osaurus-runtime",
+      connectorId: "osaurus.runtime.bonsai-chat",
+      capabilityId: "general-text-assistance",
+      resourceBindingId: "binding:osaurus.runtime.bonsai-chat",
+      workspacePolicy: "none" as const,
+      inputModes: ["text"] as Array<"text" | "image">,
+      outputModes: ["text"] as Array<"text" | "image">,
+      timeoutMs: 60_000,
+      maxOutputBytes: 24 * 1_024
+    },
+    {
+      childAgentId: "codex",
+      connectorId: "codex.image-editing",
+      capabilityId: "image-editing",
+      resourceBindingId: "binding:codex.image-editing",
+      workspacePolicy: "snapshot" as const,
+      inputModes: ["text", "image"] as Array<"text" | "image">,
+      outputModes: ["text", "image"] as Array<"text" | "image">,
+      timeoutMs: 120_000,
+      maxOutputBytes: 56 * 1_024
+    }
+  ];
+
+  listDelegationTargets() {
+    return structuredClone(this.delegationTargets);
+  }
+
+  resolveDelegationTarget(selection: {
+    childAgentId: string;
+    connectorId: string;
+    capabilityId: string;
+  }) {
+    return structuredClone(this.delegationTargets.find((target) =>
+      target.childAgentId === selection.childAgentId
+      && target.connectorId === selection.connectorId
+      && target.capabilityId === selection.capabilityId
+    ) ?? null);
+  }
+
+  override execute(
+    request: CallableAdapterTaskRequest,
+    authority: ExecutionAuthority
+  ): Promise<CallableAdapterTaskSnapshot> {
+    this.authorities.push(structuredClone(authority));
+    return super.execute(request);
+  }
+}
+
+class FailingDelegationTaskExecutor extends DelegationTaskExecutor {
+  override async execute(
+    request: CallableAdapterTaskRequest,
+    authority: ExecutionAuthority
+  ): Promise<CallableAdapterTaskSnapshot> {
+    this.requests.push(structuredClone(request));
+    this.authorities.push(structuredClone(authority));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    return {
+      ...workingSnapshot(request),
+      state: "failed",
+      safeErrorCode: "ADAPTER_INTERNAL_ERROR",
+      updatedAt: new Date().toISOString(),
+      completedAt: new Date().toISOString()
+    };
+  }
+}
+
+class ChangingDelegationTaskExecutor extends DelegationTaskExecutor {
+  override resolveDelegationTarget(selection: {
+    childAgentId: string;
+    connectorId: string;
+    capabilityId: string;
+  }) {
+    if (this.requests.length > 0 && selection.childAgentId === "codex") return null;
+    return super.resolveDelegationTarget(selection);
+  }
+}
+
+class DeferredLongHorizonTaskExecutor extends LongHorizonTaskExecutor {
+  private active: CallableAdapterTaskSnapshot | null = null;
+  private resolveExecution?: (snapshot: CallableAdapterTaskSnapshot) => void;
+
+  override execute(request: CallableAdapterTaskRequest): Promise<CallableAdapterTaskSnapshot> {
+    this.requests.push(structuredClone(request));
+    this.active = workingSnapshot(request);
+    return new Promise<CallableAdapterTaskSnapshot>((resolve) => {
+      this.resolveExecution = resolve;
+    });
+  }
+
+  override getTask(taskId: string): CallableAdapterTaskSnapshot | null {
+    return this.active?.taskId === taskId ? structuredClone(this.active) : null;
+  }
+
+  finish(text: string): void {
+    if (!this.active || !this.resolveExecution) throw new Error("No deferred long-horizon stage is active.");
+    const completed: CallableAdapterTaskSnapshot = {
+      ...this.active,
+      state: "completed",
+      artifact: { kind: "text", text },
+      updatedAt: new Date().toISOString(),
+      completedAt: new Date().toISOString()
+    };
+    this.active = completed;
+    const resolve = this.resolveExecution;
+    this.resolveExecution = undefined;
+    resolve(structuredClone(completed));
   }
 }
 

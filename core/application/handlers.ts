@@ -11,6 +11,7 @@ import type {
   TetiTaskAttachmentPayload,
   TetiTaskAttachmentReceiptPayload,
   TetiTaskCancelPayload,
+  TetiTaskInputPayload,
   TetiTaskReceiptPayload,
   TetiTaskStatusPayload
 } from "../task/transport.ts";
@@ -75,6 +76,12 @@ export type TetiApplicationHandlerResult =
       messageId: string;
       fromTetiId: string;
       cancel: TetiTaskCancelPayload;
+    }
+  | {
+      type: "task.input";
+      messageId: string;
+      fromTetiId: string;
+      input: TetiTaskInputPayload;
     }
   | {
       type: "task.artifact";
@@ -158,6 +165,13 @@ export function handleApplicationEnvelope(
     messageId: envelope.messageId,
     fromTetiId: envelope.fromTetiId,
     cancel: envelope.payload as TetiTaskCancelPayload
+  };
+
+  if (envelope.type === "teti.task.input") return {
+    type: "task.input",
+    messageId: envelope.messageId,
+    fromTetiId: envelope.fromTetiId,
+    input: envelope.payload as TetiTaskInputPayload
   };
 
   return {

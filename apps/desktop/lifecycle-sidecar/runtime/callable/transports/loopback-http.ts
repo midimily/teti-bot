@@ -64,7 +64,7 @@ export class LoopbackHttpTransport implements ExecutionTransport {
 
   constructor(options: LoopbackHttpTransportOptions) {
     this.identityVerifier = options.identityVerifier;
-    this.userAgent = options.userAgent ?? "Teti/0.2.7";
+    this.userAgent = options.userAgent ?? "Teti/0.2.10";
   }
 
   start(input: { spec: ExecutionSpec; workspacePath: string | null }): ExecutionTransportHandle {
@@ -93,7 +93,7 @@ export class OsaurusAgentTransport implements ExecutionTransport {
   }) {
     this.identityVerifier = options.identityVerifier;
     this.authorityVerifier = options.authorityVerifier;
-    this.userAgent = options.userAgent ?? "Teti/0.2.7";
+    this.userAgent = options.userAgent ?? "Teti/0.2.10";
   }
 
   start(input: { spec: ExecutionSpec; workspacePath: string | null }): ExecutionTransportHandle {
@@ -192,9 +192,7 @@ class ManagedLoopbackHttpExecution implements ExecutionTransportHandle {
     const model = nativeAgent ? this.spec.effectiveModel : this.spec.model;
     const body = Buffer.from(JSON.stringify(nativeAgent ? {
       messages: [{ role: "user", content: text }],
-      stream: true,
-      tools: [],
-      tool_choice: "none"
+      stream: true
     } : {
       model,
       messages: [{ role: "user", content: text }],

@@ -28,7 +28,7 @@ import {
   formatBoundedWorkspaceInput
 } from "../lifecycle-sidecar/runtime/callable/kernel.ts";
 
-const AGENT_ID = "B5382D87-E386-49B6-B1E9-24688B18D7A2";
+const AGENT_ID = "123E4567-E89B-42D3-A456-426614174000";
 const MODEL = "OsaurusAI/Bonsai-27b-Ternary-JANG";
 const UPDATED_AT = "2026-07-29T08:00:00.000Z";
 const IDENTITY: OsaurusRuntimeIdentity = {
@@ -45,7 +45,7 @@ const IDENTITY: OsaurusRuntimeIdentity = {
   observedAt: UPDATED_AT
 };
 
-test("native policy audit requires explicit deny authority and invalidates a changed digest", async () => {
+test("native policy audit records provider defaults and invalidates a changed digest", async () => {
   const root = await mkdtemp(join(tmpdir(), "teti-osaurus-native-"));
   const agentsRoot = join(root, "agents");
   await mkdir(agentsRoot);
@@ -57,16 +57,29 @@ test("native policy audit requires explicit deny authority and invalidates a cha
     assert.equal(audit.agentId, AGENT_ID);
     assert.equal(audit.effectiveModel, MODEL);
     assert.deepEqual(audit.providerAuthority, {
-      tools: "deny",
-      memory: "deny",
-      hostWorkspace: "deny",
-      autonomousExec: "deny"
+      tools: "disabled",
+      memory: "disabled",
+      hostWorkspace: "disabled",
+      autonomousExec: "disabled"
+    });
+
+    await writeFile(path, JSON.stringify(agentRecord({
+      toolsEnabled: true,
+      memoryEnabled: true,
+      autonomousExec: { enabled: true }
+    })), { mode: 0o600 });
+    const defaultsEnabled = await auditor.inspect(AGENT_ID);
+    assert.deepEqual(defaultsEnabled.providerAuthority, {
+      tools: "enabled",
+      memory: "enabled",
+      hostWorkspace: "disabled",
+      autonomousExec: "enabled"
     });
 
     for (const unsafe of [
-      { toolsEnabled: true },
-      { memoryEnabled: true },
-      { autonomousExec: { enabled: true } },
+      { toolsEnabled: "yes" },
+      { memoryEnabled: null },
+      { autonomousExec: { enabled: "yes" } },
       { hostWorkspaceBookmark: "c2VjcmV0" },
       { hostWorkspacePath: "/private/project" }
     ]) {
@@ -82,7 +95,7 @@ test("native policy audit requires explicit deny authority and invalidates a cha
   }
 });
 
-test("official Insights request retention blocks Native Child publication", async () => {
+test("official Insights request retention is an explicit accepted Native Child risk", async () => {
   const audit = {
     agentId: AGENT_ID,
     name: "Teti Agent",
@@ -90,10 +103,10 @@ test("official Insights request retention blocks Native Child publication", asyn
     updatedAt: UPDATED_AT,
     configurationDigest: `sha256:${"d".repeat(64)}`,
     providerAuthority: {
-      tools: "deny" as const,
-      memory: "deny" as const,
-      hostWorkspace: "deny" as const,
-      autonomousExec: "deny" as const
+      tools: "disabled" as const,
+      memory: "disabled" as const,
+      hostWorkspace: "disabled" as const,
+      autonomousExec: "disabled" as const
     }
   };
   const qualification = await qualifyOsaurusNativeConnector({
@@ -105,8 +118,40 @@ test("official Insights request retention blocks Native Child publication", asyn
     },
     probeAgent: async () => apiAgent()
   });
+  assert.ok(qualification.connector);
+  assert.equal(qualification.readiness.state, "ready");
+  assert.equal(qualification.readiness.reasonCode, "OSAURUS_INSIGHTS_BODY_RETENTION_ACCEPTED");
+  assert.deepEqual(qualification.releaseBlockers, []);
+  assert.deepEqual(qualification.acceptedRisks, ["OSAURUS_INSIGHTS_BODY_RETENTION_ACCEPTED"]);
+});
+
+test("an unverifiable Insights policy still blocks Native Child publication", async () => {
+  const audit = {
+    agentId: AGENT_ID,
+    name: "Teti Agent",
+    effectiveModel: MODEL,
+    updatedAt: UPDATED_AT,
+    configurationDigest: `sha256:${"d".repeat(64)}`,
+    providerAuthority: {
+      tools: "disabled" as const,
+      memory: "disabled" as const,
+      hostWorkspace: "disabled" as const,
+      autonomousExec: "disabled" as const
+    }
+  };
+  const qualification = await qualifyOsaurusNativeConnector({
+    agentId: AGENT_ID,
+    trustVerifier: trustVerifier(),
+    policyAuditor: {
+      async inspect() { return structuredClone(audit); },
+      async verifyAgentAuthority() {}
+    },
+    probeAgent: async () => apiAgent(),
+    inspectInsightsRetention: async () => "unknown"
+  });
   assert.equal(qualification.connector, null);
-  assert.equal(qualification.readiness.reasonCode, "OSAURUS_INSIGHTS_BODY_RETENTION");
+  assert.equal(qualification.readiness.reasonCode, "OSAURUS_INSIGHTS_POLICY_UNVERIFIED");
+  assert.deepEqual(qualification.acceptedRisks, []);
 });
 
 test("fixed local Agent configuration rejects unsupported fields and accepts an env override", async () => {
@@ -191,10 +236,10 @@ test("Native Child is distinct from Runtime facade and re-audits before every ex
     assert.equal(spec.kind, "osaurus_agent");
     assert.equal(spec.agentId, AGENT_ID);
     assert.deepEqual(spec.providerAuthority, {
-      tools: "deny",
-      memory: "deny",
-      hostWorkspace: "deny",
-      autonomousExec: "deny"
+      tools: "disabled",
+      memory: "disabled",
+      hostWorkspace: "disabled",
+      autonomousExec: "disabled"
     });
 
     const host = new TetiHostAgentKernel({
@@ -258,9 +303,7 @@ test("Osaurus Agent transport posts only to the fixed /agents/{id}/run route", a
     assert.equal(receivedUrl, `/agents/${AGENT_ID}/run`);
     assert.deepEqual(receivedBody, {
       messages: [{ role: "user", content: "bounded task context" }],
-      stream: true,
-      tools: [],
-      tool_choice: "none"
+      stream: true
     });
   } finally {
     server.close();
@@ -278,7 +321,7 @@ test("sidecar watches policy changes and Settings exposes one fixed Agent ID con
   assert.match(main, /hostAgent\.unregisterConnector\(OSAURUS_NATIVE_CHILD\.connectorId\)/);
   assert.match(main, /nextDigest !== registeredDigest/);
   assert.match(view, /固定 Osaurus Agent UUID/);
-  assert.match(view, /Tools、Osaurus Memory、Host Workspace 与 Autonomous Exec 全部关闭/);
+  assert.match(view, /Teti 不修改 Tools、Osaurus Memory 与 Autonomous Exec/);
   assert.match(protocol, /"osaurus\.native\.get"/);
   assert.match(protocol, /"osaurus\.native\.set"/);
 });
@@ -334,10 +377,10 @@ function nativeSpec(port: number): OsaurusAgentExecutionSpec {
     codeIdentityHash: IDENTITY.codeIdentityHash,
     agentConfigurationDigest: `sha256:${"c".repeat(64)}`,
     providerAuthority: {
-      tools: "deny",
-      memory: "deny",
-      hostWorkspace: "deny",
-      autonomousExec: "deny"
+      tools: "disabled",
+      memory: "disabled",
+      hostWorkspace: "disabled",
+      autonomousExec: "disabled"
     }
   };
 }
