@@ -7,9 +7,11 @@ import {
 } from "../../../core/release/policy.ts";
 import {
   LocalReleasePolicyService,
+  NetworkBootstrapReleasePolicyClient,
   type ReleasePolicyClient,
   type ReleasePolicyStore
 } from "../lifecycle-sidecar/runtime/release/service.ts";
+import { FakeTetiNetworkClient } from "../../../services/network/fake-client.ts";
 
 const baseline: TetiReleasePolicy = {
   schemaVersion: 1,
@@ -67,6 +69,48 @@ test("a newer network policy can advance the local version floor", async () => {
   assert.equal(status.state, "update_required");
   assert.equal(status.source, "network");
   assert.equal(store.value?.policy.minimumSupportedVersion, "0.2.9");
+});
+
+test("Release Policy consumes the official Network bootstrap", async () => {
+  const network = new FakeTetiNetworkClient({
+    protocolVersion: 1,
+    contractRevision: 6,
+    service: { name: "teti-network", version: "0.1.5" },
+    serverTime: "2026-08-08T12:00:00.000Z",
+    protocolSupport: { minimumSupportedVersion: 1, supportedVersions: [1] },
+    releasePolicy: {
+      schemaVersion: 1,
+      policyVersion: 7,
+      channel: "beta",
+      minimumSupportedVersion: "0.3.1",
+      effectiveAt: "2026-08-08T00:00:00.000Z"
+    },
+    capabilities: {
+      publicDirectory: true,
+      identity: true,
+      clientAuthentication: true,
+      presence: true,
+      publicProfile: true,
+      relationships: true,
+      relayBindings: false,
+      invites: false
+    },
+    presencePolicy: {
+      collaborating: { reportEverySeconds: 5, ttlSeconds: 20 },
+      viewing_connect: { reportEverySeconds: 5, ttlSeconds: 20 },
+      online: { reportEverySeconds: 15, ttlSeconds: 45 },
+      background: { reportEverySeconds: 30, ttlSeconds: 90 }
+    }
+  });
+
+  assert.deepEqual(await new NetworkBootstrapReleasePolicyClient(network).getPolicy(), {
+    schemaVersion: 1,
+    policyVersion: 7,
+    channel: "beta",
+    minimumSupportedVersion: "0.3.1",
+    effectiveAt: "2026-08-08T00:00:00.000Z"
+  });
+  assert.equal(network.calls, 1);
 });
 
 test("an authoritative obsolete floor locks this process even when cache persistence fails", async () => {

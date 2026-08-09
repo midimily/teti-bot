@@ -43,6 +43,12 @@ export interface DiscoveryClient {
   deleteIdentity(id: string): Promise<void>;
 }
 
+/** Legacy Worker surface retained only until final Beta 0.3 retirement. */
+export type DiscoveryRegistrySyncClient = Pick<
+  DiscoveryClient,
+  "registerIdentity" | "heartbeatIdentity" | "getIdentity" | "deleteIdentity"
+>;
+
 interface RegistryResponse<TData> {
   success: boolean;
   data?: TData;
@@ -50,7 +56,7 @@ interface RegistryResponse<TData> {
   message?: string;
 }
 
-export class RegistryDiscoveryClient implements DiscoveryClient {
+export class RegistrySyncClient implements DiscoveryRegistrySyncClient {
   private readonly baseUrl: string;
   private readonly fetchImpl: typeof fetch;
   private readonly timeoutMs: number;
@@ -117,14 +123,6 @@ export class RegistryDiscoveryClient implements DiscoveryClient {
     }
   }
 
-  async discover(): Promise<DiscoveryIdentity[]> {
-    const response = await this.request<{ items: DiscoveryIdentity[] }>("/discover", {
-      method: "GET"
-    });
-
-    return response.items;
-  }
-
   async deleteIdentity(id: string): Promise<void> {
     const canonicalId = normalizeTetiPublicId(id);
     await this.request<void>(`/profile/${encodeURIComponent(canonicalId)}`, {
@@ -132,7 +130,7 @@ export class RegistryDiscoveryClient implements DiscoveryClient {
     });
   }
 
-  private async request<TData>(path: string, init: RequestInit): Promise<TData> {
+  protected async request<TData>(path: string, init: RequestInit): Promise<TData> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
     let response: Response;
@@ -196,6 +194,17 @@ export class RegistryDiscoveryClient implements DiscoveryClient {
     }
 
     return body.data as TData;
+  }
+}
+
+/** Legacy public reader retained for compatibility tests and non-product migration scripts only. */
+export class RegistryDiscoveryClient extends RegistrySyncClient implements DiscoveryClient {
+  async discover(): Promise<DiscoveryIdentity[]> {
+    const response = await this.request<{ items: DiscoveryIdentity[] }>("/discover", {
+      method: "GET"
+    });
+
+    return response.items;
   }
 }
 

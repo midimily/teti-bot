@@ -70,10 +70,29 @@ import {
 } from "./runtime/memory/service.ts";
 import {
   FileReleasePolicyStore,
-  LocalReleasePolicyService,
-  RegistryReleasePolicyClient
+  NetworkBootstrapReleasePolicyClient,
+  LocalReleasePolicyService
 } from "./runtime/release/service.ts";
 import { TETI_BUILD_INFO } from "../src/build-info.ts";
+import { HttpTetiNetworkClient } from "../../../services/network/client.ts";
+import { TetiNetworkPublicReadAdapter } from "../../../services/network/public-read-adapter.ts";
+import { FileTetiAccountStorage } from "../../../core/account/storage.ts";
+import { FileTetiNetworkCredentialStore } from "../../../services/network/credential-store.ts";
+import {
+  DEVELOPMENT_FIRST_CLAIM_ADOPTION_GRANT,
+  TETI_NETWORK_ADOPTION_GRANT,
+  TetiNetworkIdentityService
+} from "../../../services/network/identity-service.ts";
+import { RuntimePresencePolicyController } from "./runtime/presence/controller.ts";
+import {
+  FileTetiNetworkEnvironmentPreferenceStore,
+  TetiNetworkEnvironmentSettingsService
+} from "./runtime/network/environment.ts";
+import { FileTetiNetworkProfileSyncStore } from "../../../services/network/profile-sync-store.ts";
+import { TetiNetworkProfileService } from "../../../services/network/profile-service.ts";
+import { FileTetiNetworkRelationshipCommandStore } from "../../../services/network/relationship-command-store.ts";
+import { TetiNetworkRelationshipService } from "../../../services/network/relationship-service.ts";
+import { projectNetworkPublicProfile } from "./runtime/network/public-profile.ts";
 
 const PROCESS_SHUTDOWN_HARD_LIMIT_MS = 4_000;
 const OSAURUS_QUALIFICATION_RETRY_MS = 15_000;
@@ -111,11 +130,44 @@ async function startSidecar(): Promise<void> {
   await ensureProfileBootstrapDirectories(profile);
   profileLock = await acquireTetiRuntimeProfileLock(profile);
   await ensureProfileDirectories(profile);
+  const networkEnvironmentSettings = await TetiNetworkEnvironmentSettingsService.create(
+    new FileTetiNetworkEnvironmentPreferenceStore(profile.networkEnvironmentPath)
+  );
+  const networkBaseUrl = networkEnvironmentSettings.settings.activeBaseUrl;
+  const networkClient = new HttpTetiNetworkClient({
+    baseUrl: networkBaseUrl,
+    clientVersion: TETI_BUILD_INFO.appVersion,
+    clientPlatform: "macos"
+  });
+  const accountStorage = new FileTetiAccountStorage(profile.accountPath);
+  const networkIdentityService = new TetiNetworkIdentityService({
+    client: networkClient,
+    accountStorage,
+    credentialStore: new FileTetiNetworkCredentialStore(profile.networkCredentialsPath),
+    appVersion: TETI_BUILD_INFO.appVersion,
+    platform: "macos",
+    adoptionGrant: resolveNetworkAdoptionGrant(networkBaseUrl)
+  });
+  const presenceController = new RuntimePresencePolicyController({
+    client: networkClient,
+    getAuthentication: async () => {
+      await networkIdentityService.synchronize();
+      return networkIdentityService.getAuthenticatedSigner();
+    },
+    onChange: (snapshot) => {
+      writeRuntimeDiagnostic("network.presence", {
+        state: snapshot.state,
+        mode: snapshot.mode,
+        sequence: snapshot.sequence,
+        code: snapshot.errorCode
+      });
+    }
+  });
   const releasePolicyService = new LocalReleasePolicyService({
     currentVersion: TETI_BUILD_INFO.appVersion,
     buildTimestamp: TETI_BUILD_INFO.buildTimestamp,
-    store: new FileReleasePolicyStore(join(profile.storeDir, "release-policy-v1.json")),
-    client: new RegistryReleasePolicyClient()
+    store: new FileReleasePolicyStore(join(profile.storeDir, "network-release-policy-v1.json")),
+    client: new NetworkBootstrapReleasePolicyClient(networkClient)
   });
   await releasePolicyService.initialize();
   const codexUsageService = getDefaultCodexUsageService();
@@ -152,6 +204,7 @@ async function startSidecar(): Promise<void> {
     workspaceStore,
     executionRegistry,
     memoryProvider: memoryService,
+    onCollaborationActiveChange: (active) => runtime?.setPresenceCollaborationActive(active),
     transports: [
       new ProcessTransport(),
       new LoopbackHttpTransport({ identityVerifier: osaurusTrustVerifier }),
@@ -160,6 +213,27 @@ async function startSidecar(): Promise<void> {
         authorityVerifier: osaurusNativeAuditor
       })
     ]
+  });
+  const networkProfileService = new TetiNetworkProfileService({
+    client: networkClient,
+    store: new FileTetiNetworkProfileSyncStore(profile.networkProfileSyncPath),
+    getAuthentication: async () => {
+      await networkIdentityService.synchronize();
+      return networkIdentityService.getAuthenticatedSigner();
+    },
+    getDesiredProfile: async () => {
+      const account = await accountStorage.load();
+      if (!account) throw new Error("A local Teti account is required before Network Profile sync.");
+      return projectNetworkPublicProfile(account, hostAgent.getCallableAgents());
+    }
+  });
+  const networkRelationshipService = new TetiNetworkRelationshipService({
+    client: networkClient,
+    store: new FileTetiNetworkRelationshipCommandStore(profile.networkRelationshipCommandPath),
+    getAuthentication: async () => {
+      await networkIdentityService.synchronize();
+      return networkIdentityService.getAuthenticatedSigner();
+    }
   });
   const codexImageRunnerPath = join(dirname(fileURLToPath(import.meta.url)), "codex-image-runner.mjs");
   let pathOverridesPromise: Promise<Record<string, string>> | undefined;
@@ -196,6 +270,7 @@ async function startSidecar(): Promise<void> {
             }),
             qualification.readiness.checkedAt
           );
+          runtime?.notifyNetworkProfileStateChange("capability", publicCapabilityIds(hostAgent));
         }
       },
       async (signal) => {
@@ -218,6 +293,7 @@ async function startSidecar(): Promise<void> {
             qualification.connector,
             qualification.readiness.checkedAt
           );
+          runtime?.notifyNetworkProfileStateChange("capability", publicCapabilityIds(hostAgent));
         }
       },
       async (signal) => {
@@ -239,6 +315,7 @@ async function startSidecar(): Promise<void> {
               qualification.connector,
               qualification.readiness.checkedAt
             );
+            runtime?.notifyNetworkProfileStateChange("capability", publicCapabilityIds(hostAgent));
             return;
           }
           await waitForRetry(signal, OSAURUS_QUALIFICATION_RETRY_MS);
@@ -280,10 +357,12 @@ async function startSidecar(): Promise<void> {
           if (registeredDigest && (!qualification.connector || nextDigest !== registeredDigest)) {
             hostAgent.unregisterConnector(OSAURUS_NATIVE_CHILD.connectorId);
             registeredDigest = null;
+            runtime?.notifyNetworkProfileStateChange("capability", publicCapabilityIds(hostAgent));
           }
           if (!registeredDigest && qualification.connector && nextDigest) {
             hostAgent.registerConnector(qualification.connector, qualification.readiness.checkedAt);
             registeredDigest = nextDigest;
+            runtime?.notifyNetworkProfileStateChange("capability", publicCapabilityIds(hostAgent));
           }
           writeRuntimeDiagnostic("callable.osaurus-native", {
             state: qualification.readiness.state,
@@ -317,14 +396,18 @@ async function startSidecar(): Promise<void> {
   });
   runtime = new TetiRuntime({
     dependencies: {
+      networkClient,
       loadTetiAccount: defaultLifecycleSidecarDependencies.loadTetiAccount,
-      heartbeatDiscovery: defaultLifecycleSidecarDependencies.heartbeatDiscovery,
+      synchronizeNetworkIdentity: () => networkIdentityService.synchronize(),
+      heartbeatDiscovery: () => networkIdentityService.synchronize(),
       getPeerConnectionService: () => getDefaultPeerConnectionService({
+        registry: new TetiNetworkPublicReadAdapter(networkClient),
         getLocalCallableAgents: () => hostAgent.getCallableAgents(),
         getLocalComputeOffers: () => hostAgent.getComputeOffers(),
         taskExecutor: hostAgent,
         taskAttachmentStore,
-        workspaceStore
+        workspaceStore,
+        relationshipService: networkRelationshipService
       }),
       passportSharingStore: await getDefaultPassportSharingStore(),
       codexUsageService,
@@ -333,6 +416,8 @@ async function startSidecar(): Promise<void> {
       hostAgent,
       memoryService,
       releasePolicyService,
+      presenceController,
+      profileService: networkProfileService,
       dispose: async () => {
         await qualificationSupervisor.stop();
         await closeDefaultPeerConnectionService();
@@ -354,6 +439,23 @@ async function startSidecar(): Promise<void> {
         retryable: status.retryable,
         attempt,
         nextRetryMs
+      });
+    },
+    onNetworkStatusChange: (status) => {
+      writeRuntimeDiagnostic("network.contract", {
+        state: status.state,
+        code: "errorCode" in status ? status.errorCode : undefined,
+        protocolVersion: "protocolVersion" in status ? status.protocolVersion : undefined,
+        contractRevision: "contractRevision" in status ? status.contractRevision : undefined,
+        serviceVersion: "serviceVersion" in status ? status.serviceVersion : undefined,
+        retryable: "retryable" in status ? status.retryable : undefined,
+        requestId: "requestId" in status ? status.requestId : undefined
+      });
+    },
+    onStateChange: (event) => {
+      writeRuntimeDiagnostic("runtime.state-change", {
+        kind: event.kind,
+        observedAt: event.observedAt
       });
     }
   });
@@ -380,7 +482,10 @@ async function startSidecar(): Promise<void> {
         const configuration = await writeOsaurusNativeChildConfiguration(osaurusNativeConfigPath, agentId);
         osaurusNativeReadiness = { state: configuration.agentId ? "checking" : "unconfigured" };
         return { ...configuration, readiness: osaurusNativeReadiness.state };
-      }
+      },
+      getNetworkEnvironmentSettings: () => networkEnvironmentSettings.settings,
+      setLocalDevelopmentNetwork: (enabled) =>
+        networkEnvironmentSettings.setUseLocalDevelopmentNetwork(enabled)
     },
     runtime
   );
@@ -394,6 +499,19 @@ async function startSidecar(): Promise<void> {
   reader.once("close", () => { void beginShutdown(0); });
   runtime.start();
   qualificationSupervisor.start();
+}
+
+function resolveNetworkAdoptionGrant(baseUrl: string): string | undefined {
+  const configured = process.env[TETI_NETWORK_ADOPTION_GRANT];
+  if (configured) return configured;
+  const host = new URL(baseUrl).hostname;
+  return host === "127.0.0.1" || host === "localhost" || host === "::1"
+    ? DEVELOPMENT_FIRST_CLAIM_ADOPTION_GRANT
+    : undefined;
+}
+
+function publicCapabilityIds(hostAgent: TetiHostAgentKernel): string[] {
+  return [...new Set(hostAgent.getCallableAgents().flatMap((agent) => agent.capabilityIds))].sort();
 }
 
 function isNativeAuthorityBlocker(reasonCode: string | undefined): boolean {

@@ -117,6 +117,8 @@ export async function createDesktopApp(options: DesktopAppOptions): Promise<Desk
   let disposed = false;
   let stopFocusListener: (() => void) | undefined;
   let stopDockActivateListener: (() => void) | undefined;
+  let stopSystemSleepListener: (() => void) | undefined;
+  let stopSystemWakeListener: (() => void) | undefined;
   let preserveStateForBrandOpen = false;
   let brandOpenGuardTimer: number | undefined;
   let localAppUpdateRequired = false;
@@ -158,6 +160,11 @@ export async function createDesktopApp(options: DesktopAppOptions): Promise<Desk
       }, delayMs)
   });
   const bridge = selection.config.mode === "real" ? new LifecycleBridgeClient(options.tauri) : undefined;
+  const setPresenceSignal = (signal: "sleeping" | "foreground" | "panel_visible", active: boolean) => {
+    if (!bridge) return;
+    void bridge.request("presence.signal.set", { signal, active }).catch(() => undefined);
+  };
+  let lastPanelVisible = false;
   const release = new ReleaseController({
     client: bridge
       ? new BridgeReleaseStatusClient(bridge)
@@ -182,7 +189,14 @@ export async function createDesktopApp(options: DesktopAppOptions): Promise<Desk
           mockPassportClient?.setConnections(items);
         }),
     notchWindow,
-    onChange: () => app?.render(),
+    onChange: () => {
+      const panelVisible = connections.snapshot.open;
+      if (panelVisible !== lastPanelVisible) {
+        lastPanelVisible = panelVisible;
+        setPresenceSignal("panel_visible", panelVisible);
+      }
+      app?.render();
+    },
     refreshPassport: () => passport.refreshAfterMutation()
   });
   const tasks = new TaskController({
@@ -202,6 +216,7 @@ export async function createDesktopApp(options: DesktopAppOptions): Promise<Desk
   });
   if (options.tauri.onFocusChanged) {
     stopFocusListener = await options.tauri.onFocusChanged((focused) => {
+      setPresenceSignal("foreground", focused);
       if (localAppUpdateRequired) {
         void notchWindow.setMode("error", "local-app-update-required").catch(() => undefined);
         return;
@@ -216,6 +231,18 @@ export async function createDesktopApp(options: DesktopAppOptions): Promise<Desk
         tasks.dismissFromOutside();
         connections.dismissFromOutside();
       }
+    });
+  }
+
+  if (options.tauri.onSystemSleep) {
+    stopSystemSleepListener = await options.tauri.onSystemSleep(() => {
+      setPresenceSignal("sleeping", true);
+    });
+  }
+
+  if (options.tauri.onSystemWake) {
+    stopSystemWakeListener = await options.tauri.onSystemWake(() => {
+      setPresenceSignal("sleeping", false);
     });
   }
 
@@ -245,6 +272,11 @@ export async function createDesktopApp(options: DesktopAppOptions): Promise<Desk
     release,
     config: selection.config,
     render: () => {
+      const panelVisible = connections.snapshot.open;
+      if (panelVisible !== lastPanelVisible) {
+        lastPanelVisible = panelVisible;
+        setPresenceSignal("panel_visible", panelVisible);
+      }
       const wasUpdateRequired = localAppUpdateRequired;
       localAppUpdateRequired = release.status.state === "update_required";
       if (localAppUpdateRequired) {
@@ -276,6 +308,8 @@ export async function createDesktopApp(options: DesktopAppOptions): Promise<Desk
       disposed = true;
       stopFocusListener?.();
       stopDockActivateListener?.();
+      stopSystemSleepListener?.();
+      stopSystemWakeListener?.();
       clearBrandOpenGuard();
       options.root.removeEventListener(TETI_BOT_OPENING_EVENT, handleBrandWebsiteOpening);
       options.root.removeEventListener(TETI_BOT_OPEN_SETTLED_EVENT, handleBrandWebsiteOpenSettled);
@@ -289,6 +323,8 @@ export async function createDesktopApp(options: DesktopAppOptions): Promise<Desk
 
   await release.start();
   await coordinator.initialize();
+  setPresenceSignal("foreground", options.root.ownerDocument.hasFocus());
+  setPresenceSignal("panel_visible", connections.snapshot.open);
   passport.start();
   tasks.start();
   await memory.start();

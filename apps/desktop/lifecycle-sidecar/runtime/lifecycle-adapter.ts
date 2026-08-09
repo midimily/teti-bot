@@ -13,15 +13,38 @@ export function createRuntimeOwnedLifecycleDependencies(
     ...base,
     createTetiAccount: async (input) => {
       const account = await base.createTetiAccount(input);
-      runtime.notifyAccountAvailable(account);
-      return account;
+      try {
+        const synchronized = await runtime.synchronizeNetworkIdentity();
+        try {
+          await base.onNetworkIdentitySynchronized?.(synchronized);
+        } catch {
+          // Marker/manifest metadata cannot roll back a committed Network identity.
+        }
+        runtime.notifyAccountAvailable(synchronized, { synchronizeNetworkIdentity: false });
+        return synchronized;
+      } catch {
+        // Local/Chatmail identity remains usable; the Runtime job owns recovery and diagnostics.
+        runtime.notifyAccountAvailable(account);
+        return account;
+      }
     },
     getTetiStatus: () => runtime.getTetiStatus(),
     registerDiscovery: async (account) => {
-      await base.registerDiscovery(account);
-      runtime.notifyRegistryRegistered(account);
+      const synchronized = await runtime.synchronizeNetworkIdentity();
+      try {
+        await base.onNetworkIdentitySynchronized?.(synchronized);
+      } catch {
+        // Marker/manifest metadata cannot roll back a committed Network identity.
+      }
+      runtime.notifyRegistryRegistered(synchronized);
     },
     heartbeatDiscovery: () => runtime.readDiscoveryAccount(),
+    getPresenceStatus: () => runtime.getPresenceSnapshot(),
+    setPresenceSignal: ({ signal, active }) => {
+      if (signal === "sleeping") runtime.setPresenceSleeping(active);
+      if (signal === "foreground") runtime.setPresenceForeground(active);
+      if (signal === "panel_visible") runtime.setPresencePanelVisible(active);
+    },
     getLocalReleaseStatus: () => runtime.getLocalReleaseStatus(),
     getPeerConnectionService: async () => runtime.getPeerConnectionFacade(),
     getPassportSnapshot: () => runtime.getPassportSnapshot(),

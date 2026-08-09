@@ -54,11 +54,30 @@ export interface TetiConnectionRecord {
   acceptedAt?: string;
   rejectedAt?: string;
   confirmedAt?: string;
+  /** Network is authoritative; the enclosing record remains the local Chatmail recovery projection. */
+  networkRelationship?: {
+    schemaVersion: 1;
+    id: string;
+    revision: number;
+    state: "requested" | "confirmed" | "rejected" | "blocked" | "revoked";
+    etag: `"relationship-r${number}"`;
+    blockedBy: "self" | "peer" | null;
+    stateChangedAt: string;
+  };
 }
 
 export interface TetiConnectionStore {
   version: 1;
   connections: TetiConnectionRecord[];
+}
+
+export function isTetiConnectionArchived(connection: TetiConnectionRecord): boolean {
+  return connection.networkRelationship?.state === "revoked";
+}
+
+export function isTetiConnectionConfirmed(connection: TetiConnectionRecord): boolean {
+  return connection.state === TetiConnectionState.Confirmed
+    && !isTetiConnectionArchived(connection);
 }
 
 export type TetiConnectionEnvelopeType =

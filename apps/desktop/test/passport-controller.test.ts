@@ -180,13 +180,39 @@ test("Agent management supports explicit rescan and local path override", async 
   assert.equal(controller.snapshot.agentManagement.pathOverrides.codex, undefined);
 });
 
+test("Settings exposes an explicit restart-bound local Network opt-in", async () => {
+  const client = new FakePassportClient();
+  client.provideNetworkSettings = true;
+  const controller = new PassportController({ client, onChange: () => undefined });
+  controller.start();
+  await flushPromises();
+
+  assert.equal(controller.snapshot.networkEnvironment?.useLocalDevelopmentNetwork, false);
+  assert.equal(controller.snapshot.presence?.state, "online");
+  await controller.setLocalDevelopmentNetwork(true);
+  assert.equal(controller.snapshot.networkEnvironment?.configuredBaseUrl, "http://127.0.0.1:8788");
+  assert.equal(controller.snapshot.networkEnvironment?.activeBaseUrl, "https://network.teti.bot");
+  assert.equal(controller.snapshot.networkEnvironment?.restartRequired, true);
+  controller.stop();
+});
+
 class FakePassportClient implements PassportClient {
   getCalls = 0;
   failSet = false;
   failAgentRead = false;
   failOsaurusRead = false;
+  provideNetworkSettings = false;
   snapshot = emptyPassportSnapshot(new Date("2026-07-22T00:00:00.000Z"));
   agents = emptyAgentManagementSnapshot(new Date("2026-07-22T00:00:00.000Z"));
+  networkEnvironment = {
+    schemaVersion: 1 as const,
+    useLocalDevelopmentNetwork: false,
+    activeEnvironment: "production" as const,
+    activeBaseUrl: "https://network.teti.bot",
+    configuredEnvironment: "production" as "production" | "local_development",
+    configuredBaseUrl: "https://network.teti.bot",
+    restartRequired: false
+  };
 
   async getSnapshot(): Promise<RuntimePassportSnapshot> {
     this.getCalls += 1;
@@ -208,6 +234,36 @@ class FakePassportClient implements PassportClient {
   async getOsaurusNativeChildSettings() {
     if (this.failOsaurusRead) throw new Error("Osaurus settings unavailable");
     return { schemaVersion: 1 as const, agentId: null, readiness: "unconfigured" as const };
+  }
+
+  async getNetworkEnvironmentSettings() {
+    if (!this.provideNetworkSettings) throw new Error("Network settings unavailable");
+    return structuredClone(this.networkEnvironment);
+  }
+
+  async setLocalDevelopmentNetwork(enabled: boolean) {
+    this.networkEnvironment = {
+      ...this.networkEnvironment,
+      useLocalDevelopmentNetwork: enabled,
+      configuredEnvironment: enabled ? "local_development" : "production",
+      configuredBaseUrl: enabled ? "http://127.0.0.1:8788" : "https://network.teti.bot",
+      restartRequired: enabled
+    };
+    return structuredClone(this.networkEnvironment);
+  }
+
+  async getPresenceStatus() {
+    if (!this.provideNetworkSettings) throw new Error("Presence unavailable");
+    return {
+      schemaVersion: 1 as const,
+      state: "online" as const,
+      mode: "online" as const,
+      sessionId: "ps_AAAAAAAAAAAAAAAAAAAAAA",
+      sequence: 1,
+      foreground: true,
+      panelVisible: false,
+      collaborationActive: false
+    };
   }
 
   async rescanAgents(): Promise<AgentManagementSnapshot> {

@@ -22,6 +22,117 @@ import {
   MemoryPassportSharingStore,
   resourceSharingPolicy
 } from "../lifecycle-sidecar/runtime/passport/sharing.ts";
+import { TetiNetworkClientError } from "../../../services/network/errors.ts";
+import { FakeTetiNetworkClient } from "../../../services/network/fake-client.ts";
+
+test("Runtime owns an opt-in Network contract preflight without requiring an account", async () => {
+  const clock = fakeClock();
+  let registryCalls = 0;
+  const networkClient = new FakeTetiNetworkClient(compatibleNetworkBootstrap());
+  const runtime = new TetiRuntime({
+    dependencies: {
+      networkClient,
+      async loadTetiAccount() { return null; },
+      async heartbeatDiscovery() {
+        registryCalls += 1;
+        throw new Error("missing account");
+      },
+      async getPeerConnectionService() { return new FakePeerService(); },
+      passportSharingStore: new MemoryPassportSharingStore(),
+      codexUsageService: new FakeCodexUsageService()
+    },
+    schedule: clock.schedule,
+    cancel: clock.cancel
+  });
+
+  assert.deepEqual(runtime.getNetworkContractStatus(), { state: "checking" });
+  runtime.start();
+  await drain();
+
+  assert.equal(networkClient.calls, 1);
+  assert.equal(registryCalls, 0);
+  assert.deepEqual(runtime.getNetworkContractStatus(), {
+    state: "compatible",
+    checkedAt: runtime.getNetworkContractStatus().state === "compatible"
+      ? runtime.getNetworkContractStatus().checkedAt
+      : "unreachable",
+    protocolVersion: 1,
+    contractRevision: 6,
+    serviceVersion: "0.1.5"
+  });
+  assert.equal(
+    runtime.snapshot.jobs.find((job) => job.id === "network-contract")?.consecutiveFailures,
+    0
+  );
+  await runtime.stop();
+});
+
+test("Runtime maps Network contract failures and owns their retry schedule", async () => {
+  const clock = fakeClock();
+  const statuses: string[] = [];
+  const runtime = new TetiRuntime({
+    dependencies: {
+      networkClient: {
+        async getBootstrap() {
+          throw new TetiNetworkClientError({
+            code: "NETWORK_TIMEOUT",
+            operation: "bootstrap",
+            message: "timeout",
+            retryable: true
+          });
+        }
+      },
+      async loadTetiAccount() { return null; },
+      async heartbeatDiscovery() { throw new Error("missing account"); },
+      async getPeerConnectionService() { return new FakePeerService(); },
+      passportSharingStore: new MemoryPassportSharingStore(),
+      codexUsageService: new FakeCodexUsageService()
+    },
+    schedule: clock.schedule,
+    cancel: clock.cancel,
+    onNetworkStatusChange(status) { statuses.push(status.state); }
+  });
+
+  runtime.start();
+  await drain();
+
+  const status = runtime.getNetworkContractStatus();
+  assert.equal(status.state, "unavailable");
+  assert.equal(status.state === "unavailable" && status.errorCode, "NETWORK_TIMEOUT");
+  assert.deepEqual(statuses, ["unavailable"]);
+  assert.equal(clock.pending().some((entry) => entry.delayMs === 5_000), true);
+  await runtime.stop();
+});
+
+test("Runtime does not short-retry an incompatible Network contract", async () => {
+  const clock = fakeClock();
+  const runtime = new TetiRuntime({
+    dependencies: {
+      networkClient: {
+        async getBootstrap() {
+          return { ...compatibleNetworkBootstrap(), protocolVersion: 2 };
+        }
+      },
+      async loadTetiAccount() { return null; },
+      async heartbeatDiscovery() { throw new Error("missing account"); },
+      async getPeerConnectionService() { return new FakePeerService(); },
+      passportSharingStore: new MemoryPassportSharingStore(),
+      codexUsageService: new FakeCodexUsageService()
+    },
+    schedule: clock.schedule,
+    cancel: clock.cancel
+  });
+
+  runtime.start();
+  await drain();
+
+  assert.equal(runtime.getNetworkContractStatus().state, "incompatible");
+  assert.equal(clock.pending().some((entry) => entry.delayMs === 5_000), false);
+  assert.equal(clock.pending().some(
+    (entry) => entry.delayMs === TETI_RUNTIME_INTERVALS.networkContractMs
+  ), true);
+  await runtime.stop();
+});
 
 test("Runtime owns Registry, Chatmail, peer heartbeat, AI sync, and Codex background scheduling", async () => {
   const clock = fakeClock();
@@ -78,7 +189,7 @@ test("Runtime owns Registry, Chatmail, peer heartbeat, AI sync, and Codex backgr
   assert.equal(clock.pending().length, 0);
 });
 
-test("Peer nicknames recover after Registry connectivity returns without depending on Chatmail polling", async () => {
+test("Peer nicknames recover after Network connectivity returns without depending on Chatmail polling", async () => {
   const account = createAccount();
   const clock = fakeClock();
   const peer = new FakePeerService();
@@ -246,6 +357,7 @@ test("Passport reads consume Runtime cache without duplicating network refreshes
 test("account creation activates account-bound Runtime jobs without restarting the process", async () => {
   let account: TetiAccount | null = null;
   let registryCalls = 0;
+  let legacyHeartbeatCalls = 0;
   const peer = new FakePeerService();
   const codex = new FakeCodexUsageService();
   const base = fakeLifecycleDependencies(account, peer, codex, () => { registryCalls += 1; });
@@ -255,13 +367,19 @@ test("account creation activates account-bound Runtime jobs without restarting t
     return clone(account);
   };
   base.heartbeatDiscovery = async () => {
-    registryCalls += 1;
+    legacyHeartbeatCalls += 1;
     if (!account) throw new Error("missing account");
     return clone(account);
   };
   const runtime = new TetiRuntime({
     dependencies: {
       loadTetiAccount: base.loadTetiAccount,
+      async synchronizeNetworkIdentity() {
+        registryCalls += 1;
+        if (!account) throw new Error("missing account");
+        account = { ...account, id: "teti_netwrk001" };
+        return clone(account);
+      },
       heartbeatDiscovery: base.heartbeatDiscovery,
       getPeerConnectionService: base.getPeerConnectionService,
       passportSharingStore: new MemoryPassportSharingStore(),
@@ -275,9 +393,11 @@ test("account creation activates account-bound Runtime jobs without restarting t
   assert.equal(registryCalls, 0);
   assert.equal(peer.pollCalls, 0);
 
-  await dependencies.createTetiAccount({ name: "Milo" });
+  const created = await dependencies.createTetiAccount({ name: "Milo" });
   await drain();
+  assert.equal(created.id, "teti_netwrk001");
   assert.equal(registryCalls, 1);
+  assert.equal(legacyHeartbeatCalls, 0);
   assert.equal(peer.pollCalls, 1);
   assert.equal(codex.refreshCalls, 1);
   await runtime.stop();
@@ -570,6 +690,39 @@ function createAccount(): TetiAccount {
     publicKey: "public-key",
     publicProfile: { platform: "macOS", category: ["developer"], aiEnvironment: [] },
     createdAt: "2026-07-21T09:00:00.000Z"
+  };
+}
+
+function compatibleNetworkBootstrap() {
+  return {
+    protocolVersion: 1,
+    contractRevision: 6,
+    service: { name: "teti-network" as const, version: "0.1.5" },
+    serverTime: "2026-08-08T00:00:00.000Z",
+    protocolSupport: { minimumSupportedVersion: 1, supportedVersions: [1] },
+    releasePolicy: {
+      schemaVersion: 1 as const,
+      policyVersion: 1,
+      channel: "beta" as const,
+      minimumSupportedVersion: "0.3.0",
+      effectiveAt: "2026-08-08T00:00:00.000Z"
+    },
+    capabilities: {
+      publicDirectory: true,
+      identity: true,
+      clientAuthentication: true,
+      presence: true,
+      publicProfile: true,
+      relationships: true,
+      relayBindings: false,
+      invites: false
+    },
+    presencePolicy: {
+      collaborating: { reportEverySeconds: 5, ttlSeconds: 20 },
+      viewing_connect: { reportEverySeconds: 5, ttlSeconds: 20 },
+      online: { reportEverySeconds: 15, ttlSeconds: 45 },
+      background: { reportEverySeconds: 30, ttlSeconds: 90 }
+    }
   };
 }
 

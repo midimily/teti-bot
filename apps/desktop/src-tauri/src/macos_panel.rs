@@ -9,13 +9,14 @@ use objc2::{msg_send, rc::Retained, runtime::AnyObject, MainThreadMarker};
 use objc2_app_kit::{
     NSApplicationDidChangeScreenParametersNotification, NSColor, NSMainMenuWindowLevel, NSPanel,
     NSScreen, NSWindowCollectionBehavior, NSWindowDidChangeScreenNotification, NSWindowStyleMask,
-    NSWorkspace, NSWorkspaceActiveSpaceDidChangeNotification,
+    NSWorkspace, NSWorkspaceActiveSpaceDidChangeNotification, NSWorkspaceDidWakeNotification,
+    NSWorkspaceWillSleepNotification,
 };
 use objc2_foundation::{
     NSNotification, NSNotificationCenter, NSNotificationName, NSOperationQueue, NSPoint, NSRect,
     NSSize,
 };
-use tauri::{AppHandle, Manager, WebviewWindow, Wry};
+use tauri::{AppHandle, Emitter, Manager, WebviewWindow, Wry};
 use tauri_nspanel::WebviewWindowExt;
 
 use crate::window::{
@@ -108,6 +109,18 @@ pub fn install_screen_change_observers(app: &AppHandle) -> Result<(), String> {
         &default_center,
         unsafe { NSWindowDidChangeScreenNotification },
         Some(panel),
+        app,
+    );
+    retain_app_event_observer(
+        &workspace_center,
+        unsafe { NSWorkspaceWillSleepNotification },
+        "teti://system-sleep",
+        app,
+    );
+    retain_app_event_observer(
+        &workspace_center,
+        unsafe { NSWorkspaceDidWakeNotification },
+        "teti://system-wake",
         app,
     );
     Ok(())
@@ -282,6 +295,27 @@ fn retain_refresh_observer(
         center.addObserverForName_object_queue_usingBlock(
             Some(name),
             object,
+            Some(&NSOperationQueue::mainQueue()),
+            &block,
+        )
+    };
+    let _ = Retained::into_raw(observer);
+}
+
+fn retain_app_event_observer(
+    center: &NSNotificationCenter,
+    name: &NSNotificationName,
+    event: &'static str,
+    app: &AppHandle,
+) {
+    let handle = app.clone();
+    let block: RcBlock<dyn Fn(NonNull<NSNotification>)> = RcBlock::new(move |_| {
+        let _ = handle.emit(event, ());
+    });
+    let observer = unsafe {
+        center.addObserverForName_object_queue_usingBlock(
+            Some(name),
+            None,
             Some(&NSOperationQueue::mainQueue()),
             &block,
         )

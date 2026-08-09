@@ -74,6 +74,50 @@ test("Osaurus Native settings get and set requests reach their sidecar dependenc
   assert.equal(savedAgentId, "123E4567-E89B-42D3-A456-426614174000");
 });
 
+test("Network environment and Presence signals cross the sidecar boundary as normalized data", async () => {
+  const deps = fakeDependencies();
+  let localDevelopment = false;
+  const signals: Array<{ signal: string; active: boolean }> = [];
+  deps.getNetworkEnvironmentSettings = () => ({
+    schemaVersion: 1,
+    useLocalDevelopmentNetwork: localDevelopment,
+    activeEnvironment: "production",
+    activeBaseUrl: "https://network.teti.bot",
+    configuredEnvironment: localDevelopment ? "local_development" : "production",
+    configuredBaseUrl: localDevelopment
+      ? "http://127.0.0.1:8788"
+      : "https://network.teti.bot",
+    restartRequired: localDevelopment
+  });
+  deps.setLocalDevelopmentNetwork = async (enabled) => {
+    localDevelopment = enabled;
+    return deps.getNetworkEnvironmentSettings!();
+  };
+  deps.setPresenceSignal = (signal) => { signals.push(signal); };
+  deps.getPresenceStatus = () => ({
+    schemaVersion: 1,
+    state: "checking",
+    mode: "viewing_connect",
+    sessionId: "ps_AAAAAAAAAAAAAAAAAAAAAA",
+    sequence: 1,
+    foreground: true,
+    panelVisible: true,
+    collaborationActive: false
+  });
+
+  const environment = await handleLifecycleRequest(request("network.environment.set", {
+    enabled: true
+  }), deps);
+  const presence = await handleLifecycleRequest(request("presence.signal.set", {
+    signal: "panel_visible",
+    active: true
+  }), deps);
+
+  assert.equal(environment.ok && environment.result.configuredEnvironment, "local_development");
+  assert.equal(presence.ok && presence.result.state, "checking");
+  assert.deepEqual(signals, [{ signal: "panel_visible", active: true }]);
+});
+
 test("local Release Policy locks obsolete builds without using peer compatibility", async () => {
   const deps = fakeDependencies({ account: createAccount("Milo") });
   deps.getLocalReleaseStatus = async () => ({

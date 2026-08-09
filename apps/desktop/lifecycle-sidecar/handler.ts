@@ -1,7 +1,6 @@
 import type { TetiAccount, TetiStatus } from "../../../core/account/model.ts";
 import { validateTetiDisplayName } from "../../../core/account/display-name.ts";
-import { TetiAccountManager, toDiscoveryRegistrationPayload } from "../../../core/account/manager.ts";
-import { RegistryDiscoveryClient } from "../../../services/discovery/registry-client.ts";
+import { TetiAccountManager } from "../../../core/account/manager.ts";
 import {
   LIFECYCLE_MAX_LINE_BYTES,
   LIFECYCLE_METHODS,
@@ -12,6 +11,8 @@ import {
   type LifecycleResult,
   type LifecycleStatusResult,
   type OsaurusNativeChildSettingsDto,
+  type TetiNetworkEnvironmentSettingsDto,
+  type RuntimePresenceStatusDto,
   type PublicTetiAccount
 } from "../src/lifecycle-bridge/protocol.ts";
 import { isUnsafeIncompleteMarker, readCreationMarker, writeCreationMarker } from "./marker.ts";
@@ -24,7 +25,6 @@ import {
 } from "./profile.ts";
 import { createLifecycleError, sanitizeUnknownError } from "./security.ts";
 import {
-  getDefaultPeerConnectionService,
   type PeerConnectionService
 } from "./connections.ts";
 import type { RuntimePassportSnapshot } from "../../../core/passport/snapshot.ts";
@@ -53,6 +53,7 @@ export interface LifecycleSidecarDependencies {
   getTetiStatus(): Promise<TetiStatus>;
   registerDiscovery(account: TetiAccount): Promise<unknown>;
   heartbeatDiscovery(): Promise<TetiAccount>;
+  onNetworkIdentitySynchronized?(account: TetiAccount): Promise<void>;
   getPeerConnectionService(): Promise<PeerConnectionService>;
   getLocalReleaseStatus?(): Promise<LocalReleaseStatus> | LocalReleaseStatus;
   getPassportSnapshot?(): Promise<RuntimePassportSnapshot>;
@@ -72,6 +73,13 @@ export interface LifecycleSidecarDependencies {
   exportChildMemory?(): Promise<MemoryExportResult>;
   getOsaurusNativeChildSettings?(): Promise<OsaurusNativeChildSettingsDto>;
   setOsaurusNativeChildAgentId?(agentId: string | null): Promise<OsaurusNativeChildSettingsDto>;
+  getNetworkEnvironmentSettings?(): Promise<TetiNetworkEnvironmentSettingsDto> | TetiNetworkEnvironmentSettingsDto;
+  setLocalDevelopmentNetwork?(enabled: boolean): Promise<TetiNetworkEnvironmentSettingsDto>;
+  getPresenceStatus?(): RuntimePresenceStatusDto | undefined;
+  setPresenceSignal?(input: {
+    signal: "sleeping" | "foreground" | "panel_visible";
+    active: boolean;
+  }): void;
 }
 
 export const defaultLifecycleSidecarDependencies: LifecycleSidecarDependencies = {
@@ -82,12 +90,18 @@ export const defaultLifecycleSidecarDependencies: LifecycleSidecarDependencies =
   },
   createTetiAccount: async (input) => createGuardedRealTetiAccount(input),
   getTetiStatus: async () => (await getDefaultAccountManager()).getTetiStatus(),
-  registerDiscovery: async (account) => {
-    await new RegistryDiscoveryClient().registerIdentity(toDiscoveryRegistrationPayload(account));
-    await markDiscoveryRegistrationComplete(account);
+  registerDiscovery: async () => {
+    throw new Error("Network identity synchronization is owned by Teti Runtime.");
   },
-  heartbeatDiscovery: async () => (await getDefaultAccountManager()).ensureTetiRegistration(),
-  getPeerConnectionService: getDefaultPeerConnectionService
+  heartbeatDiscovery: async () => {
+    const account = await (await getDefaultAccountManager()).loadTetiAccount();
+    if (!account) throw new Error("A local Teti account is required.");
+    return account;
+  },
+  onNetworkIdentitySynchronized: markDiscoveryRegistrationComplete,
+  getPeerConnectionService: async () => {
+    throw new Error("Peer Network composition is unavailable before Runtime startup.");
+  }
 };
 
 export async function handleLifecycleRequest(
@@ -172,6 +186,35 @@ async function dispatchLifecycleRequest(
             source: "none",
             diagnosticCode: "RELEASE_POLICY_UNAVAILABLE"
           };
+
+    case "network.environment.get":
+      if (!dependencies.getNetworkEnvironmentSettings) {
+        throw new Error("Teti Network environment settings are unavailable.");
+      }
+      return dependencies.getNetworkEnvironmentSettings();
+
+    case "network.environment.set":
+      if (!dependencies.setLocalDevelopmentNetwork) {
+        throw new Error("Teti Network environment settings are unavailable.");
+      }
+      return dependencies.setLocalDevelopmentNetwork(
+        validateBoolean(request.params?.enabled, "Network development setting")
+      );
+
+    case "presence.get":
+      return dependencies.getPresenceStatus?.() ?? null;
+
+    case "presence.signal.set": {
+      const signal = request.params?.signal;
+      if (signal !== "sleeping" && signal !== "foreground" && signal !== "panel_visible") {
+        throw new Error("Presence signal is invalid.");
+      }
+      dependencies.setPresenceSignal?.({
+        signal,
+        active: validateBoolean(request.params?.active, "Presence signal")
+      });
+      return dependencies.getPresenceStatus?.() ?? null;
+    }
 
     case "account.status":
       return statusToDto(await dependencies.getTetiStatus(), await dependencies.loadTetiAccount());
@@ -741,6 +784,11 @@ function fallbackCodeForMethod(method: LifecycleRequest["method"]) {
   switch (method) {
     case "account.create":
       return "ACCOUNT_CREATE_FAILED";
+    case "network.environment.get":
+    case "network.environment.set":
+    case "presence.get":
+    case "presence.signal.set":
+      return "INTERNAL_ERROR";
     case "discovery.register":
     case "discovery.retry":
       return "DISCOVERY_REGISTRATION_FAILED";

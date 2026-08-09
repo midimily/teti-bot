@@ -2,7 +2,11 @@ import { createHash, randomUUID } from "node:crypto";
 import type { TetiAccountStorage } from "../../../../../core/account/storage.ts";
 import type { TetiApplicationManager } from "../../../../../core/application/manager.ts";
 import type { TetiConnectionStorage } from "../../../../../core/connection/storage.ts";
-import { TetiConnectionState, type TetiConnectionRecord } from "../../../../../core/connection/types.ts";
+import {
+  isTetiConnectionConfirmed,
+  TetiConnectionState,
+  type TetiConnectionRecord
+} from "../../../../../core/connection/types.ts";
 import { isCanonicalTetiPublicId } from "../../../../../core/identity/public-id.ts";
 import type { TetiApplicationEnvelope } from "../../../../../core/protocol/types.ts";
 import {
@@ -2599,7 +2603,7 @@ export class TaskTransportRuntime {
 
   private async requireConfirmedConnection(requestId: string): Promise<TetiConnectionRecord> {
     const connection = (await this.connectionStorage.loadAll()).find((item) => item.requestId === requestId);
-    if (!connection || connection.state !== TetiConnectionState.Confirmed) {
+    if (!connection || !isTetiConnectionConfirmed(connection)) {
       throw new TaskTransportRuntimeError("TASK_CONNECTION_REQUIRED", "A Confirmed Teti connection is required.");
     }
     return connection;
@@ -2607,7 +2611,7 @@ export class TaskTransportRuntime {
 
   private async findConfirmedConnectionForPeer(tetiId: string): Promise<TetiConnectionRecord | undefined> {
     return (await this.connectionStorage.loadAll()).find(
-      (connection) => connection.state === TetiConnectionState.Confirmed
+      (connection) => isTetiConnectionConfirmed(connection)
         && connection.remoteTetiId === tetiId
     );
   }

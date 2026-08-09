@@ -76,6 +76,21 @@ test("fetches a Teti profile by id", async () => {
   assert.equal(await service.getTetiProfile("teti_missing00"), null);
 });
 
+test("keeps Network Identity independent from its Chatmail delivery mailbox", async () => {
+  const service = new TetiDiscoveryService({
+    registry: new StaticRegistry([{
+      version: 1,
+      id: "teti_network01",
+      address: "existing01@mail.seep.im",
+      publicProfile: {}
+    }])
+  });
+
+  const identity = await service.getTetiProfile("teti_network01");
+  assert.equal(identity?.id, "teti_network01");
+  assert.equal(identity?.address, "existing01@mail.seep.im");
+});
+
 test("calculates deterministic compatibility scores", () => {
   const matches = matchTetis({
     localProfile: {

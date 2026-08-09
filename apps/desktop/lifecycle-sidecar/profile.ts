@@ -26,6 +26,10 @@ export interface TetiProfile {
   accountDir: string;
   accountPath: string;
   credentialsDir: string;
+  networkCredentialsPath: string;
+  networkProfileSyncPath: string;
+  networkRelationshipCommandPath: string;
+  networkEnvironmentPath: string;
   chatmailAccountsPath: string;
   lifecycleDir: string;
   markerPath: string;
@@ -56,6 +60,10 @@ export async function resolveTetiProfile(env: NodeJS.ProcessEnv = process.env): 
     accountDir: join(storeDir, "account"),
     accountPath: join(storeDir, "account", "account.json"),
     credentialsDir: join(storeDir, "credentials"),
+    networkCredentialsPath: join(storeDir, "credentials", "teti-network-identity-v1.json"),
+    networkProfileSyncPath: join(storeDir, "network-profile-sync-v1.json"),
+    networkRelationshipCommandPath: join(storeDir, "network-relationship-command-v1.json"),
+    networkEnvironmentPath: join(storeDir, "network-environment-v1.json"),
     chatmailAccountsPath: join(storeDir, "credentials", "chatmail-accounts"),
     lifecycleDir: join(root, "lifecycle"),
     markerPath: join(root, "lifecycle", "creation-marker.json"),

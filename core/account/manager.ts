@@ -7,11 +7,9 @@ import {
   type ChatmailProvisioner
 } from "../../integrations/chatmail/provisioner.ts";
 import { UnconfiguredChatmailRpcClient } from "../../integrations/chatmail/rpc-client.ts";
-import type { DiscoveryClient } from "../../services/discovery/registry-client.ts";
-import {
-  RegistryClientError,
-  RegistryDiscoveryClient
-} from "../../services/discovery/registry-client.ts";
+import type { DiscoveryRegistrySyncClient } from "../../services/discovery/registry-client.ts";
+import { RegistryClientError } from "../../services/discovery/registry-client.ts";
+import { LegacyWorkerRegistrySyncAdapter } from "../../services/network/legacy-worker-adapter.ts";
 import {
   environmentScanToPublicProfile,
   scanEnvironment
@@ -38,7 +36,7 @@ export interface TetiAccountManagerOptions {
   storage?: TetiAccountStorage;
   chatmailAdapter?: ChatmailAdapter;
   chatmailProvisioner?: ChatmailProvisioner;
-  discoveryClient?: DiscoveryClient;
+  discoveryClient?: DiscoveryRegistrySyncClient;
   environmentScanner?: () => Promise<EnvironmentScan>;
   expectedAddressSuffix?: string;
   onCreationStage?: (stage: TetiAccountCreationStage, account?: TetiAccount) => Promise<void> | void;
@@ -54,7 +52,7 @@ export class TetiAccountManager {
   private readonly storage: TetiAccountStorage;
   private readonly chatmailAdapter: ChatmailAdapter;
   private readonly chatmailProvisioner?: ChatmailProvisioner;
-  private readonly discoveryClient: DiscoveryClient;
+  private readonly discoveryClient: DiscoveryRegistrySyncClient;
   private readonly environmentScanner: () => Promise<EnvironmentScan>;
   private readonly shouldUseProvisioner: boolean;
   private readonly expectedAddressSuffix?: string;
@@ -68,7 +66,7 @@ export class TetiAccountManager {
     this.chatmailAdapter =
       options.chatmailAdapter ?? new RealChatmailAdapter(new UnconfiguredChatmailRpcClient());
     this.shouldUseProvisioner = options.chatmailProvisioner !== undefined || !options.chatmailAdapter;
-    this.discoveryClient = options.discoveryClient ?? new RegistryDiscoveryClient();
+    this.discoveryClient = options.discoveryClient ?? new LegacyWorkerRegistrySyncAdapter();
     this.environmentScanner = options.environmentScanner ?? scanEnvironment;
     this.expectedAddressSuffix = options.expectedAddressSuffix;
     this.onCreationStage = options.onCreationStage;
@@ -114,6 +112,11 @@ export class TetiAccountManager {
       publicKey: chatmailIdentity.publicKey,
       fingerprint: chatmailIdentity.fingerprint,
       publicProfile,
+      networkIdentity: {
+        schemaVersion: 1,
+        mode: "register",
+        state: "pending"
+      },
       createdAt: new Date().toISOString()
     };
     const accountDisplayName = chatmailIdentity.displayName ?? displayName;
@@ -211,8 +214,7 @@ export class TetiAccountManager {
 
     await this.storage.save(updatedAccount);
     await this.discoveryClient.heartbeatIdentity({
-      id: getTetiId(updatedAccount),
-      publicProfile: updatedAccount.publicProfile
+      id: getTetiId(updatedAccount)
     });
 
     return updatedAccount;

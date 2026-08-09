@@ -182,6 +182,22 @@ export function validateConnectionRecord(connection: TetiConnectionRecord): void
   if (!connection.requestId || !connection.remoteTetiId || !connection.remoteAddress) {
     throw new Error("Teti connection record is missing required identity fields.");
   }
+
+  if (connection.networkRelationship !== undefined) {
+    const relationship = connection.networkRelationship;
+    if (relationship.schemaVersion !== 1
+      || !/^rel_[A-Za-z0-9_-]{21}[AQgw]$/.test(relationship.id)
+      || relationship.id !== connection.requestId
+      || !Number.isSafeInteger(relationship.revision)
+      || relationship.revision < 1
+      || !["requested", "confirmed", "rejected", "blocked", "revoked"].includes(relationship.state)
+      || relationship.etag !== `"relationship-r${relationship.revision}"`
+      || !["self", "peer", null].includes(relationship.blockedBy)
+      || (relationship.state === "blocked") !== (relationship.blockedBy !== null)
+      || !Number.isFinite(Date.parse(relationship.stateChangedAt))) {
+      throw new Error("Teti Network Relationship recovery metadata is invalid.");
+    }
+  }
 }
 
 function cloneConnections(connections: TetiConnectionRecord[]): TetiConnectionRecord[] {

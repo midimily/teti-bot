@@ -6,7 +6,11 @@ import {
   FileTetiConnectionStorage,
   type TetiConnectionStorage
 } from "../connection/storage.ts";
-import { TetiConnectionState, type TetiConnectionRecord } from "../connection/types.ts";
+import {
+  isTetiConnectionConfirmed,
+  TetiConnectionState,
+  type TetiConnectionRecord
+} from "../connection/types.ts";
 import {
   createApplicationEnvelope,
   parseApplicationEnvelope,
@@ -298,7 +302,7 @@ export class TetiApplicationManager {
       throw new Error(`Teti connection ${requestId} does not exist.`);
     }
 
-    if (connection.state !== TetiConnectionState.Confirmed) {
+    if (!isTetiConnectionConfirmed(connection)) {
       throw new Error("Teti application messages require a Confirmed connection.");
     }
 
@@ -312,7 +316,7 @@ export class TetiApplicationManager {
     return (
       (await this.connectionStorage.loadAll()).find((connection) => {
         return (
-          connection.state === TetiConnectionState.Confirmed &&
+          isTetiConnectionConfirmed(connection) &&
           connection.remoteTetiId === envelope.fromTetiId &&
           (!fromAddress || connection.remoteAddress === fromAddress)
         );

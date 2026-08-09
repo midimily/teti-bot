@@ -1,6 +1,8 @@
 # Teti Discovery Service
 
-The discovery service is the public lookup layer for Teti identities. It talks to the Cloudflare Discovery Registry and returns only public identity data:
+The discovery service is the public lookup layer for Teti identities. Beta 0.3.1 consumes the
+official Network Public Read contract through a Runtime-owned `TetiNetworkClient` and returns only
+public identity data:
 
 - Teti id
 - chatmail address
@@ -16,8 +18,11 @@ import {
   TetiDiscoveryService,
   matchTetis
 } from "./services/discovery/client.ts";
+import { TetiNetworkPublicReadAdapter } from "./services/network/public-read-adapter.ts";
 
-const discovery = new TetiDiscoveryService();
+const discovery = new TetiDiscoveryService({
+  registry: new TetiNetworkPublicReadAdapter(runtimeNetworkClient)
+});
 
 const tetis = await discovery.discoverTetis({ limit: 20 });
 const profile = await discovery.getTetiProfile("teti_abc123xyz");
@@ -30,6 +35,9 @@ const matches = matchTetis({
   remoteTetis: tetis
 });
 ```
+
+`runtimeNetworkClient` is composed by the lifecycle Runtime. Renderer code must not construct the
+HTTP client or read `TETI_NETWORK_BASE_URL`.
 
 ## Compatibility Matching
 

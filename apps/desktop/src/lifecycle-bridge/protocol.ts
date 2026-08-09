@@ -22,6 +22,10 @@ export const LIFECYCLE_MAX_LINE_BYTES = 64 * 1024;
 export type LifecycleMethod =
   | "lifecycle.health"
   | "release.status"
+  | "network.environment.get"
+  | "network.environment.set"
+  | "presence.get"
+  | "presence.signal.set"
   | "account.status"
   | "account.load"
   | "account.create"
@@ -66,6 +70,10 @@ export type LifecycleMethod =
 export const LIFECYCLE_METHODS: readonly LifecycleMethod[] = [
   "lifecycle.health",
   "release.status",
+  "network.environment.get",
+  "network.environment.set",
+  "presence.get",
+  "presence.signal.set",
   "account.status",
   "account.load",
   "account.create",
@@ -148,6 +156,8 @@ export type LifecycleResult =
   | ChildMemorySnapshot
   | MemoryExportResult
   | OsaurusNativeChildSettingsDto
+  | TetiNetworkEnvironmentSettingsDto
+  | RuntimePresenceStatusDto
   | boolean
   | null;
 
@@ -156,6 +166,30 @@ export interface OsaurusNativeChildSettingsDto {
   agentId: string | null;
   readiness: "unconfigured" | "checking" | "ready" | "blocked";
   reasonCode?: string;
+}
+
+export interface TetiNetworkEnvironmentSettingsDto {
+  schemaVersion: 1;
+  useLocalDevelopmentNetwork: boolean;
+  activeEnvironment: "production" | "local_development";
+  activeBaseUrl: string;
+  configuredEnvironment: "production" | "local_development";
+  configuredBaseUrl: string;
+  restartRequired: boolean;
+}
+
+export interface RuntimePresenceStatusDto {
+  schemaVersion: 1;
+  state: "stopped" | "sleeping" | "checking" | "online" | "unavailable";
+  mode: "collaborating" | "viewing_connect" | "online" | "background";
+  sessionId: string;
+  sequence: number;
+  foreground: boolean;
+  panelVisible: boolean;
+  collaborationActive: boolean;
+  lastReportedAt?: string;
+  nextReportAt?: string;
+  errorCode?: string;
 }
 
 export interface StagedTaskImageDto {
@@ -276,6 +310,10 @@ export type LifecycleErrorCode =
 export const LIFECYCLE_TIMEOUT_MS: Record<LifecycleMethod, number> = {
   "lifecycle.health": 2_000,
   "release.status": 2_000,
+  "network.environment.get": 2_000,
+  "network.environment.set": 5_000,
+  "presence.get": 2_000,
+  "presence.signal.set": 2_000,
   "account.status": 5_000,
   "account.load": 5_000,
   "account.create": 120_000,

@@ -140,7 +140,8 @@ function isRecoverableCode(code: LifecycleErrorCode): boolean {
 function readDiagnosticCode(error: unknown): string | undefined {
   if (typeof error !== "object" || error === null || !("code" in error)) return undefined;
   const code = error.code;
-  return typeof code === "string" && /^(CM|REG|LOC)_[A-Z0-9_]+$/.test(code)
+  return typeof code === "string"
+    && /^(?:(?:CM|REG|LOC|NETWORK|IDENTITY|RELATIONSHIP|INVITE|SERVER|PROTOCOL)_[A-Z0-9_]+|RATE_LIMITED)$/.test(code)
     ? code
     : undefined;
 }

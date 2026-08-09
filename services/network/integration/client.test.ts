@@ -1,0 +1,60 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { HttpTetiNetworkClient } from "../client.ts";
+import { assertTetiNetworkCompatible } from "../compatibility.ts";
+import {
+  DEVELOPMENT_TETI_NETWORK_BASE_URL,
+  resolveTetiNetworkBaseUrl
+} from "../config.ts";
+import { TetiNetworkClientError } from "../errors.ts";
+import { BETA_035_NETWORK_REQUIREMENTS } from "../types.ts";
+
+test("Beta 0.3.5 client consumes the running local Network Revision 6 contract", async () => {
+  const baseUrl = resolveTetiNetworkBaseUrl({
+    TETI_NETWORK_BASE_URL: process.env.TETI_NETWORK_BASE_URL
+      ?? DEVELOPMENT_TETI_NETWORK_BASE_URL
+  });
+  const client = new HttpTetiNetworkClient({
+    baseUrl,
+    clientVersion: "0.3.5",
+    clientPlatform: "macos"
+  });
+
+  const bootstrap = await client.getBootstrap();
+  assertTetiNetworkCompatible(bootstrap, BETA_035_NETWORK_REQUIREMENTS);
+
+  assert.equal(bootstrap.protocolVersion, 1);
+  assert.ok(bootstrap.contractRevision >= 6);
+  assert.equal(bootstrap.service.name, "teti-network");
+  assert.equal(bootstrap.service.version, "0.1.5");
+  assert.equal(bootstrap.releasePolicy.minimumSupportedVersion, "0.3.0");
+  assert.deepEqual(bootstrap.capabilities, {
+    publicDirectory: true,
+    identity: true,
+    clientAuthentication: true,
+    presence: true,
+    publicProfile: true,
+    relationships: true,
+    relayBindings: false,
+    invites: false
+  });
+  assert.deepEqual(bootstrap.presencePolicy, {
+    collaborating: { reportEverySeconds: 5, ttlSeconds: 20 },
+    viewing_connect: { reportEverySeconds: 5, ttlSeconds: 20 },
+    online: { reportEverySeconds: 15, ttlSeconds: 45 },
+    background: { reportEverySeconds: 30, ttlSeconds: 90 }
+  });
+
+  const directory = await client.listPublicNodes();
+  assert.equal(directory.page.returnedCount, directory.items.length);
+  assert.equal(directory.sort, "updated_desc");
+  const stats = await client.getPublicStats();
+  assert.ok(stats.activeIdentityCount >= stats.discoverableNodeCount);
+  assert.ok(Number.isFinite(Date.parse(stats.generatedAt)));
+  await assert.rejects(
+    () => client.getPublicNode("teti_a83kd9x2q"),
+    (error) => error instanceof TetiNetworkClientError
+      && error.code === "IDENTITY_NOT_FOUND"
+      && error.operation === "public_node"
+  );
+});

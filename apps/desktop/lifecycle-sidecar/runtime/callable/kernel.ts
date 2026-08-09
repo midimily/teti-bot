@@ -89,6 +89,7 @@ export interface TetiHostAgentKernelOptions {
   >;
   executionRegistry?: ExecutionHandleRegistry;
   memoryProvider?: ChildMemoryProvider;
+  onCollaborationActiveChange?: (active: boolean) => void;
 }
 
 export class TetiHostAgentError extends Error {
@@ -149,6 +150,8 @@ export class TetiHostAgentKernel implements TetiHostAgent {
   private readonly memoryProvider?: ChildMemoryProvider;
   private acceptingTasks = true;
   private shutdownPromise: Promise<void> | null = null;
+  private readonly onCollaborationActiveChange: (active: boolean) => void;
+  private collaborationActive = false;
 
   constructor(options: TetiHostAgentKernelOptions = {}) {
     for (const transport of options.transports ?? [new ProcessTransport()]) {
@@ -171,6 +174,7 @@ export class TetiHostAgentKernel implements TetiHostAgent {
     this.workspaceStore = options.workspaceStore;
     this.executionRegistry = options.executionRegistry;
     this.memoryProvider = options.memoryProvider;
+    this.onCollaborationActiveChange = options.onCollaborationActiveChange ?? (() => undefined);
 
     for (const connector of options.connectors ?? []) this.registerConnector(connector);
   }
@@ -466,6 +470,7 @@ export class TetiHostAgentKernel implements TetiHostAgent {
     }
     control.completion = this.run(connector, request, authority, control);
     this.active.set(request.taskId, control);
+    this.publishCollaborationActivity();
     return control.completion;
   }
 
@@ -797,6 +802,7 @@ export class TetiHostAgentKernel implements TetiHostAgent {
         await rm(workspacePath, { recursive: true, force: true }).catch(() => undefined);
       }
       this.active.delete(request.taskId);
+      this.publishCollaborationActivity();
       this.pruneHistory();
       this.drainQueues();
     }
@@ -858,10 +864,22 @@ export class TetiHostAgentKernel implements TetiHostAgent {
       if (activeForChild >= limit) continue;
       this.removeQueued(nextTaskId, childAgentId);
       this.active.set(nextTaskId, next.control);
+      this.publishCollaborationActivity();
       void this.run(next.connector, next.request, next.authority, next.control).then(
         next.resolve,
         () => next.resolve(next.control.machine.fail("ADAPTER_INTERNAL_ERROR"))
       );
+    }
+  }
+
+  private publishCollaborationActivity(): void {
+    const active = this.active.size > 0;
+    if (active === this.collaborationActive) return;
+    this.collaborationActive = active;
+    try {
+      this.onCollaborationActiveChange(active);
+    } catch {
+      // Presence policy observation cannot own task execution.
     }
   }
 

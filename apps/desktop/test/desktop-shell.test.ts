@@ -188,6 +188,22 @@ test("recording Tauri bridge delivers Dock activation events", async () => {
   assert.equal(activations, 1);
 });
 
+test("recording Tauri bridge delivers system sleep and wake events", async () => {
+  const invoker = new RecordingTauriInvoker();
+  const events: string[] = [];
+  const stopSleep = await invoker.onSystemSleep(() => events.push("sleep"));
+  const stopWake = await invoker.onSystemWake(() => events.push("wake"));
+
+  invoker.emitSystemSleep();
+  invoker.emitSystemWake();
+  stopSleep();
+  stopWake();
+  invoker.emitSystemSleep();
+  invoker.emitSystemWake();
+
+  assert.deepEqual(events, ["sleep", "wake"]);
+});
+
 test("view-model states map to desktop shell window modes", () => {
   assert.equal(visualModeForSnapshot({ state: "idle", nameInput: "", submitting: false }), "idle");
   assert.equal(visualModeForSnapshot({ state: "welcome", nameInput: "", submitting: false }), "onboarding");

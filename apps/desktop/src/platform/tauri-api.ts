@@ -3,6 +3,8 @@ export interface TauriInvoker {
   invoke<T>(command: string, args?: Record<string, unknown>): Promise<T>;
   onFocusChanged?(handler: (focused: boolean) => void): Promise<() => void>;
   onDockActivate?(handler: () => void): Promise<() => void>;
+  onSystemSleep?(handler: () => void): Promise<() => void>;
+  onSystemWake?(handler: () => void): Promise<() => void>;
 }
 
 export async function createTauriInvoker(): Promise<TauriInvoker> {
@@ -20,7 +22,9 @@ export async function createTauriInvoker(): Promise<TauriInvoker> {
     runtime: "native",
     invoke: api.invoke,
     onFocusChanged: async (handler) => currentWindow.onFocusChanged(({ payload }) => handler(payload)),
-    onDockActivate: async (handler) => eventApi.listen("teti://dock-activate", handler)
+    onDockActivate: async (handler) => eventApi.listen("teti://dock-activate", handler),
+    onSystemSleep: async (handler) => eventApi.listen("teti://system-sleep", handler),
+    onSystemWake: async (handler) => eventApi.listen("teti://system-wake", handler)
   };
 }
 
@@ -31,6 +35,14 @@ class BrowserPreviewTauriInvoker implements TauriInvoker {
   }
 
   async onDockActivate(): Promise<() => void> {
+    return () => undefined;
+  }
+
+  async onSystemSleep(): Promise<() => void> {
+    return () => undefined;
+  }
+
+  async onSystemWake(): Promise<() => void> {
     return () => undefined;
   }
 
@@ -60,6 +72,8 @@ export class RecordingTauriInvoker implements TauriInvoker {
   responses = new Map<string, unknown>();
   private readonly focusHandlers = new Set<(focused: boolean) => void>();
   private readonly dockActivateHandlers = new Set<() => void>();
+  private readonly systemSleepHandlers = new Set<() => void>();
+  private readonly systemWakeHandlers = new Set<() => void>();
 
   async onFocusChanged(handler: (focused: boolean) => void): Promise<() => void> {
     this.focusHandlers.add(handler);
@@ -77,6 +91,24 @@ export class RecordingTauriInvoker implements TauriInvoker {
 
   emitDockActivate(): void {
     for (const handler of this.dockActivateHandlers) handler();
+  }
+
+  async onSystemSleep(handler: () => void): Promise<() => void> {
+    this.systemSleepHandlers.add(handler);
+    return () => this.systemSleepHandlers.delete(handler);
+  }
+
+  emitSystemSleep(): void {
+    for (const handler of this.systemSleepHandlers) handler();
+  }
+
+  async onSystemWake(handler: () => void): Promise<() => void> {
+    this.systemWakeHandlers.add(handler);
+    return () => this.systemWakeHandlers.delete(handler);
+  }
+
+  emitSystemWake(): void {
+    for (const handler of this.systemWakeHandlers) handler();
   }
 
   async invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {

@@ -13,7 +13,8 @@ export default defineConfig({
     port: 1420,
     strictPort: true
   },
-  envPrefix: ["VITE_", "TETI_"],
+  // TETI_* belongs to the Node Runtime. The WebView receives only explicit VITE_* values.
+  envPrefix: ["VITE_"],
   define: {
     __TETI_APP_VERSION__: JSON.stringify(packageVersion),
     __TETI_BUILD_TIMESTAMP__: JSON.stringify(buildTimestamp)

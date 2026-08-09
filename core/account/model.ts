@@ -36,7 +36,22 @@ export interface TetiAccount {
   publicKey?: string;
   fingerprint?: string;
   publicProfile: TetiPublicProfile;
+  /**
+   * Public Network binding metadata only. Private Identity Root and
+   * ClientInstance seeds live in the profile credentials directory.
+   */
+  networkIdentity?: TetiNetworkIdentityBinding;
   createdAt: string;
+}
+
+export interface TetiNetworkIdentityBinding {
+  schemaVersion: 1;
+  mode: "register" | "adopt";
+  state: "pending" | "active" | "revoked" | "conflict";
+  identityPublicKey?: string;
+  clientInstanceId?: string;
+  lastVerifiedAt?: string;
+  errorCode?: string;
 }
 
 export interface CreateTetiAccountInput {
@@ -81,7 +96,6 @@ export interface DiscoveryRegistrationPayload {
 
 export interface DiscoveryHeartbeatPayload {
   id: string;
-  publicProfile?: TetiPublicProfile;
 }
 
 export function createDefaultPublicProfile(

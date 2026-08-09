@@ -108,7 +108,7 @@ test("Delegation Plan rejects depth, authority, and step-count expansion", () =>
   assert.throws(() => validateDelegationPlanState(outOfOrder), /ordered|non-pending/);
 });
 
-test("the autonomous Planner boundary exists but is fail-closed in Beta 0.2.10", async () => {
+test("the autonomous Planner boundary exists but is fail-closed in Beta 0.3.1", async () => {
   const planner = new DisabledDelegationPlanner();
   assert.equal(planner.enabled, false);
   await assert.rejects(

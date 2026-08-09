@@ -109,12 +109,31 @@ function validateStoredAccount(account: TetiAccount): void {
     throw new Error("Teti account id must be a canonical lowercase public ID.");
   }
 
-  if (!isCanonicalTetiChatmailAddress(account.address, account.id)) {
-    throw new Error("Teti account address must be canonical lowercase and match its public ID.");
+  if (!isCanonicalTetiChatmailAddress(account.address)) {
+    throw new Error("Teti account Chatmail address must be canonical lowercase.");
   }
 
   if (typeof account.chatmailAccountId !== "number") {
     throw new Error("Teti account chatmailAccountId is required.");
+  }
+
+  if (account.networkIdentity !== undefined) {
+    const binding = account.networkIdentity;
+    if (binding.schemaVersion !== 1
+      || !["register", "adopt"].includes(binding.mode)
+      || !["pending", "active", "revoked", "conflict"].includes(binding.state)
+      || (binding.identityPublicKey !== undefined
+        && !/^ed25519:[A-Za-z0-9_-]{43}$/.test(binding.identityPublicKey))
+      || (binding.clientInstanceId !== undefined
+        && !/^ci_[A-Za-z0-9_-]{22}$/.test(binding.clientInstanceId))
+      || (binding.lastVerifiedAt !== undefined
+        && !Number.isFinite(Date.parse(binding.lastVerifiedAt)))) {
+      throw new Error("Teti account Network identity binding is invalid.");
+    }
+    if (binding.state === "active"
+      && (!binding.identityPublicKey || !binding.clientInstanceId || !binding.lastVerifiedAt)) {
+      throw new Error("Active Teti Network identity binding is incomplete.");
+    }
   }
 }
 

@@ -51,6 +51,25 @@ export function isCanonicalTetiChatmailAddress(
   return publicId === undefined || `teti_${value.slice(0, TETI_PUBLIC_ID_CODE_LENGTH)}` === publicId;
 }
 
+/**
+ * Validates a Network-resolved Chatmail delivery address. Network Identity and
+ * Chatmail delivery are deliberately independent; neither mailbox nor relay
+ * domain is derived from the Teti ID.
+ */
+export function isTetiRelayChatmailAddress(
+  value: unknown,
+  publicId: string
+): value is string {
+  if (typeof value !== "string" || !isCanonicalTetiPublicId(publicId)) return false;
+  const separator = value.indexOf("@");
+  if (separator <= 0 || separator !== value.lastIndexOf("@")) return false;
+  const mailbox = value.slice(0, separator);
+  const domain = value.slice(separator + 1);
+  return value.length <= 320
+    && /^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+$/.test(mailbox)
+    && /^(?=.{1,253}$)[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/.test(domain);
+}
+
 export function tetiPublicIdFromAddress(address: string): string {
   const canonicalAddress = normalizeTetiChatmailAddress(address);
   return `${TETI_PUBLIC_ID_PREFIX}${canonicalAddress.slice(0, TETI_PUBLIC_ID_CODE_LENGTH)}`;

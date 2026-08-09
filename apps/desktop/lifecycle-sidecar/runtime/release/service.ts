@@ -8,10 +8,10 @@ import {
   type LocalReleaseStatus,
   type TetiReleasePolicy
 } from "../../../../../core/release/policy.ts";
-import { resolveTetiRegistryUrl } from "../../../../../services/discovery/registry-client.ts";
+import type { TetiNetworkClient } from "../../../../../services/network/types.ts";
+import { TetiNetworkClientError } from "../../../../../services/network/errors.ts";
 
 export const TETI_RELEASE_POLICY_REFRESH_INTERVAL_MS = 15 * 60 * 1_000;
-export const TETI_RELEASE_POLICY_TIMEOUT_MS = 5_000;
 
 interface CachedReleasePolicy {
   schemaVersion: 1;
@@ -174,39 +174,16 @@ export class FileReleasePolicyStore implements ReleasePolicyStore {
   }
 }
 
-export class RegistryReleasePolicyClient implements ReleasePolicyClient {
-  private readonly endpoint: string;
-  private readonly fetchImpl: typeof fetch;
-  private readonly timeoutMs: number;
+/** Reads the App release floor from the official versioned Network bootstrap. */
+export class NetworkBootstrapReleasePolicyClient implements ReleasePolicyClient {
+  private readonly networkClient: TetiNetworkClient;
 
-  constructor(options: {
-    baseUrl?: string;
-    fetchImpl?: typeof fetch;
-    timeoutMs?: number;
-  } = {}) {
-    this.endpoint = `${options.baseUrl ?? resolveTetiRegistryUrl()}/release-policy`;
-    this.fetchImpl = options.fetchImpl ?? globalThis.fetch.bind(globalThis);
-    this.timeoutMs = options.timeoutMs ?? TETI_RELEASE_POLICY_TIMEOUT_MS;
+  constructor(networkClient: TetiNetworkClient) {
+    this.networkClient = networkClient;
   }
 
   async getPolicy(): Promise<TetiReleasePolicy> {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
-    try {
-      const response = await this.fetchImpl(this.endpoint, {
-        method: "GET",
-        headers: { accept: "application/json" },
-        redirect: "error",
-        signal: controller.signal
-      });
-      const body = await response.json().catch(() => null) as unknown;
-      if (!response.ok || !isRecord(body) || body.success !== true || !("data" in body)) {
-        throw new Error("Release Policy response is unavailable or invalid.");
-      }
-      return validateTetiReleasePolicy(body.data);
-    } finally {
-      clearTimeout(timeout);
-    }
+    return validateTetiReleasePolicy((await this.networkClient.getBootstrap()).releasePolicy);
   }
 }
 
@@ -241,6 +218,9 @@ function acceptPolicy(
 
 function diagnosticCode(error: unknown): LocalReleaseStatus["diagnosticCode"] {
   return error instanceof TypeError
+    || (error instanceof TetiNetworkClientError
+      && error.code !== "NETWORK_INVALID_RESPONSE"
+      && error.code !== "PROTOCOL_UNSUPPORTED")
     ? "RELEASE_POLICY_UNAVAILABLE"
     : "RELEASE_POLICY_INVALID";
 }

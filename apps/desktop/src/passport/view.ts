@@ -95,6 +95,44 @@ export function createPassportSettingsPanel(
   registryValue.textContent = viewModel.registryLabel;
   registry.append(registryKey, registryValue);
   overview.append(identity, registry);
+  const networkEnvironment = document.createElement("section");
+  networkEnvironment.className = "teti-settings-card teti-network-environment";
+  networkEnvironment.setAttribute("aria-label", "Teti Network 环境");
+  const networkToggle = document.createElement("label");
+  networkToggle.className = "teti-toggle-row teti-network-environment-toggle";
+  networkToggle.setAttribute("aria-busy", String(viewModel.networkEnvironmentBusy));
+  const networkCopy = document.createElement("span");
+  networkCopy.className = "teti-toggle-copy";
+  const networkTitle = document.createElement("strong");
+  networkTitle.textContent = "本机 Network 开发环境";
+  const networkHint = document.createElement("small");
+  networkHint.textContent = viewModel.useLocalDevelopmentNetwork
+    ? "下次启动连接本机 teti-network"
+    : "默认连接 network.teti.bot";
+  networkCopy.append(networkTitle, networkHint);
+  const networkInput = document.createElement("input");
+  networkInput.type = "checkbox";
+  networkInput.checked = viewModel.useLocalDevelopmentNetwork;
+  networkInput.disabled = viewModel.networkEnvironmentBusy;
+  networkInput.addEventListener("change", () => {
+    void controller?.setLocalDevelopmentNetwork(networkInput.checked);
+  });
+  networkToggle.append(networkCopy, networkInput);
+  const networkMeta = document.createElement("div");
+  networkMeta.className = "teti-network-environment-meta";
+  const networkState = document.createElement("small");
+  networkState.className = `is-${viewModel.presenceTone}`;
+  networkState.textContent = `${viewModel.networkEnvironmentActiveLabel} · ${viewModel.presenceLabel}`;
+  const networkEndpoint = document.createElement("code");
+  networkEndpoint.textContent = viewModel.networkEnvironmentEndpoint;
+  networkMeta.append(networkState, networkEndpoint);
+  if (viewModel.networkEnvironmentRestartRequired) {
+    const restart = document.createElement("small");
+    restart.className = "teti-network-environment-restart";
+    restart.textContent = `设置已保存；重启后使用 ${viewModel.networkEnvironmentNextEndpoint}`;
+    networkMeta.append(restart);
+  }
+  networkEnvironment.append(networkToggle, networkMeta);
   const label = document.createElement("label");
   label.className = "teti-toggle-row teti-settings-card teti-sharing-control";
   label.setAttribute("aria-busy", String(viewModel.busy));
@@ -110,7 +148,13 @@ export function createPassportSettingsPanel(
   toggle.checked = viewModel.enabled;
   toggle.addEventListener("change", () => void controller?.setResourceSharing(toggle.checked));
   label.append(toggleCopy, toggle);
-  panel.append(panelHeading, overview, label);
+  panel.append(panelHeading, overview, networkEnvironment, label);
+  if (viewModel.networkEnvironmentError) {
+    const error = document.createElement("small");
+    error.className = "teti-sharing-error";
+    error.textContent = viewModel.networkEnvironmentError;
+    panel.append(error);
+  }
   if (viewModel.error) {
     const error = document.createElement("small");
     error.className = "teti-sharing-error";

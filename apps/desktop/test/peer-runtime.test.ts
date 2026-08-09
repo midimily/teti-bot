@@ -204,7 +204,7 @@ test("confirmed peers sort by confirmation time and waiting records stay last", 
   assert.equal(listed.connections[0]?.confirmedAt, "2026-07-17T03:00:00.000Z");
 });
 
-test("peer profile refresh recovers a nickname after Registry connectivity returns and stays outside Chatmail poll", async () => {
+test("peer profile refresh recovers a nickname after Network connectivity returns and stays outside Chatmail poll", async () => {
   const local = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
   const remote = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
   const registry = new RecoveringRegistry([toIdentity(local), toIdentity(remote)]);

@@ -65,6 +65,29 @@ test("Passport settings distinguish Registry network recovery from missing regis
   assert.equal(viewModel.settings.registryLabel, "待同步 [REG-NF]");
 });
 
+test("Presence shows authentication failures instead of reporting Network unavailable", () => {
+  const passport = emptyPassportSnapshot();
+  const viewModel = toPassportViewModel({
+    passport,
+    sharingBusy: false,
+    openPanel: "sharing",
+    presence: {
+      schemaVersion: 1,
+      state: "unavailable",
+      mode: "online",
+      sessionId: "ps_test-session",
+      sequence: 0,
+      foreground: true,
+      panelVisible: false,
+      collaborationActive: false,
+      errorCode: "NETWORK_UNAUTHORIZED"
+    }
+  });
+
+  assert.equal(viewModel.settings.presenceLabel, "Network 身份认证失败");
+  assert.equal(viewModel.settings.presenceTone, "error");
+});
+
 test("unknown, disabled, and stale remote Passport states use truthful product copy", () => {
   const passport = emptyPassportSnapshot();
   passport.connections = ["unknown", "disabled", "stale"].map((state, index) => ({

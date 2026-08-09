@@ -1,6 +1,4 @@
 import {
-  DEFAULT_TETI_REGISTRY_URL,
-  RegistryDiscoveryClient,
   type DiscoveryIdentity
 } from "./registry-client.ts";
 import type {
@@ -10,19 +8,18 @@ import type {
   TetiPublicProfile
 } from "./types.ts";
 import {
-  isCanonicalTetiChatmailAddress,
   isCanonicalTetiPublicId,
+  isTetiRelayChatmailAddress,
   normalizeTetiPublicId
 } from "../../core/identity/public-id.ts";
 
 export interface TetiRegistryReader {
-  discover(): Promise<DiscoveryIdentity[]>;
+  discover(input?: DiscoverTetisInput): Promise<DiscoveryIdentity[]>;
   getIdentity(id: string): Promise<DiscoveryIdentity | null>;
 }
 
 export interface TetiDiscoveryServiceOptions {
-  registry?: TetiRegistryReader;
-  registryUrl?: string;
+  registry: TetiRegistryReader;
 }
 
 export interface PrepareConnectionRequestInput {
@@ -37,13 +34,12 @@ export interface PrepareConnectionRequestInput {
 export class TetiDiscoveryService {
   private readonly registry: TetiRegistryReader;
 
-  constructor(options: TetiDiscoveryServiceOptions = {}) {
-    this.registry =
-      options.registry ?? new RegistryDiscoveryClient(options.registryUrl ?? DEFAULT_TETI_REGISTRY_URL);
+  constructor(options: TetiDiscoveryServiceOptions) {
+    this.registry = options.registry;
   }
 
   async discoverTetis(input: DiscoverTetisInput = {}): Promise<TetiIdentity[]> {
-    const identities = (await this.registry.discover()).map(toTetiIdentity);
+    const identities = (await this.registry.discover(input)).map(toTetiIdentity);
 
     if (typeof input.limit !== "number") {
       return identities;
@@ -74,28 +70,12 @@ export class TetiDiscoveryService {
   }
 }
 
-const defaultDiscoveryService = new TetiDiscoveryService();
-
-export function discoverTetis(input: DiscoverTetisInput = {}): Promise<TetiIdentity[]> {
-  return defaultDiscoveryService.discoverTetis(input);
-}
-
-export function getTetiProfile(id: string): Promise<TetiIdentity | null> {
-  return defaultDiscoveryService.getTetiProfile(id);
-}
-
-export function prepareConnectionRequest(
-  input: PrepareConnectionRequestInput
-): ConnectionRequestDraft {
-  return defaultDiscoveryService.prepareConnectionRequest(input);
-}
-
 export function toTetiIdentity(identity: DiscoveryIdentity): TetiIdentity {
   if (!isCanonicalTetiPublicId(identity.id)) {
     throw new Error("Discovery returned a non-canonical Teti public ID.");
   }
-  if (!isCanonicalTetiChatmailAddress(identity.address, identity.id)) {
-    throw new Error("Discovery returned a Chatmail address that does not match its Teti public ID.");
+  if (!isTetiRelayChatmailAddress(identity.address, identity.id)) {
+    throw new Error("Discovery returned an invalid Network delivery address.");
   }
   return {
     id: identity.id,

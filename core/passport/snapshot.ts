@@ -22,6 +22,18 @@ export interface PassportIdentity {
 export type RemotePassportState = "fresh" | "stale" | "disabled" | "unknown";
 export type PeerCompatibility = "compatible" | "upgrade_required" | "unknown";
 
+export type NetworkPeerPresenceSnapshot =
+  | { state: "checking" }
+  | {
+      state: "online";
+      mode: "collaborating" | "viewing_connect" | "online" | "background";
+      reportedAt: string;
+      observedAt: string;
+      expiresAt: string;
+    }
+  | { state: "offline"; observedAt: string }
+  | { state: "unavailable"; checkedAt: string; errorCode: string };
+
 export interface RemotePassportSnapshot {
   state: RemotePassportState;
   resources: AiResource[];
@@ -48,6 +60,7 @@ export interface PassportConnectionSnapshot {
   updatedAt: string;
   confirmedAt?: string;
   lastSeen: string | null;
+  networkPresence?: NetworkPeerPresenceSnapshot;
   compatibility: PeerCompatibility;
   passport: RemotePassportSnapshot;
 }

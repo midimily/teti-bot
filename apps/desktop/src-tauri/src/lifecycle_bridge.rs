@@ -620,7 +620,12 @@ fn should_restart(process: Option<&mut ManagedSidecar>) -> bool {
 
 pub fn timeout_for_method(method: &str) -> Duration {
     Duration::from_millis(match method {
-        "lifecycle.health" | "release.status" => 2_000,
+        "lifecycle.health"
+        | "release.status"
+        | "network.environment.get"
+        | "presence.get"
+        | "presence.signal.set" => 2_000,
+        "network.environment.set" => 5_000,
         "passport.get" => 2_000,
         "passport.sharing.set" => 5_000,
         "agent.observation.get" => 2_000,
@@ -663,6 +668,10 @@ fn is_allowed_method(method: &str) -> bool {
         method,
         "lifecycle.health"
             | "release.status"
+            | "network.environment.get"
+            | "network.environment.set"
+            | "presence.get"
+            | "presence.signal.set"
             | "account.status"
             | "account.load"
             | "account.create"

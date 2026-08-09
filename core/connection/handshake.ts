@@ -10,6 +10,8 @@ import {
 import type { TetiConnectionStorage } from "./storage.ts";
 import {
   TETI_CONNECTION_VERSION,
+  isTetiConnectionArchived,
+  isTetiConnectionConfirmed,
   TetiConnectionState,
   type TetiConnectionAccept,
   type TetiConnectionRecord,
@@ -75,7 +77,7 @@ export async function handleIncomingRequest(
 
   const confirmedPeer = connections.find(
     (connection) =>
-      connection.state === TetiConnectionState.Confirmed &&
+      isTetiConnectionConfirmed(connection) &&
       connection.remoteTetiId === request.fromTetiId
   );
   if (confirmedPeer) {
@@ -203,18 +205,25 @@ export async function reconcileConfirmedPeerConnections(
   const canonicalByPeer = new Map<string, TetiConnectionRecord>();
 
   for (const connection of connections) {
-    if (connection.state !== TetiConnectionState.Confirmed) continue;
+    if (!isTetiConnectionConfirmed(connection)) continue;
     const canonical = canonicalByPeer.get(connection.remoteTetiId);
-    if (!canonical || connection.requestId.localeCompare(canonical.requestId) < 0) {
+    if (!canonical
+      || (Boolean(connection.networkRelationship) && !canonical.networkRelationship)
+      || (Boolean(connection.networkRelationship) === Boolean(canonical.networkRelationship)
+        && connection.requestId.localeCompare(canonical.requestId) < 0)) {
       canonicalByPeer.set(connection.remoteTetiId, connection);
     }
   }
 
   const reconciled = connections.filter((connection) => {
+    if (isTetiConnectionArchived(connection)) return false;
     const canonical = canonicalByPeer.get(connection.remoteTetiId);
     return !canonical || connection.requestId === canonical.requestId;
   });
-  if (reconciled.length !== connections.length) {
+  const preservesNetworkRecovery = connections.some((connection) =>
+    Boolean(connection.networkRelationship) || isTetiConnectionArchived(connection)
+  );
+  if (reconciled.length !== connections.length && !preservesNetworkRecovery) {
     await storage.saveAll(reconciled);
   }
   return reconciled;

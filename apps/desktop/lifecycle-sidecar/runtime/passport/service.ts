@@ -14,6 +14,7 @@ import type { AgentComputeOffer } from "../../../../../core/callability/agent-co
 import { projectCallablePassport } from "../../../../../core/passport/callable-projection.ts";
 import type { CodexUsageState } from "../../../src/codex-usage/types.ts";
 import type { PeerConnectionDto } from "../../../src/lifecycle-bridge/protocol.ts";
+import type { NetworkPeerPresenceSnapshot } from "../../../../../core/passport/snapshot.ts";
 import { mapAccountIdentity, mapCodexUsageResource, mapPeerConnection } from "./mappers.ts";
 
 export interface RuntimePassportSources {
@@ -23,6 +24,7 @@ export interface RuntimePassportSources {
   getCallableAgents?(): readonly CallableAgent[];
   getComputeOffers?(): readonly AgentComputeOffer[];
   getRegistry(): RegistryStatus;
+  getNetworkPresence?(tetiId: string): NetworkPeerPresenceSnapshot | undefined;
   getSharing(): Promise<PassportSharingPolicy>;
 }
 
@@ -55,7 +57,11 @@ export class RuntimePassportService {
       registry: this.sources.getRegistry(),
       resources: [mapCodexUsageResource(this.sources.getCodexUsage(), this.fallbackObservedAt)],
       callable,
-      connections: this.sources.getConnections().map((connection) => mapPeerConnection(connection, now)),
+      connections: this.sources.getConnections().map((connection) => {
+        const mapped = mapPeerConnection(connection, now);
+        const presence = this.sources.getNetworkPresence?.(connection.remoteTetiId);
+        return presence ? { ...mapped, networkPresence: presence } : mapped;
+      }),
       sharing
     };
     const fingerprint = JSON.stringify(content);

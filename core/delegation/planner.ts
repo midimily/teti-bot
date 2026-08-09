@@ -16,14 +16,14 @@ export interface DelegationPlanner {
   plan(input: unknown): Promise<DelegationPlanState>;
 }
 
-/** Beta 0.2 keeps the Planner boundary disabled and never autonomously selects a Child. */
+/** Beta 0.3.1 keeps the Planner boundary disabled and never autonomously selects a Child. */
 export class DisabledDelegationPlanner implements DelegationPlanner {
   readonly enabled = false;
 
   async plan(_input: unknown): Promise<DelegationPlanState> {
     throw new DelegationContractError(
       "DELEGATION_PLANNER_DISABLED",
-      "Autonomous Delegation Planner is disabled in Beta 0.2.10."
+      "Autonomous Delegation Planner is disabled in Beta 0.3.1."
     );
   }
 }

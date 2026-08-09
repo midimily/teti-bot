@@ -237,7 +237,7 @@ test("delete account removes discovery identity, deletes chatmail account, and r
   assert.equal(await storage.load(), null);
 });
 
-test("refresh environment updates local profile and registry heartbeat payload", async () => {
+test("refresh environment stays local and legacy heartbeat never uploads the Profile", async () => {
   const storage = new MemoryTetiAccountStorage();
   const chatmailAdapter = new RecordingChatmailAdapter();
   const discoveryClient = new RecordingDiscoveryClient();
@@ -264,8 +264,7 @@ test("refresh environment updates local profile and registry heartbeat payload",
   assert.equal(refreshed.publicProfile.lastSeen, "2026-07-11T00:00:00.000Z");
   assert.equal(discoveryClient.heartbeatCalls.length, 1);
   assert.deepEqual(discoveryClient.heartbeatCalls[0], {
-    id: "teti_env000001",
-    publicProfile: refreshed.publicProfile
+    id: "teti_env000001"
   });
 });
 

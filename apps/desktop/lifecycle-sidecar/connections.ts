@@ -16,6 +16,7 @@ import { parseConnectionEnvelope, TetiConnectionProtocolError } from "../../../c
 import type { TetiConnectionStorage } from "../../../core/connection/storage.ts";
 import { FileTetiConnectionStorage } from "../../../core/connection/storage.ts";
 import {
+  isTetiConnectionConfirmed,
   TetiConnectionState,
   type TetiConnectionAccept,
   type TetiConnectionRecord,
@@ -71,9 +72,10 @@ import type {
   ChatmailAdapter,
   ChatmailReceivedMessage
 } from "../../../integrations/chatmail/types.ts";
-import { RegistryDiscoveryClient } from "../../../services/discovery/registry-client.ts";
 import { toTetiIdentity, type TetiRegistryReader } from "../../../services/discovery/client.ts";
 import type { TetiIdentity } from "../../../services/discovery/types.ts";
+import type { TetiNetworkRelationshipDocument } from "../../../services/network/types.ts";
+import type { TetiNetworkRelationshipService } from "../../../services/network/relationship-service.ts";
 import type {
   PeerConnectionDto,
   PeerConnectionRequestOutcome,
@@ -92,6 +94,10 @@ import {
   MemoryPeerProtocolCapabilityStore,
   type PeerProtocolCapabilityStore
 } from "./runtime/passport/peer-capabilities.ts";
+import {
+  isArchivedNetworkRelationship,
+  projectNetworkRelationshipRecovery
+} from "./runtime/network/relationship.ts";
 import { getDefaultCodexUsageService } from "./codex-usage/runtime.ts";
 import { createShareableCodexStatus } from "../src/codex-usage/presentation.ts";
 import {
@@ -126,6 +132,8 @@ export interface PeerConnectionService {
   refreshPeerProfiles?(): Promise<PeerProfileRefreshResult>;
   accept(requestId: string): Promise<PeerConnectionResult>;
   reject(requestId: string): Promise<PeerConnectionResult>;
+  block?(requestId: string): Promise<PeerConnectionResult>;
+  revoke?(requestId: string): Promise<PeerConnectionResult>;
   getPassportSharing(): Promise<PassportSharingPolicy>;
   setPassportSharing(policy: PassportSharingPolicy): Promise<PassportSharingPolicy>;
   sendTask?(input: SendCollaborationTaskInput): Promise<CollaborationTaskTransportRecord>;
@@ -173,6 +181,7 @@ interface PeerConnectionRuntimeOptions {
   taskAttachmentStore?: FileTaskAttachmentStore;
   workspaceStore?: CollaborationWorkspaceStore;
   taskExecutor?: TaskExecutionBridge;
+  relationshipService?: TetiNetworkRelationshipService;
 }
 
 export class PeerConnectionRuntime implements PeerConnectionService {
@@ -191,6 +200,7 @@ export class PeerConnectionRuntime implements PeerConnectionService {
   private readonly getLocalCallableAgents: () => CallableAgent[];
   private readonly getLocalComputeOffers: () => AgentComputeOffer[];
   private readonly peerProtocolCapabilities: PeerProtocolCapabilityStore;
+  private readonly relationshipService?: TetiNetworkRelationshipService;
   private readonly heartbeatSent = new Map<string, string>();
   private readonly heartbeatReceived = new Map<string, string>();
   private readonly aiStatusSent = new Map<string, { at: string; signature: string }>();
@@ -218,6 +228,7 @@ export class PeerConnectionRuntime implements PeerConnectionService {
     this.getLocalComputeOffers = options.getLocalComputeOffers ?? (() => []);
     this.peerProtocolCapabilities = options.peerProtocolCapabilities
       ?? new MemoryPeerProtocolCapabilityStore();
+    this.relationshipService = options.relationshipService;
     this.messagingAdapter = new ChatmailConnectionMessagingAdapter(this.chatmailAdapter);
     this.connectionManager = new TetiConnectionManager({
       accountStorage: this.accountStorage,
@@ -257,6 +268,35 @@ export class PeerConnectionRuntime implements PeerConnectionService {
         throw new Error("Teti cannot connect to its own identity.");
       }
 
+      if (this.relationshipService) {
+        const prior = selectActivePeerConnection(
+          await this.connectionStorage.loadAll(),
+          remote.id
+        );
+        const result = await this.relationshipService.request(remote.id);
+        if (prior?.state === TetiConnectionState.PendingApproval) {
+          await acceptConnection(prior.requestId, this.handshakeOptions()).catch(() => undefined);
+        }
+        const connection = await this.applyNetworkRelationship(result.document, remote);
+        if (!prior && result.document.state === "requested") {
+          await this.messagingAdapter.sendConnectionRequest({
+            accountId: local.chatmailAccountId,
+            toAddress: remote.address,
+            toPublicKey: remote.publicKey,
+            request: connection.request
+          }).catch(() => undefined);
+        }
+        if (result.document.state === "confirmed") {
+          await this.sendDueHeartbeats();
+          await this.sendDueAiStatus(true);
+        }
+        return this.snapshot(0, 0, {
+          kind: networkRequestOutcome(result.document, Boolean(prior)),
+          requestId: result.document.id,
+          remoteTetiId: result.document.peerTetiId
+        });
+      }
+
       const connections = await reconcileConfirmedPeerConnections(this.connectionStorage);
       const existing = selectActivePeerConnection(connections, remote.id);
       if (existing?.state === TetiConnectionState.PendingApproval) {
@@ -281,6 +321,7 @@ export class PeerConnectionRuntime implements PeerConnectionService {
   list(): Promise<PeerConnectionResult> {
     return this.serial(async () => {
       await this.removeLocalIdentityConnections();
+      await this.synchronizeNetworkRelationships().catch(() => undefined);
       return this.snapshot();
     });
   }
@@ -299,11 +340,11 @@ export class PeerConnectionRuntime implements PeerConnectionService {
         try {
           const discovered = await this.registry.getIdentity(connection.remoteTetiId);
           if (!discovered) {
-            throw new Error("The peer Registry profile is not available yet.");
+            throw new Error("The peer Network profile is not available yet.");
           }
           const identity = toTetiIdentity(discovered);
           if (identity.address.toLowerCase() !== connection.remoteAddress.toLowerCase()) {
-            throw new Error("The peer Registry profile does not match the confirmed address.");
+            throw new Error("The peer Network profile does not match the confirmed address.");
           }
           this.identityCache.set(identity.id, identity);
           this.identityRefreshedAt.set(identity.id, nowMs);
@@ -321,6 +362,7 @@ export class PeerConnectionRuntime implements PeerConnectionService {
   poll(): Promise<PeerConnectionResult> {
     return this.serial(async () => {
       await this.ensureReady();
+      await this.synchronizeNetworkRelationships().catch(() => undefined);
       const account = await this.requireAccount();
       // Presence is control-plane traffic. Send it before receiving a backlog
       // or flushing Task attachments so bulk collaboration work cannot make a
@@ -333,7 +375,7 @@ export class PeerConnectionRuntime implements PeerConnectionService {
       });
       const confirmedPeerAddresses = new Set(
         (await this.connectionStorage.loadAll())
-          .filter((connection) => connection.state === TetiConnectionState.Confirmed)
+          .filter((connection) => this.isAuthorizedConnection(connection))
           .map((connection) => connection.remoteAddress.toLowerCase())
       );
       let receivedCount = 0;
@@ -388,6 +430,7 @@ export class PeerConnectionRuntime implements PeerConnectionService {
       }
 
       // A connection may have become Confirmed while processing this batch.
+      await this.synchronizeNetworkRelationships().catch(() => undefined);
       // Give that peer its first presence message before Task outbox traffic.
       heartbeatCount += await this.sendDueHeartbeats();
       await this.taskTransport.flushOutbox();
@@ -432,6 +475,18 @@ export class PeerConnectionRuntime implements PeerConnectionService {
   accept(requestId: string): Promise<PeerConnectionResult> {
     return this.serial(async () => {
       await this.ensureReady();
+      if (this.relationshipService) {
+        const id = requireRequestId(requestId);
+        const existing = await findConnection(this.connectionStorage, id);
+        const result = await this.relationshipService.accept(id);
+        if (existing?.state === TetiConnectionState.PendingApproval) {
+          await acceptConnection(id, this.handshakeOptions()).catch(() => undefined);
+        }
+        await this.applyNetworkRelationship(result.document);
+        await this.sendDueHeartbeats();
+        await this.sendDueAiStatus(true);
+        return this.snapshot();
+      }
       await acceptConnection(requireRequestId(requestId), this.handshakeOptions());
       await this.sendDueHeartbeats();
       await this.sendDueAiStatus(true);
@@ -442,9 +497,27 @@ export class PeerConnectionRuntime implements PeerConnectionService {
   reject(requestId: string): Promise<PeerConnectionResult> {
     return this.serial(async () => {
       await this.ensureReady();
+      if (this.relationshipService) {
+        const id = requireRequestId(requestId);
+        const existing = await findConnection(this.connectionStorage, id);
+        const result = await this.relationshipService.reject(id);
+        if (existing) {
+          await rejectConnection(id, this.handshakeOptions(), "declined").catch(() => undefined);
+        }
+        await this.applyNetworkRelationship(result.document);
+        return this.snapshot();
+      }
       await rejectConnection(requireRequestId(requestId), this.handshakeOptions(), "declined");
       return this.snapshot();
     });
+  }
+
+  block(requestId: string): Promise<PeerConnectionResult> {
+    return this.mutateNetworkRelationship(requireRequestId(requestId), "block");
+  }
+
+  revoke(requestId: string): Promise<PeerConnectionResult> {
+    return this.mutateNetworkRelationship(requireRequestId(requestId), "revoke");
   }
 
   getPassportSharing(): Promise<PassportSharingPolicy> {
@@ -585,6 +658,94 @@ export class PeerConnectionRuntime implements PeerConnectionService {
     return identity;
   }
 
+  private async synchronizeNetworkRelationships(): Promise<void> {
+    if (!this.relationshipService) return;
+    for (const document of await this.relationshipService.synchronize()) {
+      await this.applyNetworkRelationship(document);
+    }
+  }
+
+  private async applyNetworkRelationship(
+    document: TetiNetworkRelationshipDocument,
+    knownRemote?: TetiIdentity
+  ): Promise<TetiConnectionRecord> {
+    const local = await this.requireAccount();
+    const connections = await this.connectionStorage.loadAll();
+    const exact = connections.find((connection) => connection.requestId === document.id);
+    const peerRecovery = exact ?? connections.find(
+      (connection) => connection.remoteTetiId === document.peerTetiId
+    );
+    const cached = this.identityCache.get(document.peerTetiId);
+    let remote = knownRemote ?? cached;
+    if (!remote) {
+      const discovered = await this.registry.getIdentity(document.peerTetiId).catch(() => null);
+      if (discovered) remote = toTetiIdentity(discovered);
+    }
+    remote ??= peerRecovery ? identityFromRecovery(peerRecovery) : undefined;
+    if (!remote) {
+      throw new Error(`Network Relationship peer ${document.peerTetiId} has no resolvable delivery identity.`);
+    }
+    this.identityCache.set(remote.id, remote);
+    this.identityRefreshedAt.set(remote.id, this.now().getTime());
+
+    if (document.state === "rejected" || document.state === "blocked" || document.state === "revoked") {
+      const inactiveState = document.state === "blocked"
+        ? TetiConnectionState.Blocked
+        : TetiConnectionState.Rejected;
+      const stateChanged = connections.map((connection) =>
+        connection.remoteTetiId === document.peerTetiId
+          && !connection.networkRelationship
+          && connection.state !== inactiveState
+          ? {
+              ...connection,
+              state: inactiveState,
+              updatedAt: document.updatedAt,
+              ...(inactiveState === TetiConnectionState.Rejected
+                ? { rejectedAt: document.stateChangedAt }
+                : {})
+            }
+          : connection
+      );
+      if (stateChanged.some((connection, index) => connection !== connections[index])) {
+        await this.connectionStorage.saveAll(stateChanged);
+      }
+    }
+
+    const projected = projectNetworkRelationshipRecovery({
+      document,
+      localAccount: local,
+      remoteIdentity: remote,
+      existing: exact ?? peerRecovery
+    });
+    if (!projected) {
+      throw new Error(`Network Relationship ${document.id} could not be archived locally.`);
+    }
+    await this.connectionStorage.upsert(projected);
+    return projected;
+  }
+
+  private mutateNetworkRelationship(
+    requestId: string,
+    operation: "block" | "revoke"
+  ): Promise<PeerConnectionResult> {
+    return this.serial(async () => {
+      await this.ensureReady();
+      if (!this.relationshipService) {
+        throw new Error("Teti Network Relationship service is unavailable.");
+      }
+      const result = operation === "block"
+        ? await this.relationshipService.block(requestId)
+        : await this.relationshipService.revoke(requestId);
+      await this.applyNetworkRelationship(result.document);
+      return this.snapshot();
+    });
+  }
+
+  private isAuthorizedConnection(connection: TetiConnectionRecord): boolean {
+    return isTetiConnectionConfirmed(connection)
+      && (!this.relationshipService || Boolean(connection.networkRelationship));
+  }
+
   private async ensureReady(): Promise<void> {
     if (this.ready) return;
     const account = await this.requireAccount();
@@ -655,7 +816,7 @@ export class PeerConnectionRuntime implements PeerConnectionService {
     }
     const connection = (await this.connectionStorage.loadAll()).find(
       (item) =>
-        item.state === TetiConnectionState.Confirmed &&
+        this.isAuthorizedConnection(item) &&
         item.remoteTetiId === envelope.fromTetiId &&
         (!fromAddress || item.remoteAddress.toLowerCase() === fromAddress.toLowerCase())
     );
@@ -832,7 +993,7 @@ export class PeerConnectionRuntime implements PeerConnectionService {
     const header = inspectApplicationEnvelopeHeader(text);
     if (!header || header.version >= TETI_COLLABORATION_PROTOCOL_EPOCH) return false;
     const connection = (await this.connectionStorage.loadAll()).find((item) =>
-      item.state === TetiConnectionState.Confirmed
+      this.isAuthorizedConnection(item)
       && item.remoteTetiId === header.fromTetiId
       && (!fromAddress || item.remoteAddress.toLowerCase() === fromAddress.toLowerCase())
     );
@@ -854,7 +1015,7 @@ export class PeerConnectionRuntime implements PeerConnectionService {
     let sent = 0;
     const now = this.now();
     for (const connection of await this.connectionStorage.loadAll()) {
-      if (connection.state !== TetiConnectionState.Confirmed) continue;
+      if (!this.isAuthorizedConnection(connection)) continue;
       const previous = this.heartbeatSent.get(connection.requestId);
       if (previous && now.getTime() - Date.parse(previous) < HEARTBEAT_INTERVAL_MS) continue;
       const timestamp = now.toISOString();
@@ -913,7 +1074,7 @@ export class PeerConnectionRuntime implements PeerConnectionService {
     const snapshotSignature = JSON.stringify({ sharing, tools, agents, capabilities, bindings, computeOffers });
     let sent = 0;
     for (const connection of await this.connectionStorage.loadAll()) {
-      if (connection.state !== TetiConnectionState.Confirmed) continue;
+      if (!this.isAuthorizedConnection(connection)) continue;
       const peerCapability = await this.peerProtocolCapabilities
         .get(connection.remoteTetiId)
         .catch(() => undefined);
@@ -982,7 +1143,11 @@ export class PeerConnectionRuntime implements PeerConnectionService {
     requestOutcome?: PeerConnectionRequestOutcome,
     aiStatusCount = 0
   ): Promise<PeerConnectionResult> {
-    const dtos = await Promise.all(connections.map((connection) => this.toDto(connection)));
+    const visible = connections.filter((connection) =>
+      !isArchivedNetworkRelationship(connection)
+      && (!this.relationshipService || Boolean(connection.networkRelationship))
+    );
+    const dtos = await Promise.all(visible.map((connection) => this.toDto(connection)));
     const result: PeerConnectionResult = {
       connections: dtos.sort(comparePeerConnections),
       receivedCount,
@@ -1081,13 +1246,17 @@ function canonicalPeerConnections(
 ): TetiConnectionRecord[] {
   const canonicalByPeer = new Map<string, TetiConnectionRecord>();
   for (const connection of connections) {
-    if (connection.state !== TetiConnectionState.Confirmed) continue;
+    if (!isTetiConnectionConfirmed(connection)) continue;
     const canonical = canonicalByPeer.get(connection.remoteTetiId);
-    if (!canonical || connection.requestId.localeCompare(canonical.requestId) < 0) {
+    if (!canonical
+      || (Boolean(connection.networkRelationship) && !canonical.networkRelationship)
+      || (Boolean(connection.networkRelationship) === Boolean(canonical.networkRelationship)
+        && connection.requestId.localeCompare(canonical.requestId) < 0)) {
       canonicalByPeer.set(connection.remoteTetiId, connection);
     }
   }
   return connections.filter((connection) => {
+    if (isArchivedNetworkRelationship(connection)) return false;
     const canonical = canonicalByPeer.get(connection.remoteTetiId);
     return !canonical || connection.requestId === canonical.requestId;
   });
@@ -1104,6 +1273,8 @@ let defaultRpcClient: RuntimeChatmailRpcClient | undefined;
 let defaultPassportSharingStorePromise: Promise<FilePassportSharingStore> | undefined;
 
 export interface DefaultPeerConnectionServiceOptions {
+  registry: TetiRegistryReader;
+  relationshipService?: TetiNetworkRelationshipService;
   getLocalCallableAgents?: () => CallableAgent[];
   getLocalComputeOffers?: () => AgentComputeOffer[];
   taskExecutor?: TaskExecutionBridge;
@@ -1112,7 +1283,7 @@ export interface DefaultPeerConnectionServiceOptions {
 }
 
 export function getDefaultPeerConnectionService(
-  options: DefaultPeerConnectionServiceOptions = {}
+  options: DefaultPeerConnectionServiceOptions
 ): Promise<PeerConnectionService> {
   defaultServicePromise ??= createDefaultPeerConnectionService(options);
   return defaultServicePromise;
@@ -1150,7 +1321,7 @@ async function createDefaultPeerConnectionService(
     accountStorage,
     connectionStorage,
     chatmailAdapter,
-    registry: new RegistryDiscoveryClient(),
+    registry: options.registry,
     startIo: (accountId) => defaultRpcClient!.startIo(accountId),
     passportSharing: await getDefaultPassportSharingStore(),
     getLocalAiTools: () => [createShareableCodexStatus(getDefaultCodexUsageService().getCurrentState())],
@@ -1163,7 +1334,8 @@ async function createDefaultPeerConnectionService(
     taskAttachmentStore: options.taskAttachmentStore
       ?? new FileTaskAttachmentStore(join(profile.storeDir, "task-attachments")),
     workspaceStore: options.workspaceStore,
-    taskExecutor: options.taskExecutor
+    taskExecutor: options.taskExecutor,
+    relationshipService: options.relationshipService
   });
 }
 
@@ -1190,6 +1362,19 @@ function toPublicIdentity(identity: TetiIdentity): PublicTetiIdentity {
     displayName: identity.displayName,
     publicKey: identity.publicKey,
     publicProfile: identity.publicProfile
+  };
+}
+
+function identityFromRecovery(connection: TetiConnectionRecord): TetiIdentity {
+  return {
+    id: connection.remoteTetiId,
+    address: connection.remoteAddress,
+    publicKey: connection.direction === "incoming" ? connection.request.publicKey : undefined,
+    publicProfile: {
+      platform: connection.request.profile.platform,
+      category: [...connection.request.profile.category],
+      aiEnvironment: [...connection.request.profile.aiEnvironment]
+    }
   };
 }
 
@@ -1323,4 +1508,18 @@ function requestOutcomeKind(
     case TetiConnectionState.Rejected:
       return "created";
   }
+}
+
+function networkRequestOutcome(
+  relationship: TetiNetworkRelationshipDocument,
+  existed: boolean
+): PeerConnectionRequestOutcome["kind"] {
+  if (relationship.state === "blocked") return "blocked";
+  if (relationship.state === "confirmed") {
+    return relationship.direction === "incoming" ? "mutualConfirmed" : "alreadyConfirmed";
+  }
+  if (relationship.state === "requested") {
+    return existed ? "alreadyRequested" : "created";
+  }
+  return "created";
 }

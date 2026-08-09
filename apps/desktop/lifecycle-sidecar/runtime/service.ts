@@ -42,21 +42,43 @@ import type {
 import { RuntimePassportService } from "./passport/service.ts";
 import type { LocalReleaseStatus } from "../../../../core/release/policy.ts";
 import { TETI_RELEASE_POLICY_REFRESH_INTERVAL_MS } from "./release/service.ts";
+import { assertTetiNetworkCompatible } from "../../../../services/network/compatibility.ts";
+import { TetiNetworkClientError } from "../../../../services/network/errors.ts";
+import type {
+  TetiNetworkClient,
+  TetiNetworkPublicDirectoryPage,
+  TetiNetworkPublicDirectoryQuery,
+  TetiNetworkPublicStats
+} from "../../../../services/network/types.ts";
+import type { NetworkPeerPresenceSnapshot } from "../../../../core/passport/snapshot.ts";
+import type { RuntimePresencePolicyController } from "./presence/controller.ts";
+import type { TetiNetworkProfileSynchronizationResult } from "../../../../services/network/profile-service.ts";
+import {
+  RuntimeNetworkStateChangeDeduplicator,
+  type RuntimeNetworkStateChangeEvent,
+  type RuntimeNetworkStateChangeKind
+} from "./network/state-change.ts";
 
 export const TETI_RUNTIME_JOB_IDS = {
+  networkContract: "network-contract",
   releasePolicy: "release-policy",
   agentDiscovery: "agent-discovery",
   registryHeartbeat: "registry-heartbeat",
+  publicProfileSync: "public-profile-sync",
   peerProfileRefresh: "peer-profile-refresh",
+  peerPresenceRefresh: "peer-presence-refresh",
   chatmailPoll: "chatmail-poll",
   codexRefresh: "codex-refresh"
 } as const;
 
 export const TETI_RUNTIME_INTERVALS = {
+  networkContractMs: 15 * 60 * 1_000,
   releasePolicyMs: TETI_RELEASE_POLICY_REFRESH_INTERVAL_MS,
   agentDiscoveryMs: 5 * 60 * 1_000,
   registryHeartbeatMs: 5 * 60 * 1_000,
+  publicProfileSyncMs: 5 * 60 * 1_000,
   peerProfileRefreshMs: 15 * 60 * 1_000,
+  peerPresenceRefreshMs: 15_000,
   chatmailPollMs: 3_000,
   codexRefreshMs: 10 * 60 * 1_000
 } as const;
@@ -69,6 +91,32 @@ export const TETI_REGISTRY_RETRY_DELAYS_MS = [
   60_000,
   5 * 60_000
 ] as const;
+
+export const TETI_NETWORK_RETRY_DELAYS_MS = [
+  5_000,
+  15_000,
+  30_000,
+  60_000,
+  5 * 60_000
+] as const;
+
+export type RuntimeNetworkContractStatus =
+  | { state: "disabled" }
+  | { state: "checking" }
+  | {
+      state: "compatible";
+      checkedAt: string;
+      protocolVersion: number;
+      contractRevision: number;
+      serviceVersion: string;
+    }
+  | {
+      state: "unavailable" | "incompatible";
+      checkedAt: string;
+      errorCode: string;
+      retryable: boolean;
+      requestId?: string;
+    };
 
 export interface RuntimeCodexUsageService {
   getCurrentState(): CodexUsageState;
@@ -105,7 +153,10 @@ export interface RuntimeLocalReleasePolicyService {
 }
 
 export interface TetiRuntimeDependencies {
+  networkClient?: TetiNetworkClient;
   loadTetiAccount(): Promise<TetiAccount | null>;
+  /** Network Identity/Auth production path; the legacy name remains as a test fallback. */
+  synchronizeNetworkIdentity?(): Promise<TetiAccount>;
   heartbeatDiscovery(): Promise<TetiAccount>;
   getPeerConnectionService(): Promise<PeerConnectionService>;
   passportSharingStore: PassportSharingStore;
@@ -115,6 +166,10 @@ export interface TetiRuntimeDependencies {
   hostAgent?: RuntimeTetiHostAgent;
   memoryService?: RuntimeChildMemoryService;
   releasePolicyService?: RuntimeLocalReleasePolicyService;
+  presenceController?: RuntimePresencePolicyController;
+  profileService?: {
+    synchronize(): Promise<TetiNetworkProfileSynchronizationResult>;
+  };
   dispose?(): Promise<void>;
 }
 
@@ -130,6 +185,8 @@ export interface TetiRuntimeOptions {
     attempt: number;
     nextRetryMs?: number;
   }) => void;
+  onNetworkStatusChange?: (status: RuntimeNetworkContractStatus) => void;
+  onStateChange?: (event: RuntimeNetworkStateChangeEvent) => void;
   shutdownTimeoutMs?: number;
 }
 
@@ -148,19 +205,29 @@ export class TetiRuntime {
   private readonly peerFacade: PeerConnectionService;
   private readonly passportService: RuntimePassportService;
   private discoveryAccount: TetiAccount | null = null;
+  private networkStatus: RuntimeNetworkContractStatus = { state: "disabled" };
+  private readonly onNetworkStatusChange: NonNullable<TetiRuntimeOptions["onNetworkStatusChange"]>;
   private registryStatus: RegistryStatus = { state: "unknown" };
   private registryAttempt = 0;
   private readonly onRegistryStatusChange: NonNullable<TetiRuntimeOptions["onRegistryStatusChange"]>;
   private peerConnections: PeerConnectionResult["connections"] | null = null;
+  private readonly peerPresence = new Map<string, NetworkPeerPresenceSnapshot>();
   private accountLoadInFlight: Promise<TetiAccount | null> | null = null;
+  private networkIdentitySynchronization: Promise<TetiAccount> | null = null;
   private peerServicePromise: Promise<PeerConnectionService> | null = null;
   private readonly shutdownTimeoutMs: number;
   private stopPromise: Promise<TetiRuntimeStopResult> | null = null;
   private agentMutation: Promise<AgentManagementSnapshot> | null = null;
+  private readonly stateChanges: RuntimeNetworkStateChangeDeduplicator;
 
   constructor(options: TetiRuntimeOptions) {
     this.dependencies = options.dependencies;
+    this.onNetworkStatusChange = options.onNetworkStatusChange ?? (() => undefined);
     this.onRegistryStatusChange = options.onRegistryStatusChange ?? (() => undefined);
+    this.stateChanges = new RuntimeNetworkStateChangeDeduplicator({
+      now: options.now,
+      onChange: options.onStateChange
+    });
     this.shutdownTimeoutMs = options.shutdownTimeoutMs ?? TETI_RUNTIME_SHUTDOWN_TIMEOUT_MS;
     if (!Number.isFinite(this.shutdownTimeoutMs) || this.shutdownTimeoutMs <= 0) {
       throw new Error("Teti Runtime shutdown timeout must be positive.");
@@ -171,6 +238,7 @@ export class TetiRuntime {
       sources: {
         loadAccount: () => this.loadAccount(),
         getConnections: () => this.peerConnections ?? [],
+        getNetworkPresence: (tetiId) => this.peerPresence.get(tetiId),
         getCodexUsage: () => this.getCodexUsageState(),
         getCallableAgents: () => this.dependencies.hostAgent?.getCallableAgents() ?? [],
         getComputeOffers: () => this.dependencies.hostAgent?.getComputeOffers() ?? [],
@@ -180,6 +248,38 @@ export class TetiRuntime {
       now: options.now
     });
     const jobs: TetiRuntimeScheduledJob[] = [];
+    const networkClient = this.dependencies.networkClient;
+    if (networkClient) {
+      this.networkStatus = { state: "checking" };
+      jobs.push({
+        id: TETI_RUNTIME_JOB_IDS.networkContract,
+        intervalMs: intervals.networkContractMs,
+        runOnStart: true,
+        run: async () => {
+          try {
+            const bootstrap = await networkClient.getBootstrap();
+            assertTetiNetworkCompatible(bootstrap);
+            this.setNetworkStatus({
+              state: "compatible",
+              checkedAt: new Date().toISOString(),
+              protocolVersion: bootstrap.protocolVersion,
+              contractRevision: bootstrap.contractRevision,
+              serviceVersion: bootstrap.service.version
+            });
+          } catch (error) {
+            this.setNetworkStatus(networkStatusFromError(error));
+            throw error;
+          }
+        },
+        nextDelayMs: (snapshot) => snapshot.consecutiveFailures > 0
+          && this.networkStatus.state === "unavailable"
+          && this.networkStatus.retryable
+            ? TETI_NETWORK_RETRY_DELAYS_MS[
+                Math.min(snapshot.consecutiveFailures - 1, TETI_NETWORK_RETRY_DELAYS_MS.length - 1)
+              ]
+            : intervals.networkContractMs
+      });
+    }
     const releasePolicyService = this.dependencies.releasePolicyService;
     if (releasePolicyService) {
       jobs.push({
@@ -190,6 +290,7 @@ export class TetiRuntime {
           const status = await releasePolicyService.refresh();
           if (status.state === "update_required") {
             await this.dependencies.hostAgent?.shutdown();
+            await this.dependencies.presenceController?.stop();
           }
         }
       });
@@ -203,6 +304,7 @@ export class TetiRuntime {
         shouldRun: () => this.localReleaseAllowsWork(),
         run: async () => {
           await agentObserver.discover();
+          this.notifyNetworkProfileStateChange("agent", agentObserver.getCurrentSnapshot());
         }
       });
     }
@@ -213,26 +315,7 @@ export class TetiRuntime {
         runOnStart: true,
         shouldRun: () => this.localReleaseAllowsWork() && this.hasLocalAccount(),
         run: async () => {
-          this.registryAttempt += 1;
-          try {
-            this.discoveryAccount = clone(await this.dependencies.heartbeatDiscovery());
-            this.setRegistryStatus({
-              state: "registered",
-              checkedAt: new Date().toISOString()
-            });
-          } catch (error) {
-            const status = registryStatusFromError(error);
-            const failures = (this.host?.snapshot.jobs.find(
-              (job) => job.id === TETI_RUNTIME_JOB_IDS.registryHeartbeat
-            )?.consecutiveFailures ?? 0) + 1;
-            this.setRegistryStatus(
-              status,
-              TETI_REGISTRY_RETRY_DELAYS_MS[
-                Math.min(failures - 1, TETI_REGISTRY_RETRY_DELAYS_MS.length - 1)
-              ]
-            );
-            throw error;
-          }
+          await this.synchronizeNetworkIdentity();
         },
         nextDelayMs: (snapshot) => snapshot.consecutiveFailures > 0
           ? TETI_REGISTRY_RETRY_DELAYS_MS[
@@ -253,7 +336,7 @@ export class TetiRuntime {
           // backoff, so one unavailable peer cannot hide another peer's name.
           this.capturePeerResult(refresh.snapshot);
           if (refresh.failedPeerCount > 0) {
-            throw new Error("One or more peer Registry profiles could not be refreshed.");
+            throw new Error("One or more peer Network profiles could not be refreshed.");
           }
         },
         nextDelayMs: (snapshot) => snapshot.consecutiveFailures > 0
@@ -262,6 +345,20 @@ export class TetiRuntime {
             ]
           : intervals.peerProfileRefreshMs
       },
+      ...(this.dependencies.profileService ? [{
+        id: TETI_RUNTIME_JOB_IDS.publicProfileSync,
+        intervalMs: intervals.publicProfileSyncMs,
+        runOnStart: true,
+        shouldRun: () => this.localReleaseAllowsWork() && this.hasLocalAccount(),
+        run: async () => {
+          await this.dependencies.profileService!.synchronize();
+        },
+        nextDelayMs: (snapshot: { consecutiveFailures: number }) => snapshot.consecutiveFailures > 0
+          ? TETI_NETWORK_RETRY_DELAYS_MS[
+              Math.min(snapshot.consecutiveFailures - 1, TETI_NETWORK_RETRY_DELAYS_MS.length - 1)
+            ]
+          : intervals.publicProfileSyncMs
+      }] : []),
       {
         id: TETI_RUNTIME_JOB_IDS.chatmailPoll,
         intervalMs: intervals.chatmailPollMs,
@@ -277,9 +374,23 @@ export class TetiRuntime {
         intervalMs: intervals.codexRefreshMs,
         runOnStart: true,
         shouldRun: () => this.localReleaseAllowsWork() && this.hasLocalAccount(),
-        run: async () => { await this.dependencies.codexUsageService.refreshNow(); }
+        run: async () => {
+          const state = await this.dependencies.codexUsageService.refreshNow();
+          this.notifyNetworkProfileStateChange("resource", state);
+        }
       }
     );
+    if (this.dependencies.presenceController) {
+      jobs.push({
+        id: TETI_RUNTIME_JOB_IDS.peerPresenceRefresh,
+        intervalMs: intervals.peerPresenceRefreshMs,
+        runOnStart: true,
+        shouldRun: () => this.localReleaseAllowsWork() && this.hasLocalAccount(),
+        run: async () => {
+          await this.refreshPeerPresence();
+        }
+      });
+    }
     this.host = new TetiRuntimeHost({
       jobs,
       schedule: options.schedule,
@@ -293,39 +404,105 @@ export class TetiRuntime {
     return this.host.snapshot;
   }
 
+  getNetworkContractStatus(): RuntimeNetworkContractStatus {
+    return clone(this.networkStatus);
+  }
+
+  async listPublicNodes(
+    query: TetiNetworkPublicDirectoryQuery = {}
+  ): Promise<TetiNetworkPublicDirectoryPage> {
+    return clone(await this.requireNetworkClient().listPublicNodes(query));
+  }
+
+  async getPublicStats(): Promise<TetiNetworkPublicStats> {
+    return clone(await this.requireNetworkClient().getPublicStats());
+  }
+
   start(): void {
     this.host.start();
+    if (this.localReleaseAllowsWork()) this.dependencies.presenceController?.start();
   }
 
   stop(): Promise<TetiRuntimeStopResult> {
     if (this.stopPromise) return this.stopPromise;
     const draining = this.host.stop();
+    const stoppingPresence = this.dependencies.presenceController?.stop() ?? Promise.resolve();
     const disposing = Promise.resolve().then(() => this.dependencies.dispose?.());
     const stoppingCallableAdapters = Promise.resolve().then(
       () => this.dependencies.hostAgent?.shutdown()
     );
     this.stopPromise = settleWithin(
-      [draining, disposing, stoppingCallableAdapters],
+      [draining, stoppingPresence, disposing, stoppingCallableAdapters],
       this.shutdownTimeoutMs
     );
     return this.stopPromise;
   }
 
-  notifyAccountAvailable(account?: TetiAccount): void {
+  notifyAccountAvailable(
+    account?: TetiAccount,
+    options: { synchronizeNetworkIdentity?: boolean } = {}
+  ): void {
     if (account) {
       this.discoveryAccount = clone(account);
       this.setRegistryStatus({ state: "unknown" });
+      this.dependencies.presenceController?.reportStateChange();
+      this.notifyNetworkProfileStateChange("profile", {
+        displayName: account.displayName ?? null,
+        platform: account.publicProfile.platform,
+        category: account.publicProfile.category
+      });
     }
-    this.host.runNow(TETI_RUNTIME_JOB_IDS.registryHeartbeat);
+    if (options.synchronizeNetworkIdentity !== false) {
+      this.host.runNow(TETI_RUNTIME_JOB_IDS.registryHeartbeat);
+    }
     this.host.runNow(TETI_RUNTIME_JOB_IDS.peerProfileRefresh);
     this.host.runNow(TETI_RUNTIME_JOB_IDS.chatmailPoll);
     this.host.runNow(TETI_RUNTIME_JOB_IDS.codexRefresh);
+    if (this.dependencies.profileService) this.host.runNow(TETI_RUNTIME_JOB_IDS.publicProfileSync);
   }
 
   async readDiscoveryAccount(): Promise<TetiAccount> {
     const account = this.discoveryAccount ?? await this.loadAccount();
     if (!account) throw new Error("A local Teti account is required before discovery heartbeat.");
     return clone(account);
+  }
+
+  synchronizeNetworkIdentity(): Promise<TetiAccount> {
+    if (this.networkIdentitySynchronization) return this.networkIdentitySynchronization;
+    const synchronization = this.performNetworkIdentitySynchronization();
+    this.networkIdentitySynchronization = synchronization;
+    void synchronization.finally(() => {
+      if (this.networkIdentitySynchronization === synchronization) {
+        this.networkIdentitySynchronization = null;
+      }
+    }).catch(() => undefined);
+    return synchronization;
+  }
+
+  private async performNetworkIdentitySynchronization(): Promise<TetiAccount> {
+    this.registryAttempt += 1;
+    try {
+      const synchronize = this.dependencies.synchronizeNetworkIdentity
+        ?? this.dependencies.heartbeatDiscovery;
+      this.discoveryAccount = clone(await synchronize());
+      this.setRegistryStatus({
+        state: "registered",
+        checkedAt: new Date().toISOString()
+      });
+      return clone(this.discoveryAccount);
+    } catch (error) {
+      const status = registryStatusFromError(error);
+      const failures = (this.host?.snapshot.jobs.find(
+        (job) => job.id === TETI_RUNTIME_JOB_IDS.registryHeartbeat
+      )?.consecutiveFailures ?? 0) + 1;
+      this.setRegistryStatus(
+        status,
+        TETI_REGISTRY_RETRY_DELAYS_MS[
+          Math.min(failures - 1, TETI_REGISTRY_RETRY_DELAYS_MS.length - 1)
+        ]
+      );
+      throw error;
+    }
   }
 
   async getTetiStatus(): Promise<TetiStatus> {
@@ -364,6 +541,41 @@ export class TetiRuntime {
     return this.passportService.getSnapshot();
   }
 
+  getPresenceSnapshot() {
+    return this.dependencies.presenceController?.snapshot;
+  }
+
+  setPresenceSleeping(sleeping: boolean): void {
+    this.dependencies.presenceController?.setSleeping(sleeping);
+  }
+
+  setPresenceForeground(foreground: boolean): void {
+    this.dependencies.presenceController?.setForeground(foreground);
+  }
+
+  setPresencePanelVisible(visible: boolean): void {
+    this.dependencies.presenceController?.setPanelVisible(visible);
+    if (visible) this.host.runNow(TETI_RUNTIME_JOB_IDS.peerPresenceRefresh);
+  }
+
+  setPresenceCollaborationActive(active: boolean): void {
+    this.dependencies.presenceController?.setCollaborationActive(active);
+    this.notifyNetworkProfileStateChange("collaboration", active);
+  }
+
+  notifyNetworkProfileStateChange(
+    kind: RuntimeNetworkStateChangeKind,
+    value: unknown = true
+  ): void {
+    if (!this.stateChanges.record(kind, value)) return;
+    if (kind !== "profile" && kind !== "capability") return;
+    const service = this.dependencies.profileService;
+    if (!service) return;
+    // synchronize() coalesces concurrent calls and schedules one clean rerun.
+    // Its content comparison prevents resource/Passport-only changes writing.
+    void service.synchronize().catch(() => undefined);
+  }
+
   getLocalReleaseStatus(): LocalReleaseStatus {
     return this.dependencies.releasePolicyService?.getStatus() ?? {
       schemaVersion: 1,
@@ -385,6 +597,7 @@ export class TetiRuntime {
     } else {
       await this.dependencies.passportSharingStore.save(policy);
     }
+    this.notifyNetworkProfileStateChange("share_policy", policy);
     return this.passportService.getSnapshot();
   }
 
@@ -414,6 +627,7 @@ export class TetiRuntime {
   async rescanAgents(): Promise<AgentManagementSnapshot> {
     if (!this.dependencies.agentObserver) return this.getAgentManagementSnapshot();
     await this.dependencies.agentObserver.discover();
+    this.notifyNetworkProfileStateChange("agent", this.dependencies.agentObserver.getCurrentSnapshot());
     return this.getAgentManagementSnapshot();
   }
 
@@ -428,6 +642,7 @@ export class TetiRuntime {
         .getCurrentSnapshot().state === "discovering";
       await this.dependencies.agentObserver!.discover();
       if (scanWasAlreadyRunning) await this.dependencies.agentObserver!.discover();
+      this.notifyNetworkProfileStateChange("agent", this.dependencies.agentObserver!.getCurrentSnapshot());
       return this.getAgentManagementSnapshot();
     });
     this.agentMutation = operation;
@@ -458,6 +673,15 @@ export class TetiRuntime {
     }
   }
 
+  private setNetworkStatus(status: RuntimeNetworkContractStatus): void {
+    this.networkStatus = clone(status);
+    try {
+      this.onNetworkStatusChange(clone(status));
+    } catch {
+      // Diagnostics do not own Runtime state.
+    }
+  }
+
   private async loadAccount(): Promise<TetiAccount | null> {
     if (this.accountLoadInFlight) return this.accountLoadInFlight;
     const load = this.dependencies.loadTetiAccount();
@@ -467,6 +691,12 @@ export class TetiRuntime {
     } finally {
       if (this.accountLoadInFlight === load) this.accountLoadInFlight = null;
     }
+  }
+
+  private requireNetworkClient(): TetiNetworkClient {
+    const client = this.dependencies.networkClient;
+    if (!client) throw new Error("Teti Network is not configured.");
+    return client;
   }
 
   private async rawPeerService(): Promise<PeerConnectionService> {
@@ -479,6 +709,49 @@ export class TetiRuntime {
 
   private capturePeerResult(result: PeerConnectionResult): void {
     this.peerConnections = clone(result.connections);
+    const currentIds = new Set(this.peerConnections.map((connection) => connection.remoteTetiId));
+    for (const id of this.peerPresence.keys()) {
+      if (!currentIds.has(id)) this.peerPresence.delete(id);
+    }
+    for (const connection of this.peerConnections) {
+      if (connection.state === "Confirmed" && !this.peerPresence.has(connection.remoteTetiId)) {
+        this.peerPresence.set(connection.remoteTetiId, { state: "checking" });
+      }
+    }
+  }
+
+  private async refreshPeerPresence(): Promise<void> {
+    const controller = this.dependencies.presenceController;
+    if (!controller) return;
+    if (!this.peerConnections) {
+      const result = await (await this.rawPeerService()).list();
+      this.capturePeerResult(result);
+    }
+    const ids = [...new Set((this.peerConnections ?? [])
+      .filter((connection) => connection.state === "Confirmed")
+      .map((connection) => connection.remoteTetiId))];
+    await Promise.all(ids.map(async (tetiId) => {
+      try {
+        const response = await controller.read(tetiId);
+        this.peerPresence.set(tetiId, response.state === "online"
+          ? {
+              state: "online",
+              mode: response.mode,
+              reportedAt: response.reportedAt,
+              observedAt: response.observedAt,
+              expiresAt: response.expiresAt
+            }
+          : { state: "offline", observedAt: response.observedAt });
+      } catch (error) {
+        this.peerPresence.set(tetiId, {
+          state: "unavailable",
+          checkedAt: new Date().toISOString(),
+          errorCode: error instanceof TetiNetworkClientError
+            ? error.code
+            : "NETWORK_UNAVAILABLE"
+        });
+      }
+    }));
   }
 
   private async readPeerResult(): Promise<PeerConnectionResult> {
@@ -676,9 +949,12 @@ export class TetiRuntime {
 
   async updatePassportSharing(policy: PassportSharingPolicy): Promise<PassportSharingPolicy> {
     if (this.peerServicePromise) {
-      return clone(await (await this.peerServicePromise).setPassportSharing(policy));
+      const saved = clone(await (await this.peerServicePromise).setPassportSharing(policy));
+      this.notifyNetworkProfileStateChange("share_policy", saved);
+      return saved;
     }
     await this.dependencies.passportSharingStore.save(policy);
+    this.notifyNetworkProfileStateChange("share_policy", policy);
     return clone(policy);
   }
 }
@@ -792,6 +1068,22 @@ function clone<T>(value: T): T {
 }
 
 function registryStatusFromError(error: unknown): RegistryStatus {
+  if (error instanceof TetiNetworkClientError) {
+    return {
+      state: error.code === "NETWORK_CONFLICT"
+        || error.code === "IDENTITY_ALREADY_EXISTS"
+        || error.code === "IDEMPOTENCY_CONFLICT"
+          ? "conflict"
+          : error.code === "NETWORK_UNAUTHORIZED"
+            || error.code === "NETWORK_CLIENT_REVOKED"
+            || error.code === "PROTOCOL_UNSUPPORTED"
+              ? "rejected"
+              : "unreachable",
+      checkedAt: new Date().toISOString(),
+      errorCode: error.code,
+      retryable: error.retryable
+    };
+  }
   if (
     typeof error === "object"
     && error !== null
@@ -806,6 +1098,27 @@ function registryStatusFromError(error: unknown): RegistryStatus {
     state: "unreachable",
     checkedAt: new Date().toISOString(),
     errorCode: "REG_UNKNOWN",
+    retryable: true
+  };
+}
+
+function networkStatusFromError(error: unknown): RuntimeNetworkContractStatus {
+  const checkedAt = new Date().toISOString();
+  if (error instanceof TetiNetworkClientError) {
+    return {
+      state: error.code === "PROTOCOL_UNSUPPORTED" || error.code === "NETWORK_INVALID_RESPONSE"
+        ? "incompatible"
+        : "unavailable",
+      checkedAt,
+      errorCode: error.code,
+      retryable: error.retryable,
+      ...(error.requestId ? { requestId: error.requestId } : {})
+    };
+  }
+  return {
+    state: "unavailable",
+    checkedAt,
+    errorCode: "NETWORK_UNAVAILABLE",
     retryable: true
   };
 }

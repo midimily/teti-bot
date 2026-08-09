@@ -139,6 +139,15 @@ export interface PassportSettingsViewModel {
   osaurusNativeStatus: "未配置" | "安全资格检查中" | "安全资格未通过" | "可调用";
   osaurusNativeReason?: string;
   osaurusNativeError?: string;
+  useLocalDevelopmentNetwork: boolean;
+  networkEnvironmentBusy: boolean;
+  networkEnvironmentEndpoint: string;
+  networkEnvironmentNextEndpoint: string;
+  networkEnvironmentActiveLabel: "生产环境" | "本机开发环境";
+  networkEnvironmentRestartRequired: boolean;
+  networkEnvironmentError?: string;
+  presenceLabel: string;
+  presenceTone: "ok" | "pending" | "error";
   appVersion: string;
   buildTimestamp: string;
 }
@@ -227,11 +236,54 @@ export function toPassportViewModel(
         ? { osaurusNativeReason: formatOsaurusNativeReason(snapshot.osaurusNative.reasonCode) }
         : {}),
       ...(snapshot.osaurusNativeError ? { osaurusNativeError: snapshot.osaurusNativeError } : {}),
+      useLocalDevelopmentNetwork: snapshot.networkEnvironment?.useLocalDevelopmentNetwork ?? false,
+      networkEnvironmentBusy: snapshot.networkEnvironmentBusy ?? false,
+      networkEnvironmentEndpoint: snapshot.networkEnvironment?.activeBaseUrl
+        ?? "https://network.teti.bot",
+      networkEnvironmentNextEndpoint: snapshot.networkEnvironment?.configuredBaseUrl
+        ?? "https://network.teti.bot",
+      networkEnvironmentActiveLabel:
+        snapshot.networkEnvironment?.activeEnvironment === "local_development"
+          ? "本机开发环境"
+          : "生产环境",
+      networkEnvironmentRestartRequired: snapshot.networkEnvironment?.restartRequired ?? false,
+      ...(snapshot.networkEnvironmentError
+        ? { networkEnvironmentError: snapshot.networkEnvironmentError }
+        : {}),
+      ...formatPresenceStatus(snapshot.presence),
       appVersion: TETI_BUILD_INFO.appVersion,
       buildTimestamp: TETI_BUILD_INFO.buildTimestamp
     },
     connections: snapshot.passport.connections.map((connection) => toConnectionCardViewModel(connection, now))
   };
+}
+
+function formatPresenceStatus(
+  presence: PassportControllerSnapshot["presence"]
+): Pick<PassportSettingsViewModel, "presenceLabel" | "presenceTone"> {
+  if (!presence || presence.state === "stopped") {
+    return { presenceLabel: "尚未启动", presenceTone: "pending" };
+  }
+  if (presence.state === "sleeping") {
+    return { presenceLabel: "系统睡眠 · 已暂停上报", presenceTone: "pending" };
+  }
+  if (presence.state === "checking") {
+    return { presenceLabel: "正在连接", presenceTone: "pending" };
+  }
+  if (presence.state === "unavailable") {
+    if (presence.errorCode === "NETWORK_UNAUTHORIZED") {
+      return { presenceLabel: "Network 身份认证失败", presenceTone: "error" };
+    }
+    return { presenceLabel: "Network 暂不可用", presenceTone: "error" };
+  }
+  const mode = presence.mode === "collaborating"
+    ? "AI 协作中"
+    : presence.mode === "viewing_connect"
+      ? "正在查看建联面板"
+      : presence.mode === "background"
+        ? "后台在线"
+        : "在线";
+  return { presenceLabel: `已连接 · ${mode}`, presenceTone: "ok" };
 }
 
 export function formatOsaurusNativeReason(reasonCode: string): string {
@@ -405,14 +457,20 @@ export function toConnectionCardViewModel(
   const confirmationAge = confirmationBaseline === null ? NaN : now.getTime() - confirmationBaseline;
   const reachability: PeerReachability = connection.connectionState !== "Confirmed"
     ? "unreachable"
-    : Number.isFinite(heartbeatAge) && heartbeatAge < REMOTE_TETI_HEARTBEAT_FRESH_MS
+    : connection.networkPresence?.state === "online"
       ? "reachable"
-      : (Number.isFinite(heartbeatAge) && heartbeatAge < REMOTE_TETI_HEARTBEAT_OFFLINE_MS)
+      : connection.networkPresence?.state === "offline"
+        ? "unreachable"
+        : connection.networkPresence
+          ? "checking"
+          : Number.isFinite(heartbeatAge) && heartbeatAge < REMOTE_TETI_HEARTBEAT_FRESH_MS
+            ? "reachable"
+            : (Number.isFinite(heartbeatAge) && heartbeatAge < REMOTE_TETI_HEARTBEAT_OFFLINE_MS)
         || (!connection.lastSeen
           && Number.isFinite(confirmationAge)
           && confirmationAge < REMOTE_TETI_HEARTBEAT_OFFLINE_MS)
-        ? "checking"
-        : "unreachable";
+              ? "checking"
+              : "unreachable";
   return {
     requestId: connection.requestId,
     state: connection.connectionState,
