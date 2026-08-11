@@ -46,6 +46,7 @@ export interface TetiAccount {
 
 export interface TetiNetworkIdentityBinding {
   schemaVersion: 1;
+  environment?: "production" | "local_development";
   mode: "register" | "adopt";
   state: "pending" | "active" | "revoked" | "conflict";
   identityPublicKey?: string;
@@ -66,36 +67,24 @@ export interface CreateTetiAccountInput {
 export interface TetiStatus {
   exists: boolean;
   address?: string;
-  registry: RegistryStatus;
+  networkIdentity: NetworkIdentityStatus;
   onlineStatus: "unknown" | "offline" | "online";
 }
 
-export type RegistryState =
+export type NetworkIdentityState =
   | "unknown"
-  | "registered"
-  | "not_registered"
-  | "unreachable"
-  | "rejected"
+  | "pending"
+  | "active"
+  | "unavailable"
+  | "unauthorized"
+  | "revoked"
   | "conflict";
 
-export interface RegistryStatus {
-  state: RegistryState;
+export interface NetworkIdentityStatus {
+  state: NetworkIdentityState;
   checkedAt?: string;
   errorCode?: string;
   retryable?: boolean;
-}
-
-export interface DiscoveryRegistrationPayload {
-  version: 1;
-  id: string;
-  address: string;
-  displayName?: string;
-  publicKey?: string;
-  publicProfile: TetiPublicProfile;
-}
-
-export interface DiscoveryHeartbeatPayload {
-  id: string;
 }
 
 export function createDefaultPublicProfile(
@@ -125,7 +114,7 @@ export function getTetiIdFromAddress(address: string): string {
 }
 
 export function getTetiId(account: Pick<TetiAccount, "id" | "address">): string {
-  return account.id ? normalizeTetiPublicId(account.id) : getTetiIdFromAddress(account.address);
+  return normalizeTetiPublicId(account.id);
 }
 
 function detectPlatform(): string {

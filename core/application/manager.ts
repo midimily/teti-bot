@@ -57,6 +57,7 @@ export interface TetiApplicationManagerOptions {
   messageTracker?: TetiMessageTracker;
   messageIdFactory?: () => string;
   now?: () => string;
+  authorizePeer?: (peerTetiId: string) => Promise<void>;
 }
 
 export interface SendApplicationEnvelopeInput<TPayload> {
@@ -86,6 +87,7 @@ export class TetiApplicationManager {
   private readonly messageTracker: TetiMessageTracker;
   private readonly messageIdFactory?: () => string;
   private readonly now: () => string;
+  private readonly authorizePeer?: (peerTetiId: string) => Promise<void>;
 
   constructor(options: TetiApplicationManagerOptions = {}) {
     this.accountStorage = options.accountStorage ?? new FileTetiAccountStorage();
@@ -95,6 +97,7 @@ export class TetiApplicationManager {
     this.messageTracker = options.messageTracker ?? new FileTetiMessageTracker();
     this.messageIdFactory = options.messageIdFactory;
     this.now = options.now ?? (() => new Date().toISOString());
+    this.authorizePeer = options.authorizePeer;
   }
 
   async sendProfileSync(
@@ -220,6 +223,7 @@ export class TetiApplicationManager {
   ): Promise<SentApplicationEnvelope> {
     const account = await this.requireLocalAccount();
     const connection = await this.requireConfirmedConnection(input.connectionRequestId);
+    await this.authorizePeer?.(connection.remoteTetiId);
     const envelope = createApplicationEnvelope({
       type: input.type,
       fromTetiId: account.id,
@@ -230,6 +234,9 @@ export class TetiApplicationManager {
     const sent = await this.chatmailAdapter.sendMessage({
       accountId: account.chatmailAccountId,
       peerAddress: connection.remoteAddress,
+      ...(connection.remotePublicKey
+        ? { peerPublicKey: connection.remotePublicKey }
+        : {}),
       text: serializeApplicationEnvelope(envelope),
       ...(input.attachment ? { attachment: input.attachment } : {})
     });
@@ -269,6 +276,7 @@ export class TetiApplicationManager {
       if (!connection) {
         continue;
       }
+      await this.authorizePeer?.(connection.remoteTetiId);
 
       if (await this.messageTracker.has(envelope.messageId)) {
         continue;

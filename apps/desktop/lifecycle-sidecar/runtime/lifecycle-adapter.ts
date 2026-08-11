@@ -24,21 +24,22 @@ export function createRuntimeOwnedLifecycleDependencies(
         return synchronized;
       } catch {
         // Local/Chatmail identity remains usable; the Runtime job owns recovery and diagnostics.
-        runtime.notifyAccountAvailable(account);
-        return account;
+        const recovered = await base.loadTetiAccount().catch(() => null) ?? account;
+        runtime.notifyAccountAvailable(recovered);
+        return recovered;
       }
     },
     getTetiStatus: () => runtime.getTetiStatus(),
-    registerDiscovery: async (account) => {
+    synchronizeNetworkIdentity: async () => {
       const synchronized = await runtime.synchronizeNetworkIdentity();
       try {
         await base.onNetworkIdentitySynchronized?.(synchronized);
       } catch {
         // Marker/manifest metadata cannot roll back a committed Network identity.
       }
-      runtime.notifyRegistryRegistered(synchronized);
+      runtime.notifyNetworkIdentityActive(synchronized);
+      return synchronized;
     },
-    heartbeatDiscovery: () => runtime.readDiscoveryAccount(),
     getPresenceStatus: () => runtime.getPresenceSnapshot(),
     setPresenceSignal: ({ signal, active }) => {
       if (signal === "sleeping") runtime.setPresenceSleeping(active);

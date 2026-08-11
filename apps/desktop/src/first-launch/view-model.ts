@@ -58,7 +58,7 @@ export function toFirstLaunchViewModel(snapshot: FirstLaunchSnapshot): FirstLaun
       };
 
     case "creating_identity":
-    case "registering_discovery":
+    case "synchronizing_network_identity":
       return {
         panel: "expanded",
         character: "thinking",
@@ -105,7 +105,7 @@ export function toFirstLaunchViewModel(snapshot: FirstLaunchSnapshot): FirstLaun
         title: diagnosticCode ? `Teti 需要一点时间 [${diagnosticCode}]` : "Teti 需要一点时间",
         message: snapshot.error?.message ?? "Teti 暂时还没完成。",
         primaryAction:
-          snapshot.error?.kind === "discovery_registration_failure" ? "再连接一次" : "再试一次",
+          snapshot.error?.kind === "network_identity_failure" ? "再连接一次" : "再试一次",
         input:
           snapshot.error?.kind === "invalid_name"
             ? {

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { DiscoveryRegistrationPayload, TetiAccount, TetiStatus } from "../../../core/account/model.ts";
+import type { TetiAccount, TetiStatus } from "../../../core/account/model.ts";
 import {
   FirstLaunchCoordinator,
   MemoryNotchWindowController,
@@ -35,14 +35,13 @@ test("valid existing account skips onboarding and collapses into idle", async ()
   assert.equal(notch.mode, "collapsed");
 });
 
-test("existing local account enters idle while Registry recovery stays in Runtime", async () => {
+test("existing local account enters idle while Network recovery stays in Runtime", async () => {
   const account = createAccount("Milo");
-  const lifecycle = new RecordingLifecycle({ storedAccount: account, registered: false });
+  const lifecycle = new RecordingLifecycle({ storedAccount: account, networkActive: false });
   const notch = new MemoryNotchWindowController();
   const coordinator = new FirstLaunchCoordinator({
     accountLifecycle: lifecycle,
-    notchWindow: notch,
-    discoveryClient: new RecordingDiscovery()
+    notchWindow: notch
   });
 
   const snapshot = await coordinator.initialize();
@@ -200,18 +199,16 @@ test("persistence failure never reaches ready", async () => {
   assert.equal(snapshot.error?.kind, "local_persistence_failure");
 });
 
-test("a post-save failure still completes local initialization and leaves Registry to Runtime", async () => {
+test("a post-save Network failure still completes local initialization", async () => {
   const persistedAccount = createAccount("Milo");
   const lifecycle = new RecordingLifecycle();
   lifecycle.createHandler = async () => {
     lifecycle.storedAccount = persistedAccount;
-    throw new Error("registry fetch failed");
+    throw new Error("Network temporarily unavailable");
   };
-  const discovery = new RecordingDiscovery();
   const coordinator = new FirstLaunchCoordinator({
     accountLifecycle: lifecycle,
     notchWindow: new MemoryNotchWindowController(),
-    discoveryClient: discovery,
     schedule: () => undefined
   });
 
@@ -221,7 +218,6 @@ test("a post-save failure still completes local initialization and leaves Regist
   assert.equal(ready.error, undefined);
   assert.equal(ready.account?.id, persistedAccount.id);
   assert.equal(lifecycle.createCalls.length, 1);
-  assert.equal(discovery.registerCalls.length, 0);
 });
 
 test("repeated initialization with an existing account does not create duplicate identities", async () => {
@@ -252,11 +248,11 @@ class RecordingLifecycle implements FirstLaunchAccountLifecycle {
   readonly createCalls: string[] = [];
   storedAccount: TetiAccount | null;
   createHandler?: (name: string) => Promise<TetiAccount>;
-  private readonly registered: boolean;
+  private readonly networkActive: boolean;
 
-  constructor(options: { storedAccount?: TetiAccount | null; registered?: boolean } = {}) {
+  constructor(options: { storedAccount?: TetiAccount | null; networkActive?: boolean } = {}) {
     this.storedAccount = options.storedAccount ?? null;
-    this.registered = options.registered ?? true;
+    this.networkActive = options.networkActive ?? true;
   }
 
   async loadTetiAccount(): Promise<TetiAccount | null> {
@@ -277,34 +273,20 @@ class RecordingLifecycle implements FirstLaunchAccountLifecycle {
   async getTetiStatus(): Promise<TetiStatus> {
     return {
       exists: this.storedAccount !== null,
-      registry: {
+      networkIdentity: {
         state: this.storedAccount === null
           ? "unknown"
-          : this.registered
-            ? "registered"
-            : "unreachable"
+          : this.networkActive
+            ? "active"
+            : "unavailable"
       },
       onlineStatus: "unknown"
     };
   }
-}
 
-class RecordingDiscovery {
-  readonly registerCalls: DiscoveryRegistrationPayload[] = [];
-
-  async registerIdentity(payload: DiscoveryRegistrationPayload): Promise<{
-    version: 1;
-    id: string;
-    address: string;
-    publicProfile: Record<string, unknown>;
-  }> {
-    this.registerCalls.push(payload);
-    return {
-      version: 1,
-      id: payload.id,
-      address: payload.address,
-      publicProfile: payload.publicProfile
-    };
+  async synchronizeNetworkIdentity(): Promise<TetiAccount> {
+    if (!this.storedAccount) throw new Error("A local Teti account is required.");
+    return cloneAccount(this.storedAccount);
   }
 }
 

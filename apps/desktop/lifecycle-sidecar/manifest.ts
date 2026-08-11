@@ -10,7 +10,7 @@ export interface RealValidationManifest {
   publicTetiId?: string;
   publicChatmailAddress?: string;
   creationTimestamp?: string;
-  discoveryRegistrationStatus?: "not_attempted" | "succeeded" | "failed" | "unknown";
+  networkIdentitySynchronizationStatus?: "not_attempted" | "succeeded" | "failed" | "unknown";
   applicationBuildIdentifier?: string;
   protocolVersion: 1;
   restartVerification?: {
@@ -30,8 +30,8 @@ export interface RealValidationManifest {
 export function manifestFromAccount(
   profile: TetiProfile,
   account: PublicTetiAccount,
-  discoveryRegistrationStatus: NonNullable<
-    RealValidationManifest["discoveryRegistrationStatus"]
+  networkIdentitySynchronizationStatus: NonNullable<
+    RealValidationManifest["networkIdentitySynchronizationStatus"]
   > = "not_attempted"
 ): RealValidationManifest {
   return {
@@ -42,7 +42,7 @@ export function manifestFromAccount(
     publicTetiId: account.id,
     publicChatmailAddress: account.address,
     creationTimestamp: account.createdAt,
-    discoveryRegistrationStatus,
+    networkIdentitySynchronizationStatus,
     protocolVersion: 1,
     duplicateCreation: {
       attempted: false,
@@ -50,7 +50,7 @@ export function manifestFromAccount(
       duplicateIdentityCreated: false
     },
     localCleanupStatus: "not_attempted",
-    remoteExpiryExpectation: "No remote delete was performed; registry record is expected to expire according to registry TTL."
+    remoteExpiryExpectation: "No server-side delete was performed; the persistent Network identity is retained."
   };
 }
 

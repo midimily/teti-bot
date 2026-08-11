@@ -5,6 +5,9 @@ export const TETI_PUBLIC_ID_CODE_CHARACTERS_PATTERN = /^[a-z0-9]*$/;
 export const TETI_PUBLIC_ID_CODE_PATTERN = /^[a-z0-9]{9}$/;
 export const TETI_PUBLIC_ID_PATTERN = /^teti_[a-z0-9]{9}$/;
 export const TETI_CHATMAIL_ADDRESS_PATTERN = /^[a-z0-9]{9}@mail\.seep\.im$/;
+export const TETI_RELAY_MAILBOX_PATTERN = /^[a-z0-9](?:[a-z0-9._+-]{0,62}[a-z0-9])?$/;
+export const TETI_RELAY_DOMAIN_PATTERN =
+  /^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/;
 
 export function normalizeTetiPublicIdCode(value: string): string {
   if (typeof value !== "string") {
@@ -51,6 +54,31 @@ export function isCanonicalTetiChatmailAddress(
   return publicId === undefined || `teti_${value.slice(0, TETI_PUBLIC_ID_CODE_LENGTH)}` === publicId;
 }
 
+export function normalizeTetiRelayChatmailAddress(value: string): string {
+  if (typeof value !== "string") {
+    throw new Error("Teti Chatmail delivery address must be a string.");
+  }
+  const normalized = value.trim().toLowerCase();
+  const separator = normalized.indexOf("@");
+  if (normalized.length > 320
+    || separator <= 0
+    || separator !== normalized.lastIndexOf("@")
+    || !TETI_RELAY_MAILBOX_PATTERN.test(normalized.slice(0, separator))
+    || !TETI_RELAY_DOMAIN_PATTERN.test(normalized.slice(separator + 1))) {
+    throw new Error("Teti Chatmail delivery address is not canonical.");
+  }
+  return normalized;
+}
+
+export function isCanonicalTetiRelayChatmailAddress(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  try {
+    return normalizeTetiRelayChatmailAddress(value) === value;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Validates a Network-resolved Chatmail delivery address. Network Identity and
  * Chatmail delivery are deliberately independent; neither mailbox nor relay
@@ -61,13 +89,7 @@ export function isTetiRelayChatmailAddress(
   publicId: string
 ): value is string {
   if (typeof value !== "string" || !isCanonicalTetiPublicId(publicId)) return false;
-  const separator = value.indexOf("@");
-  if (separator <= 0 || separator !== value.lastIndexOf("@")) return false;
-  const mailbox = value.slice(0, separator);
-  const domain = value.slice(separator + 1);
-  return value.length <= 320
-    && /^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+$/.test(mailbox)
-    && /^(?=.{1,253}$)[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/.test(domain);
+  return isCanonicalTetiRelayChatmailAddress(value);
 }
 
 export function tetiPublicIdFromAddress(address: string): string {

@@ -144,7 +144,7 @@ async function cleanCommand(args: Record<string, string | boolean>): Promise<voi
         cleanedProfile: profile.root,
         localOnly: true,
         remoteChatmailDeleted: false,
-        remoteDiscoveryDeleted: false
+        remoteNetworkDeleted: false
       },
       null,
       2

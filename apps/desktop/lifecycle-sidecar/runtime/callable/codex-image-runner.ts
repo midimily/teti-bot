@@ -124,7 +124,7 @@ process.once("SIGINT", terminate);
 
 try {
   await request("initialize", {
-    clientInfo: { name: "teti-image-connector", title: "Teti", version: "0.3.5" },
+    clientInfo: { name: "teti-image-connector", title: "Teti", version: "0.3.8" },
     capabilities: { experimentalApi: true }
   });
   notify("initialized", {});

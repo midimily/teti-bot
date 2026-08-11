@@ -92,6 +92,7 @@ import {
 import type { TaskTransportStore } from "./store.ts";
 import type { StagedTaskImage, TaskAttachmentStore } from "./attachments.ts";
 import type { CollaborationWorkspaceStore } from "../workspaces/store.ts";
+import { TetiNetworkClientError } from "../../../../../services/network/errors.ts";
 
 const SAFE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const SAFE_SLUG_PATTERN = /^[a-z0-9]+(?:[._-][a-z0-9]+)*$/;
@@ -117,6 +118,7 @@ interface TaskTransportRuntimeOptions {
   workspaceStore?: CollaborationWorkspaceStore;
   executor?: TaskExecutionBridge;
   enqueueOperation?: (operation: () => Promise<void>) => Promise<void>;
+  authorizePeer?: (peerTetiId: string) => Promise<void>;
 }
 
 export interface TaskExecutionTarget {
@@ -162,6 +164,7 @@ export class TaskTransportRuntime {
   private readonly workspaceStore?: CollaborationWorkspaceStore;
   private readonly executor?: TaskExecutionBridge;
   private readonly enqueueOperation: (operation: () => Promise<void>) => Promise<void>;
+  private readonly authorizePeer?: (peerTetiId: string) => Promise<void>;
 
   constructor(options: TaskTransportRuntimeOptions) {
     this.accountStorage = options.accountStorage;
@@ -174,6 +177,7 @@ export class TaskTransportRuntime {
     this.workspaceStore = options.workspaceStore;
     this.executor = options.executor;
     this.enqueueOperation = options.enqueueOperation ?? ((operation) => operation());
+    this.authorizePeer = options.authorizePeer;
   }
 
   async stageImage(sourcePath: string): Promise<StagedTaskImage> {
@@ -783,6 +787,7 @@ export class TaskTransportRuntime {
   async approve(taskId: string): Promise<CollaborationTaskTransportRecord> {
     const state = await this.store.load();
     const record = requireMutableIncomingTask(state, taskId, this.now());
+    await this.authorizePeer?.(record.peerTetiId);
     record.attachmentsReady = await this.areInputAttachmentsReady(record);
     if (!record.attachmentsReady) {
       throw new TaskTransportRuntimeError("TASK_ATTACHMENTS_PENDING", "Task images have not finished downloading.");
@@ -881,6 +886,7 @@ export class TaskTransportRuntime {
   ): Promise<CollaborationTaskTransportRecord> {
     const state = await this.store.load();
     const record = requireMutableIncomingTask(state, taskId, this.now());
+    await this.authorizePeer?.(record.peerTetiId);
     if (record.request.executionMode !== "long_horizon" || !record.longHorizon) {
       throw new TaskTransportRuntimeError(
         "TASK_DELEGATION_MODE_REQUIRED",
@@ -1467,6 +1473,7 @@ export class TaskTransportRuntime {
   ): Promise<CollaborationTaskTransportRecord> {
     const state = await this.store.load();
     const record = requireIncomingLongHorizon(state, taskId, this.now());
+    await this.authorizePeer?.(record.peerTetiId);
     const session = record.longHorizon!;
     if (!session.pendingInput || !["input_required", "paused"].includes(session.phase)) {
       throw new TaskTransportRuntimeError("TASK_INPUT_REQUIRED", "A requester instruction is required before the next stage.");
@@ -1609,6 +1616,7 @@ export class TaskTransportRuntime {
     if (!record || record.state !== "input_required" || !record.workspaceBinding) {
       throw new TaskTransportRuntimeError("TASK_RESUME_UNAVAILABLE", "Task cannot be resumed.");
     }
+    await this.authorizePeer?.(record.peerTetiId);
     if (!this.executor?.prepareExecution || !this.executor.getExecutionHandle) {
       throw new TaskTransportRuntimeError("TASK_RESUME_UNAVAILABLE", "Durable execution is unavailable.");
     }
@@ -2516,6 +2524,12 @@ export class TaskTransportRuntime {
   ): Promise<CollaborationTaskTransportRecord> {
     await this.trySendStoredRecord(state, record);
     if (record.delivery === "send_failed") {
+      if (record.safeErrorCode === "TASK_NETWORK_AUTHORIZATION_FAILED") {
+        throw new TaskTransportRuntimeError(
+          "TASK_NETWORK_AUTHORIZATION_FAILED",
+          "Teti Network could not authorize this collaboration."
+        );
+      }
       throw new TaskTransportRuntimeError("TASK_SEND_FAILED", "Chatmail could not queue the Task yet.");
     }
     return structuredClone(record);
@@ -2545,9 +2559,11 @@ export class TaskTransportRuntime {
       record.envelopeMessageId = sent.envelope.messageId;
       record.chatmailMessageId = sent.messageId;
       delete record.safeErrorCode;
-    } catch {
+    } catch (error) {
       record.delivery = "send_failed";
-      record.safeErrorCode = "TASK_CHATMAIL_SEND_FAILED";
+      record.safeErrorCode = isNetworkAuthorizationFailure(error)
+        ? "TASK_NETWORK_AUTHORIZATION_FAILED"
+        : "TASK_CHATMAIL_SEND_FAILED";
     }
     record.updatedAt = this.now().toISOString();
     await this.store.save(state);
@@ -2615,6 +2631,14 @@ export class TaskTransportRuntime {
         && connection.remoteTetiId === tetiId
     );
   }
+}
+
+function isNetworkAuthorizationFailure(error: unknown): boolean {
+  return error instanceof TetiNetworkClientError
+    || (typeof error === "object"
+      && error !== null
+      && "code" in error
+      && error.code === "RELATIONSHIP_AUTHORIZATION_DENIED");
 }
 
 function validateSendInput(input: SendCollaborationTaskInput): Required<Pick<

@@ -1,5 +1,5 @@
 import {
-  BETA_035_NETWORK_REQUIREMENTS,
+  BETA_038_NETWORK_REQUIREMENTS,
   type TetiNetworkBootstrap,
   type TetiNetworkCompatibilityRequirements
 } from "./types.ts";
@@ -7,7 +7,7 @@ import { TetiNetworkClientError } from "./errors.ts";
 
 export function assertTetiNetworkCompatible(
   bootstrap: TetiNetworkBootstrap,
-  requirements: TetiNetworkCompatibilityRequirements = BETA_035_NETWORK_REQUIREMENTS
+  requirements: TetiNetworkCompatibilityRequirements = BETA_038_NETWORK_REQUIREMENTS
 ): void {
   if (bootstrap.protocolVersion !== requirements.requiredProtocolVersion) {
     throw incompatible(

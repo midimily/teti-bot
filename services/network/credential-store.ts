@@ -6,6 +6,7 @@ import {
   requireEd25519PublicKey,
   type TetiNetworkStoredSigningKey
 } from "./signing.ts";
+import type { TetiNetworkEnvironment } from "./config.ts";
 
 export interface TetiNetworkPendingIdentityWrite {
   operation: "register" | "adopt";
@@ -13,8 +14,15 @@ export interface TetiNetworkPendingIdentityWrite {
   rawBody: string;
 }
 
+export interface TetiNetworkCredentialScope {
+  environment: TetiNetworkEnvironment;
+  deliveryAddress: string;
+  transportPublicKey: string | null;
+}
+
 export interface TetiNetworkCredentialRecord {
   schemaVersion: 1;
+  scope?: TetiNetworkCredentialScope;
   identityRoot: TetiNetworkStoredSigningKey;
   clientInstance: TetiNetworkStoredSigningKey & {
     id?: string;
@@ -95,6 +103,7 @@ export function validateCredentialRecord(record: TetiNetworkCredentialRecord): v
   if (record.identityRoot.publicKey === record.clientInstance.publicKey) {
     throw new Error("Teti Network Identity Root and ClientInstance keys must be distinct.");
   }
+  if (record.scope !== undefined) validateCredentialScope(record.scope);
   const hasBinding = record.tetiId !== undefined;
   if (hasBinding !== (record.clientInstance.id !== undefined)
     || hasBinding !== (record.clientInstance.platform !== undefined)
@@ -135,6 +144,21 @@ export function validateCredentialRecord(record: TetiNetworkCredentialRecord): v
   }
   if (record.tetiId !== undefined && record.pending !== undefined) {
     throw new Error("Bound Teti Network credentials must not retain a pending identity write.");
+  }
+}
+
+function validateCredentialScope(scope: TetiNetworkCredentialScope): void {
+  if (!scope
+    || Object.keys(scope).sort().join(",") !== "deliveryAddress,environment,transportPublicKey"
+    || (scope.environment !== "production" && scope.environment !== "local_development")
+    || typeof scope.deliveryAddress !== "string"
+    || !scope.deliveryAddress
+    || scope.deliveryAddress.length > 320
+    || (scope.transportPublicKey !== null
+      && (typeof scope.transportPublicKey !== "string"
+        || !scope.transportPublicKey
+        || scope.transportPublicKey.length > 16_384))) {
+    throw new Error("Teti Network credential scope is invalid.");
   }
 }
 

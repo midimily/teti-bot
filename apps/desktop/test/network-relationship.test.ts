@@ -42,6 +42,7 @@ test("Runtime recovery persists canonical ID, revision, ETag, and viewer-relativ
     remoteIdentity: {
       id: "teti_bbbbbbbbb",
       address: "bbbbbbbbb@mail.seep.im",
+      publicKey: "peer-chatmail-public-key",
       publicProfile: { platform: "macOS", category: [], aiEnvironment: [] }
     }
   });
@@ -51,6 +52,7 @@ test("Runtime recovery persists canonical ID, revision, ETag, and viewer-relativ
   assert.equal(record?.networkRelationship?.etag, '"relationship-r7"');
   assert.equal(record?.networkRelationship?.blockedBy, "peer");
   assert.equal(record?.state, TetiConnectionState.Blocked);
+  assert.equal(record?.remotePublicKey, "peer-chatmail-public-key");
 });
 
 function document(

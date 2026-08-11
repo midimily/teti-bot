@@ -3,9 +3,11 @@ import type { TetiAccount, TetiNetworkIdentityBinding } from "../../core/account
 import type { TetiAccountStorage } from "../../core/account/storage.ts";
 import { assertTetiNetworkCompatible } from "./compatibility.ts";
 import {
+  type TetiNetworkCredentialScope,
   type TetiNetworkCredentialRecord,
   type TetiNetworkCredentialStore
 } from "./credential-store.ts";
+import type { TetiNetworkEnvironment } from "./config.ts";
 import { TetiNetworkClientError } from "./errors.ts";
 import {
   createClientEnrollmentAuthorization,
@@ -33,6 +35,7 @@ export interface TetiNetworkIdentityServiceOptions {
   client: TetiNetworkClient;
   accountStorage: TetiAccountStorage;
   credentialStore: TetiNetworkCredentialStore;
+  environment: TetiNetworkEnvironment;
   appVersion: string;
   platform: string;
   adoptionGrant?: string;
@@ -45,6 +48,7 @@ export class TetiNetworkIdentityService {
   private readonly client: TetiNetworkClient;
   private readonly accountStorage: TetiAccountStorage;
   private readonly credentialStore: TetiNetworkCredentialStore;
+  private readonly environment: TetiNetworkEnvironment;
   private readonly appVersion: string;
   private readonly platform: string;
   private readonly adoptionGrant?: string;
@@ -58,6 +62,7 @@ export class TetiNetworkIdentityService {
     this.client = options.client;
     this.accountStorage = options.accountStorage;
     this.credentialStore = options.credentialStore;
+    this.environment = options.environment;
     this.appVersion = requireToken(options.appVersion, "app version", 64);
     this.platform = requireToken(options.platform, "platform", 32);
     this.adoptionGrant = options.adoptionGrant;
@@ -157,25 +162,46 @@ export class TetiNetworkIdentityService {
     if (!account) throw new Error("A local Teti account is required before Network identity sync.");
     await this.requireCompatible(signal);
 
+    let currentAccount = account;
+    const expectedScope = credentialScope(this.environment, currentAccount);
     let credentials = await this.credentialStore.load();
+    if (credentials && !credentialScopeMatches(credentials.scope, expectedScope)) {
+      if (isBound(credentials)) {
+        await this.credentialStore.remove();
+        credentials = null;
+        currentAccount = await this.prepareForRegistration(currentAccount);
+      } else {
+        credentials = { ...credentials, scope: expectedScope };
+        await this.credentialStore.save(credentials);
+      }
+    }
+    if (credentials
+      && isBound(credentials)
+      && !boundCredentialMatchesActiveBinding(currentAccount, credentials, this.environment)) {
+      await this.credentialStore.remove();
+      credentials = null;
+      currentAccount = await this.prepareForRegistration(currentAccount);
+    }
     if (!credentials) {
-      if (account.networkIdentity?.state === "active") {
+      if (currentAccount.networkIdentity?.state === "active"
+        && currentAccount.networkIdentity.environment === this.environment) {
         throw unauthorized(
           "identity_self",
           "The local Network credential file is missing for an active identity."
         );
       }
-      credentials = newCredentialRecord();
+      currentAccount = await this.prepareForRegistration(currentAccount);
+      credentials = newCredentialRecord(credentialScope(this.environment, currentAccount));
       await this.credentialStore.save(credentials);
     }
-    ensureTransportKeysAreSeparate(account, credentials);
+    ensureTransportKeysAreSeparate(currentAccount, credentials);
 
     if (credentials.tetiId && credentials.clientInstance.id) {
       const session = await this.client.getIdentitySelf(authenticationFrom(credentials), signal);
-      return this.commitSession(account, credentials, session);
+      return this.commitSession(currentAccount, credentials, session);
     }
 
-    const mode = account.networkIdentity?.mode ?? "adopt";
+    const mode = currentAccount.networkIdentity?.mode ?? "adopt";
     if (credentials.pending) {
       const persistedRequest = parsePendingRequest(
         credentials.pending.rawBody,
@@ -186,7 +212,7 @@ export class TetiNetworkIdentityService {
         credentials.pending.operation,
         persistedRequest,
         mode,
-        account
+        currentAccount
       )) {
         // The signing keys are still valid and intentionally retained. Only an
         // unbound write belonging to a different local account/mode is stale.
@@ -195,7 +221,7 @@ export class TetiNetworkIdentityService {
       }
     }
     if (!credentials.pending) {
-      const rawBody = JSON.stringify(this.createFirstClientRequest(mode, account, credentials));
+      const rawBody = JSON.stringify(this.createFirstClientRequest(mode, currentAccount, credentials));
       credentials.pending = {
         operation: mode,
         idempotencyKey: this.idempotencyKeyFactory(mode),
@@ -227,7 +253,22 @@ export class TetiNetworkIdentityService {
           pendingClient,
           options
         );
-    return this.commitSession(account, credentials, session);
+    return this.commitSession(currentAccount, credentials, session);
+  }
+
+  private async prepareForRegistration(account: TetiAccount): Promise<TetiAccount> {
+    if (account.networkIdentity?.state !== "active") return account;
+    const pending: TetiAccount = {
+      ...account,
+      networkIdentity: {
+        schemaVersion: 1,
+        environment: this.environment,
+        mode: "register",
+        state: "pending"
+      }
+    };
+    await this.accountStorage.save(pending);
+    return pending;
   }
 
   private createFirstClientRequest(
@@ -290,6 +331,7 @@ export class TetiNetworkIdentityService {
     validateSession(account, credentials, session, this.platform, this.appVersion);
     const boundCredentials: TetiNetworkCredentialRecord = {
       schemaVersion: 1,
+      scope: credentials.scope ?? credentialScope(this.environment, account),
       identityRoot: credentials.identityRoot,
       clientInstance: {
         publicKey: credentials.clientInstance.publicKey,
@@ -307,6 +349,7 @@ export class TetiNetworkIdentityService {
       id: session.identity.tetiId,
       networkIdentity: {
         schemaVersion: 1,
+        environment: this.environment,
         mode: credentials.pending?.operation ?? account.networkIdentity?.mode ?? "adopt",
         state: "active",
         identityPublicKey: session.identity.identityPublicKey,
@@ -327,21 +370,32 @@ export class TetiNetworkIdentityService {
     clientInstance: TetiNetworkCredentialRecord["clientInstance"] & { id: string };
   }> {
     const credentials = await this.credentialStore.load();
-    if (!credentials?.tetiId || !credentials.clientInstance.id) {
+    if (!credentials || !isBound(credentials)) {
       throw unauthorized("identity_self", "Teti Network identity is not enrolled on this client.");
     }
-    return credentials as TetiNetworkCredentialRecord & {
-      tetiId: string;
-      clientInstance: TetiNetworkCredentialRecord["clientInstance"] & { id: string };
-    };
+    const account = await this.accountStorage.load();
+    if (!account
+      || !credentialScopeMatches(
+        credentials.scope,
+        credentialScope(this.environment, account)
+      )
+      || !boundCredentialMatchesActiveBinding(account, credentials, this.environment)) {
+      await this.credentialStore.remove();
+      throw unauthorized(
+        "identity_self",
+        "The local Network credentials do not belong to this account and environment."
+      );
+    }
+    return credentials;
   }
 }
 
-function newCredentialRecord(): TetiNetworkCredentialRecord {
+function newCredentialRecord(scope: TetiNetworkCredentialScope): TetiNetworkCredentialRecord {
   const identityRoot = generateTetiNetworkSigningKey();
   const clientInstance = generateTetiNetworkSigningKey();
   return {
     schemaVersion: 1,
+    scope,
     identityRoot: storedKey(identityRoot),
     clientInstance: storedKey(clientInstance)
   };
@@ -396,6 +450,9 @@ function bindingFrom(
 ): TetiNetworkIdentityBinding {
   return {
     schemaVersion: 1,
+    ...(account.networkIdentity?.environment
+      ? { environment: account.networkIdentity.environment }
+      : {}),
     mode: account.networkIdentity?.mode ?? "adopt",
     state: update.state,
     ...(account.networkIdentity?.identityPublicKey
@@ -409,6 +466,50 @@ function bindingFrom(
       : {}),
     ...(update.errorCode ? { errorCode: update.errorCode } : {})
   };
+}
+
+function credentialScope(
+  environment: TetiNetworkEnvironment,
+  account: Pick<TetiAccount, "address" | "publicKey">
+): TetiNetworkCredentialScope {
+  return {
+    environment,
+    deliveryAddress: account.address,
+    transportPublicKey: account.publicKey ?? null
+  };
+}
+
+function credentialScopeMatches(
+  actual: TetiNetworkCredentialScope | undefined,
+  expected: TetiNetworkCredentialScope
+): boolean {
+  return actual?.environment === expected.environment
+    && actual.deliveryAddress === expected.deliveryAddress
+    && actual.transportPublicKey === expected.transportPublicKey;
+}
+
+function isBound(
+  credentials: TetiNetworkCredentialRecord
+): credentials is TetiNetworkCredentialRecord & {
+  tetiId: string;
+  clientInstance: TetiNetworkCredentialRecord["clientInstance"] & { id: string };
+} {
+  return Boolean(credentials.tetiId && credentials.clientInstance.id);
+}
+
+function boundCredentialMatchesActiveBinding(
+  account: TetiAccount,
+  credentials: TetiNetworkCredentialRecord & {
+    tetiId: string;
+    clientInstance: TetiNetworkCredentialRecord["clientInstance"] & { id: string };
+  },
+  environment: TetiNetworkEnvironment
+): boolean {
+  const binding = account.networkIdentity;
+  if (binding?.state !== "active" || binding.environment !== environment) return true;
+  return binding.identityPublicKey === credentials.identityRoot.publicKey
+    && binding.clientInstanceId === credentials.clientInstance.id
+    && account.id === credentials.tetiId;
 }
 
 function ensureTransportKeysAreSeparate(

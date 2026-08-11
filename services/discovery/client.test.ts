@@ -2,12 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { TetiDiscoveryService } from "./client.ts";
 import { matchTetis } from "./matcher.ts";
-import type { DiscoveryIdentity } from "./registry-client.ts";
-import type { TetiRegistryReader } from "./client.ts";
+import type { TetiPublicDirectoryIdentity } from "./types.ts";
+import type { TetiPublicDirectoryReader } from "./client.ts";
 
-test("discovers public Teti identities from the registry", async () => {
+test("discovers public Teti identities from the Network directory", async () => {
   const service = new TetiDiscoveryService({
-    registry: new StaticRegistry([
+    directory: new StaticDirectory([
       {
         version: 1,
         id: "teti_alex00001",
@@ -50,7 +50,7 @@ test("discovers public Teti identities from the registry", async () => {
 
 test("fetches a Teti profile by id", async () => {
   const service = new TetiDiscoveryService({
-    registry: new StaticRegistry([
+    directory: new StaticDirectory([
       {
         version: 1,
         id: "teti_profile01",
@@ -78,7 +78,7 @@ test("fetches a Teti profile by id", async () => {
 
 test("keeps Network Identity independent from its Chatmail delivery mailbox", async () => {
   const service = new TetiDiscoveryService({
-    registry: new StaticRegistry([{
+    directory: new StaticDirectory([{
       version: 1,
       id: "teti_network01",
       address: "existing01@mail.seep.im",
@@ -132,20 +132,20 @@ test("calculates deterministic compatibility scores", () => {
   assert.equal(matches[1].score, 0);
 });
 
-test("surfaces offline registry errors", async () => {
+test("surfaces offline Network directory errors", async () => {
   const service = new TetiDiscoveryService({
-    registry: new OfflineRegistry()
+    directory: new OfflineDirectory()
   });
 
   await assert.rejects(
     () => service.discoverTetis(),
-    (error) => error instanceof Error && error.message === "registry offline"
+    (error) => error instanceof Error && error.message === "Network directory offline"
   );
 });
 
 test("prepares a public connection request draft without sending a message", () => {
   const service = new TetiDiscoveryService({
-    registry: new StaticRegistry([])
+    directory: new StaticDirectory([])
   });
 
   assert.deepEqual(
@@ -182,28 +182,28 @@ test("prepares a public connection request draft without sending a message", () 
   );
 });
 
-class StaticRegistry implements TetiRegistryReader {
-  private readonly identities: DiscoveryIdentity[];
+class StaticDirectory implements TetiPublicDirectoryReader {
+  private readonly identities: TetiPublicDirectoryIdentity[];
 
-  constructor(identities: DiscoveryIdentity[]) {
+  constructor(identities: TetiPublicDirectoryIdentity[]) {
     this.identities = identities;
   }
 
-  async discover(): Promise<DiscoveryIdentity[]> {
+  async discover(): Promise<TetiPublicDirectoryIdentity[]> {
     return this.identities;
   }
 
-  async getIdentity(id: string): Promise<DiscoveryIdentity | null> {
+  async getIdentity(id: string): Promise<TetiPublicDirectoryIdentity | null> {
     return this.identities.find((identity) => identity.id === id) ?? null;
   }
 }
 
-class OfflineRegistry implements TetiRegistryReader {
-  async discover(): Promise<DiscoveryIdentity[]> {
-    throw new Error("registry offline");
+class OfflineDirectory implements TetiPublicDirectoryReader {
+  async discover(): Promise<TetiPublicDirectoryIdentity[]> {
+    throw new Error("Network directory offline");
   }
 
-  async getIdentity(): Promise<DiscoveryIdentity | null> {
-    throw new Error("registry offline");
+  async getIdentity(): Promise<TetiPublicDirectoryIdentity | null> {
+    throw new Error("Network directory offline");
   }
 }

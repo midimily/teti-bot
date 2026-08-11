@@ -2,6 +2,8 @@ export const TETI_NETWORK_BASE_URL_ENV = "TETI_NETWORK_BASE_URL";
 export const DEFAULT_TETI_NETWORK_BASE_URL = "https://network.teti.bot";
 export const DEVELOPMENT_TETI_NETWORK_BASE_URL = "http://127.0.0.1:8788";
 
+export type TetiNetworkEnvironment = "production" | "local_development";
+
 export function resolveTetiNetworkBaseUrl(
   env: Record<string, string | undefined> = readProcessEnvironment()
 ): string {

@@ -163,7 +163,7 @@ test("sidecar reports missing account without creating one", async () => {
   assert.equal(response.ok, true);
   assert.deepEqual(response.ok && response.result, {
     exists: false,
-    registry: { state: "unknown" },
+    networkIdentity: { state: "unknown" },
     onlineStatus: "unknown"
   });
   assert.equal(deps.createCalls.length, 0);
@@ -232,38 +232,26 @@ test("sidecar redacts secret-like errors", async () => {
   assert.equal(redactSecretLikeText("authorization:Bearer abc").includes("abc"), false);
 });
 
-test("sidecar discovery retry registers existing account without creating another one", async () => {
+test("sidecar retries Network identity synchronization without creating another account", async () => {
   const deps = fakeDependencies({ account: createAccount("Milo") });
-  const response = await handleLifecycleRequest(request("discovery.retry"), deps);
+  const response = await handleLifecycleRequest(request("network.identity.retry"), deps);
 
   assert.equal(response.ok, true);
-  assert.equal(deps.registerCalls.length, 1);
+  assert.equal(deps.synchronizeCalls, 1);
   assert.equal(deps.createCalls.length, 0);
 });
 
-test("sidecar discovery heartbeat refreshes the local public profile and registry activity", async () => {
+test("sidecar maps Network identity synchronization failures to the Network error boundary", async () => {
   const deps = fakeDependencies({ account: createAccount("Milo") });
-  const response = await handleLifecycleRequest(request("discovery.heartbeat"), deps);
-
-  assert.equal(response.ok, true);
-  assert.equal(deps.heartbeatCalls, 1);
-  assert.equal(
-    response.ok && response.result?.publicProfile.lastSeen,
-    "2026-07-18T00:00:00.000Z"
-  );
-});
-
-test("sidecar keeps discovery heartbeat failures distinct from registration failures", async () => {
-  const deps = fakeDependencies({ account: createAccount("Milo") });
-  deps.heartbeatDiscovery = async () => {
-    throw new Error("registry fetch timeout");
+  deps.synchronizeNetworkIdentity = async () => {
+    throw new Error("Network request timed out");
   };
 
-  const response = await handleLifecycleRequest(request("discovery.heartbeat"), deps);
+  const response = await handleLifecycleRequest(request("network.identity.retry"), deps);
 
   assert.equal(response.ok, false);
-  assert.equal(!response.ok && response.error.code, "DISCOVERY_HEARTBEAT_FAILED");
-  assert.equal(!response.ok && response.error.retryTarget, "discovery.heartbeat");
+  assert.equal(!response.ok && response.error.code, "NETWORK_IDENTITY_FAILED");
+  assert.equal(!response.ok && response.error.retryTarget, "network.identity.retry");
 });
 
 test("sidecar keeps peer commands while rejecting the removed connection polling read", async () => {
@@ -553,23 +541,19 @@ function request(method: LifecycleRequest["method"], params: Record<string, unkn
 
 function fakeDependencies(options: { account?: TetiAccount | null } = {}): LifecycleSidecarDependencies & {
   createCalls: string[];
-  registerCalls: TetiAccount[];
-  heartbeatCalls: number;
+  synchronizeCalls: number;
 } {
   const createCalls: string[] = [];
-  const registerCalls: TetiAccount[] = [];
   let account = options.account ?? null;
   let passport = createPassportSnapshot();
   const tasks: CollaborationTaskTransportRecord[] = [];
 
   const dependencies: LifecycleSidecarDependencies & {
     createCalls: string[];
-    registerCalls: TetiAccount[];
-    heartbeatCalls: number;
+    synchronizeCalls: number;
   } = {
     createCalls,
-    registerCalls,
-    heartbeatCalls: 0,
+    synchronizeCalls: 0,
     async loadTetiAccount() {
       return account ? clone(account) : null;
     },
@@ -581,26 +565,15 @@ function fakeDependencies(options: { account?: TetiAccount | null } = {}): Lifec
     async getTetiStatus(): Promise<TetiStatus> {
       return {
         exists: account !== null,
-        registry: {
-          state: account === null
-            ? "unknown"
-            : registerCalls.length > 0
-              ? "registered"
-              : "not_registered"
+        networkIdentity: {
+          state: account === null ? "unknown" : "pending"
         },
         onlineStatus: "unknown"
       };
     },
-    async registerDiscovery(existing: TetiAccount) {
-      registerCalls.push(clone(existing));
-    },
-    async heartbeatDiscovery() {
+    async synchronizeNetworkIdentity() {
       if (!account) throw new Error("A local Teti account is required.");
-      account.publicProfile = {
-        ...account.publicProfile,
-        lastSeen: "2026-07-18T00:00:00.000Z"
-      };
-      dependencies.heartbeatCalls += 1;
+      dependencies.synchronizeCalls += 1;
       return clone(account);
     },
     async getPassportSnapshot() {
@@ -681,7 +654,7 @@ function createPassportSnapshot(): RuntimePassportSnapshot {
     revision: 1,
     generatedAt,
     identity: null,
-    registry: { state: "unknown" },
+    networkIdentity: { state: "unknown" },
     localPassport: {
       schemaVersion: 2,
       generatedAt,

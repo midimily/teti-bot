@@ -15,7 +15,7 @@ test("Teti Runtime reaches the local Network through NetworkClient", async () =>
   });
   const networkClient = new HttpTetiNetworkClient({
     baseUrl,
-    clientVersion: "0.3.5",
+    clientVersion: "0.3.8",
     clientPlatform: "macos"
   });
   const directDirectory = await networkClient.listPublicNodes();
@@ -24,7 +24,7 @@ test("Teti Runtime reaches the local Network through NetworkClient", async () =>
     dependencies: {
       networkClient,
       async loadTetiAccount() { return null; },
-      async heartbeatDiscovery() { throw new Error("no account"); },
+      async synchronizeNetworkIdentity() { throw new Error("no account"); },
       async getPeerConnectionService() { throw new Error("no account"); },
       passportSharingStore: new MemoryPassportSharingStore(),
       codexUsageService: {
@@ -44,8 +44,8 @@ test("Teti Runtime reaches the local Network through NetworkClient", async () =>
     const status = await waitForNetworkContract(runtime);
     assert.equal(status.state, "compatible");
     assert.equal(status.state === "compatible" && status.protocolVersion, 1);
-    assert.ok(status.state === "compatible" && status.contractRevision >= 6);
-    assert.equal(status.state === "compatible" && status.serviceVersion, "0.1.5");
+    assert.ok(status.state === "compatible" && status.contractRevision >= 7);
+    assert.equal(status.state === "compatible" && status.serviceVersion, "0.1.8");
     assert.deepEqual(await runtime.listPublicNodes(), directDirectory);
     const runtimeStats = await runtime.getPublicStats();
     assert.deepEqual(

@@ -1,4 +1,3 @@
-import type { DiscoveryClient } from "../../../../services/discovery/registry-client.ts";
 import type { FirstLaunchAccountLifecycle } from "../first-launch/coordinator.ts";
 import type { TauriInvoker } from "../platform/tauri-api.ts";
 import { createBridgeDesktopAccountLifecycle } from "./bridge-lifecycle.ts";
@@ -8,7 +7,6 @@ import { readProvisioningMode, type ProvisioningModeConfig } from "./modes.ts";
 export interface DesktopLifecycleSelection {
   config: ProvisioningModeConfig;
   lifecycle: FirstLaunchAccountLifecycle;
-  discoveryClient?: Pick<DiscoveryClient, "registerIdentity">;
 }
 
 export async function createDesktopAccountLifecycle(
@@ -23,8 +21,7 @@ export async function createDesktopAccountLifecycle(
     const bridge = await createBridgeDesktopAccountLifecycle(tauri);
     return {
       config,
-      lifecycle: bridge.lifecycle,
-      discoveryClient: bridge.discoveryClient
+      lifecycle: bridge.lifecycle
     };
   }
 

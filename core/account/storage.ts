@@ -2,11 +2,11 @@ import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import {
-  isCanonicalTetiChatmailAddress,
+  isCanonicalTetiRelayChatmailAddress,
   isCanonicalTetiPublicId,
-  normalizeTetiChatmailAddress
+  normalizeTetiRelayChatmailAddress
 } from "../identity/public-id.ts";
-import { getTetiId, getTetiIdFromAddress, type TetiAccount } from "./model.ts";
+import { getTetiId, type TetiAccount } from "./model.ts";
 
 export interface TetiAccountStorage {
   exists(): Promise<boolean>;
@@ -30,8 +30,8 @@ export class FileTetiAccountStorage implements TetiAccountStorage {
     try {
       const raw = await readFile(this.accountPath, "utf8");
       const account = JSON.parse(raw) as TetiAccount;
-      account.address = normalizeTetiChatmailAddress(account.address);
-      account.id = account.id ? getTetiId(account) : getTetiIdFromAddress(account.address);
+      account.address = normalizeTetiRelayChatmailAddress(account.address);
+      account.id = getTetiId(account);
       validateStoredAccount(account);
       return account;
     } catch (error) {
@@ -109,7 +109,7 @@ function validateStoredAccount(account: TetiAccount): void {
     throw new Error("Teti account id must be a canonical lowercase public ID.");
   }
 
-  if (!isCanonicalTetiChatmailAddress(account.address)) {
+  if (!isCanonicalTetiRelayChatmailAddress(account.address)) {
     throw new Error("Teti account Chatmail address must be canonical lowercase.");
   }
 
@@ -122,6 +122,9 @@ function validateStoredAccount(account: TetiAccount): void {
     if (binding.schemaVersion !== 1
       || !["register", "adopt"].includes(binding.mode)
       || !["pending", "active", "revoked", "conflict"].includes(binding.state)
+      || (binding.environment !== undefined
+        && binding.environment !== "production"
+        && binding.environment !== "local_development")
       || (binding.identityPublicKey !== undefined
         && !/^ed25519:[A-Za-z0-9_-]{43}$/.test(binding.identityPublicKey))
       || (binding.clientInstanceId !== undefined

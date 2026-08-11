@@ -6,9 +6,8 @@ Teti is not a chatbot, an assistant replacement, a social media application, or 
 
 ## Architecture
 
-Beta 0.3 migrates the official control plane behind the versioned Teti Network contract. Beta 0.3.5
-adds canonical SQLite-backed Relationship state to the Identity, ClientInstance, Presence, and
-PublicProfile foundation:
+Beta 0.3 migrates the official control plane behind the versioned Teti Network contract. Beta 0.3.8
+closes the local migration: the App has no legacy Worker/KV runtime, configuration, or admin path.
 
 - Network contract: `Runtime -> NetworkClient -> network.teti.bot` (or local
   `http://127.0.0.1:8788`).
@@ -20,16 +19,18 @@ PublicProfile foundation:
   durable idempotency, and full-replacement conflict recovery.
 - Private Relationship read/commands: `Runtime -> NetworkClient -> teti-network -> SQLite`, using
   one canonical unordered-pair ID, revision/ETag guards, and durable exact-command recovery.
+- Relationship permission and recovery use fresh confirmed-only authorization plus stable snapshot
+  and incremental-change reconciliation. `connections.json` is display/delivery recovery only.
+- Relay bootstrap/catalog select Chatmail provisioning dynamically; signed RelayBinding state keeps
+  the delivery address bound to the Network identity without coupling the Teti ID to a Relay.
 - Signed HTTP authentication: separate Ed25519 Identity Root and ClientInstance keys, with Redis
   nonce/replay state. Chatmail/OpenPGP keys remain transport-only.
-- Transitional code: the old Worker adapter stays for later retirement, but its legacy heartbeat is
-  ID-only and the Desktop Runtime never sends Profile content to it.
 - Secure communication: Chatmail relays encrypted Teti-to-Teti messages.
 
 Private keys, Chatmail credentials, private AI state, task content, and conversation history stay on
 the user's device. Relationship is now Network-authoritative; the local Chatmail connection record
-remains recovery state only. Later Beta 0.3 milestones move RelayBinding and remaining official
-state into the durable contract.
+remains recovery state only. RelayBinding is Network-authoritative and cached separately for each
+Network environment; Relay still owns message transport rather than Teti identity.
 
 The App defaults to `https://network.teti.bot`. Settings has an explicit, default-off “本机 Network
 开发环境” switch for `http://127.0.0.1:8788`; the fixed environment selection is persisted locally
@@ -42,7 +43,7 @@ owner-only permissions.
 
 Teti has one canonical public-ID format: `teti_[a-z0-9]{9}`. The card and desktop UI show only the 9-character suffix. Human input is case-insensitive, but local storage and Network protocol messages must contain the lowercase canonical form. Invalid characters are rejected, never removed silently. Network identity and Chatmail delivery address are intentionally independent; adoption preserves both without creating a new Chatmail account.
 
-See [`docs/teti-public-id.md`](docs/teti-public-id.md) for the complete boundary rules and the mandatory pre-deployment KV audit.
+See [`docs/teti-public-id.md`](docs/teti-public-id.md) for the complete boundary rules.
 
 Runtime owns the Presence scheduler: collaboration and visible connection-panel modes report every
 5 seconds, foreground online every 15 seconds, and background every 30 seconds. State changes and
@@ -61,7 +62,7 @@ teti-bot/
 ├── integrations/
 │   ├── chatmail/
 │   └── agents/
-├── services/discovery-worker/
+├── services/discovery/
 ├── services/network/
 ├── protocol/
 └── docs/
@@ -69,21 +70,25 @@ teti-bot/
 
 ## Current Network Migration Boundary
 
-`services/network` contains the thin, backend-independent Network v1 client. Beta 0.3.5 requires
-protocol 1, minimum contract revision 6, `identity`, `clientAuthentication`, `publicDirectory`,
-`publicProfile`, `presence`, and `relationships`. The App consumes OpenAPI/JSON rather than Hono types. Runtime owns
+`services/network` contains the thin, backend-independent Network v1 client. Beta 0.3.8 requires
+protocol 1, minimum contract revision 8, `identity`, `clientAuthentication`, `publicDirectory`,
+`publicProfile`, `presence`, `relationships`, and `relayBindings`. The App consumes OpenAPI/JSON rather than Hono types. Runtime owns
 bootstrap, registration/adoption, signed `/self`, ClientInstance enrollment/revocation, Presence,
-revisioned PublicProfile, canonical Relationship commands, and recovery. Confirmed-peer Passport remains Runtime/Chatmail-owned. All
-remaining Worker code will be removed before the Beta 0.3 series is finalized.
+revisioned PublicProfile, canonical Relationship commands, confirmed-only authorization, and
+snapshot/change recovery. It also confirms bootstrap Relay selection against `/v1/relays`, passes
+the dynamic provisioning URI to Chatmail, and validates signed RelayBinding state after identity
+synchronization. Confirmed-peer Passport remains Runtime/Chatmail-owned. All
+official Network business crosses the Runtime-owned `NetworkClient`; Chatmail remains a separate
+message transport.
 
 ## Beta MVP 1.0 Architecture
 
 The accepted Beta boundary and staged Runtime convergence are documented in
 [`docs/TETI_BETA_MVP_1_0_ARCHITECTURE_FREEZE.md`](docs/TETI_BETA_MVP_1_0_ARCHITECTURE_FREEZE.md).
-Task 1 froze the Capability Passport model and introduced the Runtime Host. Task 2 connects it to the
-existing lifecycle sidecar so Registry heartbeat, Chatmail polling, peer presence and AI-status sync,
-and Codex refresh are Runtime-owned background work. Task 3 makes Desktop a pure Runtime consumer:
-its periodic reads update UI snapshots only and never drive Registry, Chatmail, or provider network work.
+Task 1 froze the Capability Passport model and introduced the Runtime Host. The lifecycle sidecar now
+owns Network synchronization, Chatmail polling, peer transport presence, AI-status sync, and Codex
+refresh. Desktop is a Runtime consumer: periodic reads update UI snapshots and never drive background
+Network or Chatmail work.
 
 To regression-test first launch on a development Mac while preserving the
 local Chatmail account store, follow

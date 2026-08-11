@@ -1,5 +1,5 @@
 import type { TetiConnectionDirection, TetiConnectionState } from "../connection/types.ts";
-import type { RegistryStatus } from "../account/model.ts";
+import type { NetworkIdentityStatus } from "../account/model.ts";
 import type {
   AiAgent,
   AiResource,
@@ -74,7 +74,7 @@ export interface RuntimePassportSnapshot {
   revision: number;
   generatedAt: string;
   identity: PassportIdentity | null;
-  registry: RegistryStatus;
+  networkIdentity: NetworkIdentityStatus;
   localPassport: TetiCapabilityPassport;
   connections: PassportConnectionSnapshot[];
   sharing: PassportSharingPolicy;

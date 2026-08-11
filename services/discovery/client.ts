@@ -1,10 +1,8 @@
-import {
-  type DiscoveryIdentity
-} from "./registry-client.ts";
 import type {
   ConnectionRequestDraft,
   DiscoverTetisInput,
   TetiIdentity,
+  TetiPublicDirectoryIdentity,
   TetiPublicProfile
 } from "./types.ts";
 import {
@@ -13,13 +11,13 @@ import {
   normalizeTetiPublicId
 } from "../../core/identity/public-id.ts";
 
-export interface TetiRegistryReader {
-  discover(input?: DiscoverTetisInput): Promise<DiscoveryIdentity[]>;
-  getIdentity(id: string): Promise<DiscoveryIdentity | null>;
+export interface TetiPublicDirectoryReader {
+  discover(input?: DiscoverTetisInput): Promise<TetiPublicDirectoryIdentity[]>;
+  getIdentity(id: string): Promise<TetiPublicDirectoryIdentity | null>;
 }
 
 export interface TetiDiscoveryServiceOptions {
-  registry: TetiRegistryReader;
+  directory: TetiPublicDirectoryReader;
 }
 
 export interface PrepareConnectionRequestInput {
@@ -32,14 +30,14 @@ export interface PrepareConnectionRequestInput {
 }
 
 export class TetiDiscoveryService {
-  private readonly registry: TetiRegistryReader;
+  private readonly directory: TetiPublicDirectoryReader;
 
   constructor(options: TetiDiscoveryServiceOptions) {
-    this.registry = options.registry;
+    this.directory = options.directory;
   }
 
   async discoverTetis(input: DiscoverTetisInput = {}): Promise<TetiIdentity[]> {
-    const identities = (await this.registry.discover(input)).map(toTetiIdentity);
+    const identities = (await this.directory.discover(input)).map(toTetiIdentity);
 
     if (typeof input.limit !== "number") {
       return identities;
@@ -49,7 +47,7 @@ export class TetiDiscoveryService {
   }
 
   async getTetiProfile(id: string): Promise<TetiIdentity | null> {
-    const identity = await this.registry.getIdentity(normalizeTetiPublicId(id));
+    const identity = await this.directory.getIdentity(normalizeTetiPublicId(id));
     return identity ? toTetiIdentity(identity) : null;
   }
 
@@ -70,7 +68,7 @@ export class TetiDiscoveryService {
   }
 }
 
-export function toTetiIdentity(identity: DiscoveryIdentity): TetiIdentity {
+export function toTetiIdentity(identity: TetiPublicDirectoryIdentity): TetiIdentity {
   if (!isCanonicalTetiPublicId(identity.id)) {
     throw new Error("Discovery returned a non-canonical Teti public ID.");
   }

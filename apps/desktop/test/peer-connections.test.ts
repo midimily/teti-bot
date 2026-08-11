@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { resolveIdentityQuery } from "../lifecycle-sidecar/connections.ts";
-import type { TetiRegistryReader } from "../../../services/discovery/client.ts";
-import type { DiscoveryIdentity } from "../../../services/discovery/registry-client.ts";
+import type { TetiPublicDirectoryReader } from "../../../services/discovery/client.ts";
+import type { TetiPublicDirectoryIdentity } from "../../../services/discovery/types.ts";
 import {
   CONNECT_PANEL_CLOSE_MS,
   CONNECT_PANEL_OPEN_MS,
@@ -20,7 +20,7 @@ import type {
 import { RecordingTauriInvoker } from "../src/platform/tauri-api.ts";
 import { TauriNotchWindowController } from "../src/platform/tauri-notch-window.ts";
 
-const identity: DiscoveryIdentity = {
+const identity: TetiPublicDirectoryIdentity = {
   version: 1,
   id: "teti_076bm9evq",
   address: "076bm9evq@mail.seep.im",
@@ -32,14 +32,14 @@ const identity: DiscoveryIdentity = {
 const emptyResult: TestCommandResult = { connections: [] };
 
 test("peer identity input resolves the 9-character ID shown on teti.bot", async () => {
-  const registry = new StaticRegistry([identity]);
+  const directory = new StaticDirectory([identity]);
 
-  assert.equal((await resolveIdentityQuery("076bm9evq", registry)).address, identity.address);
-  assert.equal((await resolveIdentityQuery("076BM9EVQ", registry)).publicKey, identity.publicKey);
+  assert.equal((await resolveIdentityQuery("076bm9evq", directory)).address, identity.address);
+  assert.equal((await resolveIdentityQuery("076BM9EVQ", directory)).publicKey, identity.publicKey);
 });
 
 test("peer identity input rejects prefixed IDs, addresses, links, and public keys", async () => {
-  const registry = new StaticRegistry([identity]);
+  const directory = new StaticDirectory([identity]);
 
   for (const query of [
     "teti_076bm9evq",
@@ -47,13 +47,13 @@ test("peer identity input rejects prefixed IDs, addresses, links, and public key
     "https://teti.bot/076bm9evq",
     identity.publicKey!
   ]) {
-    await assert.rejects(() => resolveIdentityQuery(query, registry), /exactly 9/);
+    await assert.rejects(() => resolveIdentityQuery(query, directory), /exactly 9/);
   }
 });
 
 test("peer identity input rejects unknown public data", async () => {
   await assert.rejects(
-    () => resolveIdentityQuery("000000000", new StaticRegistry([identity])),
+    () => resolveIdentityQuery("000000000", new StaticDirectory([identity])),
     /No public Teti identity matched/
   );
 });
@@ -535,18 +535,18 @@ class ControlledScheduler {
   }
 }
 
-class StaticRegistry implements TetiRegistryReader {
-  private readonly identities: DiscoveryIdentity[];
+class StaticDirectory implements TetiPublicDirectoryReader {
+  private readonly identities: TetiPublicDirectoryIdentity[];
 
-  constructor(identities: DiscoveryIdentity[]) {
+  constructor(identities: TetiPublicDirectoryIdentity[]) {
     this.identities = identities;
   }
 
-  async discover(): Promise<DiscoveryIdentity[]> {
+  async discover(): Promise<TetiPublicDirectoryIdentity[]> {
     return this.identities;
   }
 
-  async getIdentity(id: string): Promise<DiscoveryIdentity | null> {
+  async getIdentity(id: string): Promise<TetiPublicDirectoryIdentity | null> {
     return this.identities.find((item) => item.id === id) ?? null;
   }
 }

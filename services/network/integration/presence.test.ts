@@ -12,13 +12,13 @@ import { DEVELOPMENT_TETI_NETWORK_BASE_URL, resolveTetiNetworkBaseUrl } from "..
 import { TetiNetworkClientError } from "../errors.ts";
 import { TetiNetworkIdentityService } from "../identity-service.ts";
 
-test("Beta 0.3.5 App keeps Presence minimal against local Network", async () => {
+test("Beta 0.3.8 App keeps Presence minimal against local Network", async () => {
   const baseUrl = resolveTetiNetworkBaseUrl({
     TETI_NETWORK_BASE_URL: process.env.TETI_NETWORK_BASE_URL ?? DEVELOPMENT_TETI_NETWORK_BASE_URL
   });
   const client = new HttpTetiNetworkClient({
     baseUrl,
-    clientVersion: "0.3.5",
+    clientVersion: "0.3.8",
     clientPlatform: "macos"
   });
   const accountStorage = new MemoryTetiAccountStorage();
@@ -29,6 +29,7 @@ test("Beta 0.3.5 App keeps Presence minimal against local Network", async () => 
     client,
     accountStorage,
     credentialStore,
+    environment: "local_development",
     appVersion: "0.3.3",
     platform: "macos",
     adoptionGrant: "teti-development-first-claim",

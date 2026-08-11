@@ -10,6 +10,7 @@ import {
 } from "../src/lifecycle-bridge/protocol.ts";
 import {
   defaultLifecycleSidecarDependencies,
+  createGuardedRealTetiAccount,
   handleLifecycleLine,
   type LifecycleSidecarDependencies
 } from "./handler.ts";
@@ -90,8 +91,16 @@ import {
 } from "./runtime/network/environment.ts";
 import { FileTetiNetworkProfileSyncStore } from "../../../services/network/profile-sync-store.ts";
 import { TetiNetworkProfileService } from "../../../services/network/profile-service.ts";
+import { FileTetiNetworkRelayBindingStore } from "../../../services/network/relay-binding-store.ts";
+import {
+  TETI_NETWORK_RELAY_BINDING_ADOPTION_GRANT,
+  TetiNetworkRelayService
+} from "../../../services/network/relay-service.ts";
 import { FileTetiNetworkRelationshipCommandStore } from "../../../services/network/relationship-command-store.ts";
 import { TetiNetworkRelationshipService } from "../../../services/network/relationship-service.ts";
+import {
+  FileTetiNetworkRelationshipReconciliationStore
+} from "../../../services/network/relationship-reconciliation-store.ts";
 import { projectNetworkPublicProfile } from "./runtime/network/public-profile.ts";
 
 const PROCESS_SHUTDOWN_HARD_LIMIT_MS = 4_000;
@@ -134,6 +143,8 @@ async function startSidecar(): Promise<void> {
     new FileTetiNetworkEnvironmentPreferenceStore(profile.networkEnvironmentPath)
   );
   const networkBaseUrl = networkEnvironmentSettings.settings.activeBaseUrl;
+  const networkEnvironment = networkEnvironmentSettings.settings.activeEnvironment;
+  const networkStatePaths = profile.networkStatePaths[networkEnvironment];
   const networkClient = new HttpTetiNetworkClient({
     baseUrl: networkBaseUrl,
     clientVersion: TETI_BUILD_INFO.appVersion,
@@ -143,17 +154,39 @@ async function startSidecar(): Promise<void> {
   const networkIdentityService = new TetiNetworkIdentityService({
     client: networkClient,
     accountStorage,
-    credentialStore: new FileTetiNetworkCredentialStore(profile.networkCredentialsPath),
+    credentialStore: new FileTetiNetworkCredentialStore(networkStatePaths.credentialsPath),
+    environment: networkEnvironment,
     appVersion: TETI_BUILD_INFO.appVersion,
     platform: "macos",
     adoptionGrant: resolveNetworkAdoptionGrant(networkBaseUrl)
   });
+  let networkIdentityReady = false;
+  let networkIdentityInitialization: Promise<void> | undefined;
+  const synchronizeNetworkIdentity = async () => {
+    const account = await networkIdentityService.synchronize();
+    networkIdentityReady = true;
+    return account;
+  };
+  const getNetworkAuthentication = async () => {
+    if (!networkIdentityReady) {
+      networkIdentityInitialization ??= synchronizeNetworkIdentity().then(() => undefined).finally(() => {
+        networkIdentityInitialization = undefined;
+      });
+      await networkIdentityInitialization;
+    }
+    return networkIdentityService.getAuthenticatedSigner();
+  };
+  const networkRelayService = new TetiNetworkRelayService({
+    client: networkClient,
+    accountStorage,
+    store: new FileTetiNetworkRelayBindingStore(networkStatePaths.relayBindingPath),
+    environment: networkEnvironment,
+    getAuthentication: getNetworkAuthentication,
+    adoptionGrant: process.env[TETI_NETWORK_RELAY_BINDING_ADOPTION_GRANT]
+  });
   const presenceController = new RuntimePresencePolicyController({
     client: networkClient,
-    getAuthentication: async () => {
-      await networkIdentityService.synchronize();
-      return networkIdentityService.getAuthenticatedSigner();
-    },
+    getAuthentication: getNetworkAuthentication,
     onChange: (snapshot) => {
       writeRuntimeDiagnostic("network.presence", {
         state: snapshot.state,
@@ -216,11 +249,8 @@ async function startSidecar(): Promise<void> {
   });
   const networkProfileService = new TetiNetworkProfileService({
     client: networkClient,
-    store: new FileTetiNetworkProfileSyncStore(profile.networkProfileSyncPath),
-    getAuthentication: async () => {
-      await networkIdentityService.synchronize();
-      return networkIdentityService.getAuthenticatedSigner();
-    },
+    store: new FileTetiNetworkProfileSyncStore(networkStatePaths.profileSyncPath),
+    getAuthentication: getNetworkAuthentication,
     getDesiredProfile: async () => {
       const account = await accountStorage.load();
       if (!account) throw new Error("A local Teti account is required before Network Profile sync.");
@@ -229,11 +259,11 @@ async function startSidecar(): Promise<void> {
   });
   const networkRelationshipService = new TetiNetworkRelationshipService({
     client: networkClient,
-    store: new FileTetiNetworkRelationshipCommandStore(profile.networkRelationshipCommandPath),
-    getAuthentication: async () => {
-      await networkIdentityService.synchronize();
-      return networkIdentityService.getAuthenticatedSigner();
-    }
+    store: new FileTetiNetworkRelationshipCommandStore(networkStatePaths.relationshipCommandPath),
+    reconciliationStore: new FileTetiNetworkRelationshipReconciliationStore(
+      networkStatePaths.relationshipReconciliationPath
+    ),
+    getAuthentication: getNetworkAuthentication
   });
   const codexImageRunnerPath = join(dirname(fileURLToPath(import.meta.url)), "codex-image-runner.mjs");
   let pathOverridesPromise: Promise<Record<string, string>> | undefined;
@@ -398,10 +428,10 @@ async function startSidecar(): Promise<void> {
     dependencies: {
       networkClient,
       loadTetiAccount: defaultLifecycleSidecarDependencies.loadTetiAccount,
-      synchronizeNetworkIdentity: () => networkIdentityService.synchronize(),
-      heartbeatDiscovery: () => networkIdentityService.synchronize(),
+      synchronizeNetworkIdentity,
+      synchronizeNetworkRelayBinding: () => networkRelayService.synchronize().then(() => undefined),
       getPeerConnectionService: () => getDefaultPeerConnectionService({
-        registry: new TetiNetworkPublicReadAdapter(networkClient),
+        directory: new TetiNetworkPublicReadAdapter(networkClient),
         getLocalCallableAgents: () => hostAgent.getCallableAgents(),
         getLocalComputeOffers: () => hostAgent.getComputeOffers(),
         taskExecutor: hostAgent,
@@ -432,8 +462,8 @@ async function startSidecar(): Promise<void> {
         message: redactSecretLikeText(message)
       });
     },
-    onRegistryStatusChange: ({ status, attempt, nextRetryMs }) => {
-      writeRuntimeDiagnostic("registry.sync", {
+    onNetworkIdentityStatusChange: ({ status, attempt, nextRetryMs }) => {
+      writeRuntimeDiagnostic("network.identity", {
         state: status.state,
         code: status.errorCode,
         retryable: status.retryable,
@@ -462,6 +492,9 @@ async function startSidecar(): Promise<void> {
   lifecycleDependencies = createRuntimeOwnedLifecycleDependencies(
     {
       ...defaultLifecycleSidecarDependencies,
+      createTetiAccount: (input) => createGuardedRealTetiAccount(input, {
+        resolveAccountProvisioning: () => networkRelayService.selectProvisioningRelay()
+      }),
       getOsaurusNativeChildSettings: async () => {
         const configuration = await readOsaurusNativeChildConfiguration(
           osaurusNativeConfigPath,

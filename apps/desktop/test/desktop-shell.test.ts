@@ -7,6 +7,7 @@ import { toFirstLaunchViewModel } from "../src/first-launch/view-model.ts";
 import { RecordingTauriInvoker } from "../src/platform/tauri-api.ts";
 import { TauriNotchWindowController, visualModeForViewModel } from "../src/platform/tauri-notch-window.ts";
 import { createDesktopAccountLifecycle } from "../src/provisioning/index.ts";
+import { LifecycleBridgeClient } from "../src/provisioning/bridge-lifecycle.ts";
 import { MockDesktopAccountLifecycle, MOCK_ACCOUNT_STORAGE_KEY } from "../src/provisioning/mock-lifecycle.ts";
 import { readProvisioningMode } from "../src/provisioning/modes.ts";
 
@@ -76,7 +77,7 @@ test("real desktop lifecycle requires the Tauri bridge and never falls back to m
 
   assert.equal(selection.config.mode, "real");
   assert.equal(invoker.calls[0]?.command, "lifecycle_request");
-  assert.ok(selection.discoveryClient);
+  assert.ok(selection.lifecycle);
 });
 
 test("mock provisioning scenarios do not call real account creation", async () => {
@@ -124,6 +125,18 @@ test("real bridge lifecycle loads existing account through Tauri and enters idle
 
   assert.equal(loaded?.id, account.id);
   assert.deepEqual(invoker.calls.map((call) => call.command), ["lifecycle_request", "lifecycle_request"]);
+});
+
+test("native local logout clears the profile before requesting an App restart", async () => {
+  const invoker = new RecordingTauriInvoker();
+  const bridge = new LifecycleBridgeClient(invoker);
+
+  await bridge.logoutLocalProfile();
+
+  assert.deepEqual(invoker.calls, [
+    { command: "logout_local_profile", args: undefined },
+    { command: "restart_application", args: undefined }
+  ]);
 });
 
 test("tauri notch controller maps shell actions to bridge commands", async () => {

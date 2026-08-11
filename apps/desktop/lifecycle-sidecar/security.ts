@@ -45,9 +45,6 @@ export function redactSecretLikeText(text: string): string {
 }
 
 function classifyError(message: string, fallbackCode: LifecycleErrorCode): LifecycleErrorCode {
-  if (fallbackCode === "DISCOVERY_HEARTBEAT_FAILED") {
-    return fallbackCode;
-  }
   if (fallbackCode.startsWith("CONNECTION_")) {
     return fallbackCode;
   }
@@ -57,8 +54,8 @@ function classifyError(message: string, fallbackCode: LifecycleErrorCode): Lifec
   if (fallbackCode === "MEMORY_OPERATION_FAILED") {
     return fallbackCode;
   }
-  if (/(network|fetch|registry|discover|register|cloudflare|ECONN|ENOTFOUND|timeout)/i.test(message)) {
-    return "DISCOVERY_REGISTRATION_FAILED";
+  if (/(network|fetch|register|ECONN|ENOTFOUND|timeout)/i.test(message)) {
+    return "NETWORK_IDENTITY_FAILED";
   }
   if (/(name|required|empty)/i.test(message)) {
     return "INVALID_NAME";
@@ -85,10 +82,8 @@ function publicMessageForCode(code: LifecycleErrorCode): string {
       return "A Teti account already exists in this validation profile.";
     case "ACCOUNT_CREATE_FAILED":
       return "Teti could not finish setting up.";
-    case "DISCOVERY_REGISTRATION_FAILED":
+    case "NETWORK_IDENTITY_FAILED":
       return "Teti could not finish connecting yet.";
-    case "DISCOVERY_HEARTBEAT_FAILED":
-      return "Teti could not refresh its public activity yet.";
     case "CONNECTION_RESOLVE_FAILED":
       return "Teti could not find that public identity.";
     case "CONNECTION_REQUEST_FAILED":
@@ -110,10 +105,8 @@ function retryTargetForCode(code: LifecycleErrorCode): LifecycleMethod | undefin
   switch (code) {
     case "ACCOUNT_CREATE_FAILED":
       return "account.create";
-    case "DISCOVERY_REGISTRATION_FAILED":
-      return "discovery.retry";
-    case "DISCOVERY_HEARTBEAT_FAILED":
-      return "discovery.heartbeat";
+    case "NETWORK_IDENTITY_FAILED":
+      return "network.identity.retry";
     case "CONNECTION_RESOLVE_FAILED":
       return "connection.resolve";
     case "CONNECTION_REQUEST_FAILED":
@@ -141,7 +134,7 @@ function readDiagnosticCode(error: unknown): string | undefined {
   if (typeof error !== "object" || error === null || !("code" in error)) return undefined;
   const code = error.code;
   return typeof code === "string"
-    && /^(?:(?:CM|REG|LOC|NETWORK|IDENTITY|RELATIONSHIP|INVITE|SERVER|PROTOCOL)_[A-Z0-9_]+|RATE_LIMITED)$/.test(code)
+    && /^(?:(?:CM|LOC|NETWORK|IDENTITY|RELATIONSHIP|RELAY|MAILBOX|INVITE|SERVER|PROTOCOL)_[A-Z0-9_]+|RATE_LIMITED)$/.test(code)
     ? code
     : undefined;
 }

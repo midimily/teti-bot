@@ -39,7 +39,7 @@ export class MockDesktopAccountLifecycle implements FirstLaunchAccountLifecycle 
     saveMockPersistedAccount(account);
 
     if (this.options.scenario === "discovery_failure") {
-      throw new Error("mock registry fetch failed");
+      throw new Error("mock Network identity request failed");
     }
 
     return cloneAccount(account);
@@ -48,18 +48,23 @@ export class MockDesktopAccountLifecycle implements FirstLaunchAccountLifecycle 
   async getTetiStatus(): Promise<TetiStatus> {
     return {
       exists: this.account !== null,
-      registry: {
+      networkIdentity: {
         state: this.account === null
           ? "unknown"
           : this.options.scenario === "discovery_failure"
-            ? "unreachable"
-            : "registered",
+            ? "unavailable"
+            : "active",
         ...(this.options.scenario === "discovery_failure"
-          ? { errorCode: "REG_NETWORK", retryable: true }
+          ? { errorCode: "NETWORK_UNAVAILABLE", retryable: true }
           : {})
       },
       onlineStatus: "unknown"
     };
+  }
+
+  async synchronizeNetworkIdentity(): Promise<TetiAccount> {
+    if (!this.account) throw new Error("A local Teti account is required.");
+    return cloneAccount(this.account);
   }
 
   reset(): void {

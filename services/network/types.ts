@@ -1,5 +1,5 @@
 export const TETI_NETWORK_PROTOCOL_VERSION = 1 as const;
-export const TETI_NETWORK_MINIMUM_CONTRACT_REVISION = 6 as const;
+export const TETI_NETWORK_MINIMUM_CONTRACT_REVISION = 8 as const;
 
 export const TETI_NETWORK_CAPABILITIES = [
   "publicDirectory",
@@ -31,6 +31,92 @@ export interface TetiNetworkBootstrap {
   releasePolicy: TetiNetworkReleasePolicy;
   capabilities: TetiNetworkCapabilities;
   presencePolicy: TetiNetworkPresencePolicy;
+  /** Present from Contract Revision 8. */
+  relayBootstrap?: TetiNetworkRelayBootstrap;
+}
+
+export type TetiNetworkRelayStatus = "active" | "draining" | "offline";
+export type TetiNetworkRelayBindingStatus = "active" | "migrating";
+
+export interface TetiNetworkRelayAccountProvisioning {
+  type: "chatmail_qr";
+  value: string;
+}
+
+export interface TetiNetworkRelayBootstrap {
+  schemaVersion: 1;
+  preferredRelay: {
+    id: string;
+    domain: string;
+    region: string;
+    accountProvisioning: TetiNetworkRelayAccountProvisioning;
+  };
+  catalogPath: "/v1/relays";
+}
+
+export interface TetiNetworkRelayCatalogItem {
+  id: string;
+  domain: string;
+  region: string;
+  status: TetiNetworkRelayStatus;
+  acceptsNewAccounts: boolean;
+  accountProvisioning: TetiNetworkRelayAccountProvisioning;
+}
+
+export interface TetiNetworkRelayCatalog {
+  schemaVersion: 1;
+  relays: TetiNetworkRelayCatalogItem[];
+  generatedAt: string;
+}
+
+export interface TetiNetworkRelayBindingProjection {
+  id: string;
+  relay: {
+    id: string;
+    domain: string;
+    region: string;
+    status: TetiNetworkRelayStatus;
+  };
+  mailbox: string;
+  address: string;
+  transportPublicKey: string | null;
+  status: TetiNetworkRelayBindingStatus;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TetiNetworkRelayBindingSet {
+  schemaVersion: 1;
+  tetiId: string;
+  revision: number;
+  active: TetiNetworkRelayBindingProjection | null;
+  migrating: TetiNetworkRelayBindingProjection | null;
+  updatedAt: string | null;
+}
+
+export type TetiNetworkRelayBindingsEtag = `"relay-bindings-r${number}"`;
+
+export interface TetiNetworkRelayBindingResult {
+  document: TetiNetworkRelayBindingSet;
+  etag: TetiNetworkRelayBindingsEtag;
+}
+
+export interface TetiNetworkPutRelayBindingRequest {
+  schemaVersion: 1;
+  expectedRevision: number;
+  relayId: string;
+  mailbox: string;
+  transportPublicKey: string | null;
+}
+
+export interface TetiNetworkAdoptRelayBindingRequest
+  extends TetiNetworkPutRelayBindingRequest {
+  adoptionGrant: string;
+}
+
+export interface TetiNetworkMutateRelayBindingRequest {
+  schemaVersion: 1;
+  expectedRevision: number;
 }
 
 export type TetiNetworkPresenceMode =
@@ -170,7 +256,7 @@ export interface TetiNetworkCompatibilityRequirements {
   requiredCapabilities: readonly TetiNetworkCapability[];
 }
 
-export const BETA_035_NETWORK_REQUIREMENTS: TetiNetworkCompatibilityRequirements = Object.freeze({
+export const BETA_038_NETWORK_REQUIREMENTS: TetiNetworkCompatibilityRequirements = Object.freeze({
   requiredProtocolVersion: TETI_NETWORK_PROTOCOL_VERSION,
   minimumContractRevision: TETI_NETWORK_MINIMUM_CONTRACT_REVISION,
   requiredCapabilities: Object.freeze([
@@ -179,8 +265,34 @@ export const BETA_035_NETWORK_REQUIREMENTS: TetiNetworkCompatibilityRequirements
     "identity",
     "clientAuthentication",
     "presence",
+    "relationships",
+    "relayBindings"
+  ] as TetiNetworkCapability[])
+});
+
+export const BETA_037_NETWORK_REQUIREMENTS: TetiNetworkCompatibilityRequirements = Object.freeze({
+  requiredProtocolVersion: TETI_NETWORK_PROTOCOL_VERSION,
+  minimumContractRevision: 8,
+  requiredCapabilities: BETA_038_NETWORK_REQUIREMENTS.requiredCapabilities
+});
+
+export const BETA_036_NETWORK_REQUIREMENTS: TetiNetworkCompatibilityRequirements = Object.freeze({
+  requiredProtocolVersion: TETI_NETWORK_PROTOCOL_VERSION,
+  minimumContractRevision: 7,
+  requiredCapabilities: Object.freeze([
+    "publicDirectory",
+    "publicProfile",
+    "identity",
+    "clientAuthentication",
+    "presence",
     "relationships"
   ] as TetiNetworkCapability[])
+});
+
+export const BETA_035_NETWORK_REQUIREMENTS: TetiNetworkCompatibilityRequirements = Object.freeze({
+  requiredProtocolVersion: TETI_NETWORK_PROTOCOL_VERSION,
+  minimumContractRevision: 6,
+  requiredCapabilities: BETA_036_NETWORK_REQUIREMENTS.requiredCapabilities
 });
 
 export const BETA_034_NETWORK_REQUIREMENTS: TetiNetworkCompatibilityRequirements = Object.freeze({
@@ -349,6 +461,57 @@ export interface TetiNetworkRelationshipListPage {
   };
 }
 
+export type TetiNetworkRelationshipAuthorizationReason =
+  | TetiNetworkRelationshipState
+  | "not_found";
+
+export interface TetiNetworkRelationshipAuthorization {
+  schemaVersion: 1;
+  peerTetiId: string;
+  relationshipId: string | null;
+  relationshipRevision: number | null;
+  decision: "allow" | "deny";
+  reason: TetiNetworkRelationshipAuthorizationReason;
+  evaluatedAt: string;
+}
+
+export interface TetiNetworkRelationshipSnapshotQuery {
+  limit?: number;
+  cursor?: string;
+}
+
+export interface TetiNetworkRelationshipSnapshotPage {
+  schemaVersion: 1;
+  items: TetiNetworkRelationshipDocument[];
+  baseCheckpoint: string;
+  page: {
+    limit: number;
+    returnedCount: number;
+    nextCursor: string | null;
+  };
+}
+
+export interface TetiNetworkRelationshipChangesQuery {
+  after: string;
+  limit?: number;
+}
+
+export interface TetiNetworkRelationshipChange {
+  checkpoint: string;
+  relationship: TetiNetworkRelationshipDocument;
+}
+
+export interface TetiNetworkRelationshipChangesPage {
+  schemaVersion: 1;
+  items: TetiNetworkRelationshipChange[];
+  checkpoint: string;
+  page: {
+    limit: number;
+    returnedCount: number;
+    hasMore: boolean;
+  };
+}
+
 export interface TetiNetworkRequestRelationshipRequest {
   schemaVersion: 1;
   peerTetiId: string;
@@ -384,6 +547,11 @@ export interface TetiNetworkRelationshipWriteOptions extends TetiNetworkWriteOpt
   ifMatch: TetiNetworkRelationshipEtag;
 }
 
+export interface TetiNetworkRelayBindingWriteOptions extends TetiNetworkWriteOptions {
+  /** Strong ETag retained with the exact pending RelayBinding command. */
+  ifMatch: TetiNetworkRelayBindingsEtag;
+}
+
 export interface TetiNetworkClient {
   getBootstrap(signal?: AbortSignal): Promise<TetiNetworkBootstrap>;
   getPublicNode(tetiId: string, signal?: AbortSignal): Promise<TetiNetworkPublicNode>;
@@ -392,6 +560,7 @@ export interface TetiNetworkClient {
     signal?: AbortSignal
   ): Promise<TetiNetworkPublicDirectoryPage>;
   getPublicStats(signal?: AbortSignal): Promise<TetiNetworkPublicStats>;
+  listRelays(signal?: AbortSignal): Promise<TetiNetworkRelayCatalog>;
   registerIdentity(
     input: TetiNetworkRegisterIdentityRequest,
     pendingClient: TetiNetworkSigningKey,
@@ -406,6 +575,27 @@ export interface TetiNetworkClient {
     authentication: TetiNetworkAuthenticatedSigner,
     signal?: AbortSignal
   ): Promise<TetiNetworkIdentitySession>;
+  getRelayBindingsSelf(
+    authentication: TetiNetworkAuthenticatedSigner,
+    signal?: AbortSignal
+  ): Promise<TetiNetworkRelayBindingResult>;
+  createRelayBinding(
+    input: TetiNetworkPutRelayBindingRequest,
+    authentication: TetiNetworkAuthenticatedSigner,
+    options: TetiNetworkRelayBindingWriteOptions
+  ): Promise<TetiNetworkRelayBindingResult>;
+  adoptRelayBinding(
+    input: TetiNetworkAdoptRelayBindingRequest,
+    authentication: TetiNetworkAuthenticatedSigner,
+    options: TetiNetworkRelayBindingWriteOptions
+  ): Promise<TetiNetworkRelayBindingResult>;
+  mutateRelayBinding(
+    bindingId: string,
+    command: "activate" | "revoke",
+    input: TetiNetworkMutateRelayBindingRequest,
+    authentication: TetiNetworkAuthenticatedSigner,
+    options: TetiNetworkRelayBindingWriteOptions
+  ): Promise<TetiNetworkRelayBindingResult>;
   getProfileSelf(
     authentication: TetiNetworkAuthenticatedSigner,
     signal?: AbortSignal
@@ -450,6 +640,21 @@ export interface TetiNetworkClient {
     authentication: TetiNetworkAuthenticatedSigner,
     signal?: AbortSignal
   ): Promise<TetiNetworkRelationshipResult>;
+  getRelationshipAuthorization(
+    peerTetiId: string,
+    authentication: TetiNetworkAuthenticatedSigner,
+    signal?: AbortSignal
+  ): Promise<TetiNetworkRelationshipAuthorization>;
+  getRelationshipSnapshot(
+    query: TetiNetworkRelationshipSnapshotQuery | undefined,
+    authentication: TetiNetworkAuthenticatedSigner,
+    signal?: AbortSignal
+  ): Promise<TetiNetworkRelationshipSnapshotPage>;
+  getRelationshipChanges(
+    query: TetiNetworkRelationshipChangesQuery,
+    authentication: TetiNetworkAuthenticatedSigner,
+    signal?: AbortSignal
+  ): Promise<TetiNetworkRelationshipChangesPage>;
   requestRelationship(
     input: TetiNetworkRequestRelationshipRequest,
     authentication: TetiNetworkAuthenticatedSigner,

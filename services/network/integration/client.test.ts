@@ -7,26 +7,26 @@ import {
   resolveTetiNetworkBaseUrl
 } from "../config.ts";
 import { TetiNetworkClientError } from "../errors.ts";
-import { BETA_035_NETWORK_REQUIREMENTS } from "../types.ts";
+import { BETA_038_NETWORK_REQUIREMENTS } from "../types.ts";
 
-test("Beta 0.3.5 client consumes the running local Network Revision 6 contract", async () => {
+test("Beta 0.3.8 client consumes the running local Network Revision 8 contract", async () => {
   const baseUrl = resolveTetiNetworkBaseUrl({
     TETI_NETWORK_BASE_URL: process.env.TETI_NETWORK_BASE_URL
       ?? DEVELOPMENT_TETI_NETWORK_BASE_URL
   });
   const client = new HttpTetiNetworkClient({
     baseUrl,
-    clientVersion: "0.3.5",
+    clientVersion: "0.3.8",
     clientPlatform: "macos"
   });
 
   const bootstrap = await client.getBootstrap();
-  assertTetiNetworkCompatible(bootstrap, BETA_035_NETWORK_REQUIREMENTS);
+  assertTetiNetworkCompatible(bootstrap, BETA_038_NETWORK_REQUIREMENTS);
 
   assert.equal(bootstrap.protocolVersion, 1);
-  assert.ok(bootstrap.contractRevision >= 6);
+  assert.ok(bootstrap.contractRevision >= 8);
   assert.equal(bootstrap.service.name, "teti-network");
-  assert.equal(bootstrap.service.version, "0.1.5");
+  assert.equal(bootstrap.service.version, "0.1.8");
   assert.equal(bootstrap.releasePolicy.minimumSupportedVersion, "0.3.0");
   assert.deepEqual(bootstrap.capabilities, {
     publicDirectory: true,
@@ -35,7 +35,7 @@ test("Beta 0.3.5 client consumes the running local Network Revision 6 contract",
     presence: true,
     publicProfile: true,
     relationships: true,
-    relayBindings: false,
+    relayBindings: true,
     invites: false
   });
   assert.deepEqual(bootstrap.presencePolicy, {
@@ -44,6 +44,9 @@ test("Beta 0.3.5 client consumes the running local Network Revision 6 contract",
     online: { reportEverySeconds: 15, ttlSeconds: 45 },
     background: { reportEverySeconds: 30, ttlSeconds: 90 }
   });
+  assert.equal(bootstrap.relayBootstrap?.catalogPath, "/v1/relays");
+  const relays = await client.listRelays();
+  assert.ok(relays.relays.some((relay) => relay.id === bootstrap.relayBootstrap?.preferredRelay.id));
 
   const directory = await client.listPublicNodes();
   assert.equal(directory.page.returnedCount, directory.items.length);

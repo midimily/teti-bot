@@ -1,4 +1,4 @@
-import type { DiscoveryRegistrationPayload, TetiAccount, TetiStatus } from "../../../../core/account/model.ts";
+import type { TetiAccount, TetiStatus } from "../../../../core/account/model.ts";
 import type { FirstLaunchAccountLifecycle } from "../first-launch/coordinator.ts";
 import {
   LIFECYCLE_PROTOCOL_VERSION,
@@ -35,38 +35,18 @@ export class BridgeDesktopAccountLifecycle implements FirstLaunchAccountLifecycl
     const result = (await this.bridge.request("account.status")) as LifecycleStatusResult;
     return {
       exists: result.exists,
-      registry: { ...result.registry },
+      networkIdentity: { ...result.networkIdentity },
       onlineStatus: result.onlineStatus,
       address: result.account?.address
     };
   }
-}
-
-export class BridgeDiscoveryClient {
-  private readonly bridge: LifecycleBridgeClient;
-
-  constructor(bridge: LifecycleBridgeClient) {
-    this.bridge = bridge;
-  }
-
-  async registerIdentity(_payload: DiscoveryRegistrationPayload): Promise<{
-    version: 1;
-    id: string;
-    address: string;
-    publicProfile: Record<string, unknown>;
-  }> {
-    const result = (await this.bridge.request("discovery.retry")) as LifecycleStatusResult;
+  async synchronizeNetworkIdentity(): Promise<TetiAccount> {
+    const result = (await this.bridge.request("network.identity.retry")) as LifecycleStatusResult;
     const account = result.account;
     if (!account) {
       throw new Error("Teti could not finish connecting yet.");
     }
-
-    return {
-      version: 1,
-      id: account.id,
-      address: account.address,
-      publicProfile: account.publicProfile
-    };
+    return accountFromDto(account);
   }
 }
 
@@ -92,19 +72,22 @@ export class LifecycleBridgeClient {
 
     return response.result;
   }
+
+  async logoutLocalProfile(): Promise<never> {
+    await this.tauri.invoke("logout_local_profile");
+    return this.tauri.invoke<never>("restart_application");
+  }
 }
 
 export async function createBridgeDesktopAccountLifecycle(tauri: TauriInvoker): Promise<{
   lifecycle: BridgeDesktopAccountLifecycle;
-  discoveryClient: BridgeDiscoveryClient;
 }> {
   const bridge = new LifecycleBridgeClient(tauri);
   const lifecycle = new BridgeDesktopAccountLifecycle(bridge);
   await lifecycle.health();
 
   return {
-    lifecycle,
-    discoveryClient: new BridgeDiscoveryClient(bridge)
+    lifecycle
   };
 }
 

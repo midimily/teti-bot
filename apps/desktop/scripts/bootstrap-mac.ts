@@ -42,7 +42,6 @@ async function main(): Promise<void> {
       "Next non-destructive preflight:",
       "TETI_PROFILE_DIR=/private/tmp/teti-mail-seep-real-alpha-02 \\",
       `TETI_DELTACHAT_RPC_PATH=${repoLocalRpcServerPath()} \\`,
-      "TETI_CHATMAIL_RELAY_DOMAIN=mail.seep.im \\",
       "TETI_PROVISIONING_MODE=real \\",
       "TETI_ALLOW_REAL_PROVISIONING=1 \\",
       "npm run desktop:profile:preflight -- --path /private/tmp/teti-mail-seep-real-alpha-02",
@@ -50,7 +49,6 @@ async function main(): Promise<void> {
       "Real UI launch, after explicit approval:",
       "TETI_PROFILE_DIR=/private/tmp/teti-mail-seep-real-alpha-02 \\",
       `TETI_DELTACHAT_RPC_PATH=${repoLocalRpcServerPath()} \\`,
-      "TETI_CHATMAIL_RELAY_DOMAIN=mail.seep.im \\",
       "npm run desktop:real-validation"
     ].join("\n")
   );

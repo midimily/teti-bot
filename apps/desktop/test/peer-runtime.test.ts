@@ -33,8 +33,8 @@ import type {
   ReceiveChatmailMessagesInput,
   SendChatmailMessageInput
 } from "../../../integrations/chatmail/types.ts";
-import type { TetiRegistryReader } from "../../../services/discovery/client.ts";
-import type { DiscoveryIdentity } from "../../../services/discovery/registry-client.ts";
+import type { TetiPublicDirectoryReader } from "../../../services/discovery/client.ts";
+import type { TetiPublicDirectoryIdentity } from "../../../services/discovery/types.ts";
 import { PeerConnectionRuntime } from "../lifecycle-sidecar/connections.ts";
 import {
   MemoryPassportSharingStore,
@@ -60,10 +60,10 @@ import { FileCollaborationWorkspaceStore } from "../lifecycle-sidecar/runtime/wo
 test("two Teti runtimes confirm a Chatmail handshake and exchange alpha heartbeats", async () => {
   const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
   const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
-  const registry = new StaticRegistry([toIdentity(accountA), toIdentity(accountB)]);
+  const directory = new StaticDirectory([toIdentity(accountA), toIdentity(accountB)]);
   const relay = new MemoryChatmailRelay();
-  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), registry);
-  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), registry);
+  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), directory);
+  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), directory);
 
   const requested = await runtimeA.request("beta00002");
   assert.equal(requested.connections[0]?.state, "Requested");
@@ -91,12 +91,12 @@ test("two Teti runtimes confirm a Chatmail handshake and exchange alpha heartbea
 test("a due heartbeat is sent before polling a peer backlog", async () => {
   const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
   const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
-  const registry = new StaticRegistry([toIdentity(accountA), toIdentity(accountB)]);
+  const directory = new StaticDirectory([toIdentity(accountA), toIdentity(accountB)]);
   const relay = new MemoryChatmailRelay();
   let nowMs = Date.now() + 1_000;
   const now = () => new Date(nowMs);
-  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), registry, undefined, { now });
-  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), registry, undefined, { now });
+  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), directory, undefined, { now });
+  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), directory, undefined, { now });
   await confirmPeers(runtimeA, runtimeB, "beta00002");
 
   relay.clearEvents(accountA.address);
@@ -109,9 +109,9 @@ test("a due heartbeat is sent before polling a peer backlog", async () => {
 test("reciprocal intent accepts a relayed request and confirms both Teti instances", async () => {
   const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
   const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
-  const registry = new StaticRegistry([toIdentity(accountA), toIdentity(accountB)]);
+  const directory = new StaticDirectory([toIdentity(accountA), toIdentity(accountB)]);
   const relay = new MemoryChatmailRelay();
-  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), registry);
+  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), directory);
 
   const requested = await runtimeA.request("beta00002");
   assert.equal(requested.connections[0]?.state, "Requested");
@@ -123,7 +123,7 @@ test("reciprocal intent accepts a relayed request and confirms both Teti instanc
 
   // Do not call the initiator again. The receiver starts later and must consume
   // the request retained by the relay without any sender-side participation.
-  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), registry);
+  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), directory);
   const incoming = await runtimeB.poll();
 
   assert.equal(incoming.connections[0]?.state, "PendingApproval");
@@ -142,9 +142,9 @@ test("reciprocal intent accepts a relayed request and confirms both Teti instanc
 test("an echoed outgoing request cannot create a connection to the local identity", async () => {
   const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
   const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
-  const registry = new StaticRegistry([toIdentity(accountA), toIdentity(accountB)]);
+  const directory = new StaticDirectory([toIdentity(accountA), toIdentity(accountB)]);
   const relay = new MemoryChatmailRelay();
-  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), registry);
+  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), directory);
 
   await runtimeA.request("beta00002");
   relay.copyLatest(accountB.address, accountA.address);
@@ -157,7 +157,7 @@ test("an echoed outgoing request cannot create a connection to the local identit
 
 test("listing connections removes a previously persisted local-identity relationship", async () => {
   const local = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
-  const registry = new StaticRegistry([toIdentity(local)]);
+  const directory = new StaticDirectory([toIdentity(local)]);
   const storage = new MemoryTetiConnectionStorage();
   await storage.saveAll([
     makeConnectionRecord(local, "Confirmed", "2026-07-17T01:00:00.000Z")
@@ -165,7 +165,7 @@ test("listing connections removes a previously persisted local-identity relation
   const runtime = await makeRuntime(
     local,
     new MemoryChatmailRelay().adapter(local.address),
-    registry,
+    directory,
     storage
   );
 
@@ -179,7 +179,7 @@ test("confirmed peers sort by confirmation time and waiting records stay last", 
   const newer = makeAccount("teti_gamma0003", "gamma0003@mail.seep.im", 3);
   const rejected = makeAccount("teti_delta0004", "delta0004@mail.seep.im", 4);
   const waiting = makeAccount("teti_omega0005", "omega0005@mail.seep.im", 5);
-  const registry = new StaticRegistry([local, older, newer, rejected, waiting].map(toIdentity));
+  const directory = new StaticDirectory([local, older, newer, rejected, waiting].map(toIdentity));
   const storage = new MemoryTetiConnectionStorage();
   await storage.saveAll([
     makeConnectionRecord(waiting, "PendingApproval", "2026-07-17T05:00:00.000Z"),
@@ -190,7 +190,7 @@ test("confirmed peers sort by confirmation time and waiting records stay last", 
   const runtime = await makeRuntime(
     local,
     new MemoryChatmailRelay().adapter(local.address),
-    registry,
+    directory,
     storage
   );
 
@@ -207,7 +207,7 @@ test("confirmed peers sort by confirmation time and waiting records stay last", 
 test("peer profile refresh recovers a nickname after Network connectivity returns and stays outside Chatmail poll", async () => {
   const local = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
   const remote = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
-  const registry = new RecoveringRegistry([toIdentity(local), toIdentity(remote)]);
+  const directory = new RecoveringDirectory([toIdentity(local), toIdentity(remote)]);
   const storage = new MemoryTetiConnectionStorage();
   await storage.saveAll([
     makeConnectionRecord(remote, "Confirmed", "2026-07-17T01:00:00.000Z")
@@ -215,30 +215,30 @@ test("peer profile refresh recovers a nickname after Network connectivity return
   const runtime = await makeRuntime(
     local,
     new MemoryChatmailRelay().adapter(local.address),
-    registry,
+    directory,
     storage
   );
 
   assert.equal((await runtime.list()).connections[0]?.remoteDisplayName, undefined);
   assert.equal((await runtime.refreshPeerProfiles()).failedPeerCount, 1);
-  registry.online = true;
+  directory.online = true;
   assert.equal((await runtime.refreshPeerProfiles()).failedPeerCount, 0);
   assert.equal((await runtime.list()).connections[0]?.remoteDisplayName, "Beta");
 
-  const profileCalls = registry.profileCalls;
+  const profileCalls = directory.profileCalls;
   await runtime.poll();
-  assert.equal(registry.profileCalls, profileCalls, "Chatmail polling must not perform Registry Profile I/O");
+  assert.equal(directory.profileCalls, profileCalls, "Chatmail polling must not perform Directory Profile I/O");
 });
 
 test("AI status is opt-in, sent only to confirmed peers, and revoked independently of heartbeats", async () => {
   const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
   const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
-  const registry = new StaticRegistry([toIdentity(accountA), toIdentity(accountB)]);
+  const directory = new StaticDirectory([toIdentity(accountA), toIdentity(accountB)]);
   const relay = new MemoryChatmailRelay();
   const runtimeA = await makeRuntime(
     accountA,
     relay.adapter(accountA.address),
-    registry,
+    directory,
     new MemoryTetiConnectionStorage(),
     {
       passportSharing: new MemoryPassportSharingStore(),
@@ -246,7 +246,7 @@ test("AI status is opt-in, sent only to confirmed peers, and revoked independent
       getLocalCallableAgents: () => [localCodexAgent()]
     }
   );
-  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), registry);
+  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), directory);
 
   await runtimeA.request("beta00002");
   const incoming = await runtimeB.poll();
@@ -332,14 +332,14 @@ test("AI status is opt-in, sent only to confirmed peers, and revoked independent
 test("a delayed legacy Passport is rejected without downgrading an established schema 4 snapshot", async () => {
   const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
   const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
-  const registry = new StaticRegistry([toIdentity(accountA), toIdentity(accountB)]);
+  const directory = new StaticDirectory([toIdentity(accountA), toIdentity(accountB)]);
   const relay = new MemoryChatmailRelay();
-  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), registry, undefined, {
+  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), directory, undefined, {
     passportSharing: new MemoryPassportSharingStore(resourceSharingPolicy(true)),
     getLocalAiTools: () => [localCodexStatus()],
     getLocalCallableAgents: () => [localCodexAgent()]
   });
-  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), registry);
+  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), directory);
   await confirmPeers(runtimeA, runtimeB, "beta00002");
   assert.equal((await runtimeB.list()).connections[0]?.remoteAiStatus?.schemaVersion, 4);
 
@@ -367,10 +367,10 @@ test("a delayed legacy Passport is rejected without downgrading an established s
 test("out-of-order schema 4 Passport snapshots keep the newest generation", async () => {
   const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
   const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
-  const registry = new StaticRegistry([toIdentity(accountA), toIdentity(accountB)]);
+  const directory = new StaticDirectory([toIdentity(accountA), toIdentity(accountB)]);
   const relay = new MemoryChatmailRelay();
-  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), registry);
-  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), registry);
+  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), directory);
+  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), directory);
   await confirmPeers(runtimeA, runtimeB, "beta00002");
 
   for (const generatedAt of ["2026-07-27T04:00:00.000Z", "2026-07-27T03:00:00.000Z"]) {
@@ -394,14 +394,14 @@ test("a dropped schema 4 Passport is retried without legacy fallback", async () 
   const now = () => new Date(nowMs);
   const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
   const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
-  const registry = new StaticRegistry([toIdentity(accountA), toIdentity(accountB)]);
+  const directory = new StaticDirectory([toIdentity(accountA), toIdentity(accountB)]);
   const relay = new MemoryChatmailRelay();
-  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), registry, undefined, {
+  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), directory, undefined, {
     now,
     passportSharing: new MemoryPassportSharingStore(resourceSharingPolicy(true)),
     getLocalCallableAgents: () => [localCodexAgent()]
   });
-  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), registry, undefined, { now });
+  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), directory, undefined, { now });
 
   await runtimeA.request("beta00002");
   const incoming = await runtimeB.poll();
@@ -423,21 +423,21 @@ test("a dropped schema 4 Passport is retried without legacy fallback", async () 
 test("Runtime restart retains explicit Peer capability and immediately resends schema 4", async () => {
   const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
   const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
-  const registry = new StaticRegistry([toIdentity(accountA), toIdentity(accountB)]);
+  const directory = new StaticDirectory([toIdentity(accountA), toIdentity(accountB)]);
   const relay = new MemoryChatmailRelay();
   const connectionsA = new MemoryTetiConnectionStorage();
   const sharingA = new MemoryPassportSharingStore(resourceSharingPolicy(true));
   const protocolsA = new MemoryPeerProtocolCapabilityStore();
-  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), registry, connectionsA, {
+  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), directory, connectionsA, {
     passportSharing: sharingA,
     peerProtocolCapabilities: protocolsA,
     getLocalCallableAgents: () => [localCodexAgent()]
   });
-  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), registry);
+  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), directory);
   await confirmPeers(runtimeA, runtimeB, "beta00002");
   assert.deepEqual((await protocolsA.get(accountB.id))?.passportSchemaVersions, [4]);
 
-  const restarted = await makeRuntime(accountA, relay.adapter(accountA.address), registry, connectionsA, {
+  const restarted = await makeRuntime(accountA, relay.adapter(accountA.address), directory, connectionsA, {
     passportSharing: sharingA,
     peerProtocolCapabilities: protocolsA,
     getLocalCallableAgents: () => [localCodexAgent()]
@@ -460,9 +460,10 @@ test("sharing consent persistence does not wait for a blocked peer network queue
     accountStorage,
     connectionStorage: new MemoryTetiConnectionStorage(),
     chatmailAdapter: new MemoryChatmailRelay().adapter(account.address),
-    registry: new StaticRegistry([toIdentity(account)]),
+    directory: new StaticDirectory([toIdentity(account)]),
     startIo: () => ioBlocked,
-    passportSharing: new MemoryPassportSharingStore()
+    passportSharing: new MemoryPassportSharingStore(),
+    allowLegacyRelationshipAuthorityForTests: true
   });
 
   const polling = runtime.poll();
@@ -481,15 +482,15 @@ test("sharing consent persistence does not wait for a blocked peer network queue
 test("Chatmail keeps a Task offline, receiver stores it once, and returns a receipt offline", async () => {
   const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
   const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
-  const registry = new StaticRegistry([toIdentity(accountA), toIdentity(accountB)]);
+  const directory = new StaticDirectory([toIdentity(accountA), toIdentity(accountB)]);
   const relay = new MemoryChatmailRelay();
   const taskStoreA = new MemoryTaskTransportStore();
   const taskStoreB = new MemoryTaskTransportStore();
-  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), registry, undefined, {
+  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), directory, undefined, {
     taskTransportStore: taskStoreA,
     taskIdFactory: () => "task-offline-001"
   });
-  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), registry, undefined, {
+  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), directory, undefined, {
     taskTransportStore: taskStoreB
   });
   const connection = await confirmPeers(runtimeA, runtimeB, "beta00002");
@@ -523,10 +524,10 @@ test("Chatmail keeps a Task offline, receiver stores it once, and returns a rece
 test("Task ID retry is idempotent and conflicting immutable content is rejected", async () => {
   const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
   const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
-  const registry = new StaticRegistry([toIdentity(accountA), toIdentity(accountB)]);
+  const directory = new StaticDirectory([toIdentity(accountA), toIdentity(accountB)]);
   const relay = new MemoryChatmailRelay();
-  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), registry);
-  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), registry);
+  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), directory);
+  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), directory);
   const connection = await confirmPeers(runtimeA, runtimeB, "beta00002");
   const input = {
     connectionRequestId: connection.requestId,
@@ -551,10 +552,10 @@ test("expired offline Task never enters pending approval", async () => {
   const now = () => new Date(nowMs);
   const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
   const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
-  const registry = new StaticRegistry([toIdentity(accountA), toIdentity(accountB)]);
+  const directory = new StaticDirectory([toIdentity(accountA), toIdentity(accountB)]);
   const relay = new MemoryChatmailRelay();
-  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), registry, undefined, { now });
-  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), registry, undefined, { now });
+  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), directory, undefined, { now });
+  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), directory, undefined, { now });
   const connection = await confirmPeers(runtimeA, runtimeB, "beta00002");
   await runtimeA.sendTask({
     connectionRequestId: connection.requestId,
@@ -575,7 +576,7 @@ test("expired offline Task never enters pending approval", async () => {
 test("known incompatible Task protocol prevents speculative transport", async () => {
   const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
   const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
-  const registry = new StaticRegistry([toIdentity(accountA), toIdentity(accountB)]);
+  const directory = new StaticDirectory([toIdentity(accountA), toIdentity(accountB)]);
   const relay = new MemoryChatmailRelay();
   const taskStore = new MemoryTaskTransportStore({
     schemaVersion: 2,
@@ -586,10 +587,10 @@ test("known incompatible Task protocol prevents speculative transport", async ()
       observedAt: "2026-07-26T00:00:00.000Z"
     }]
   });
-  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), registry, undefined, {
+  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), directory, undefined, {
     taskTransportStore: taskStore
   });
-  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), registry);
+  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), directory);
   const connection = await confirmPeers(runtimeA, runtimeB, "beta00002");
   await taskStore.save({
     schemaVersion: 2,
@@ -614,14 +615,14 @@ test("a confirmed 0.1 peer is reachable but explicitly requires upgrade and cann
   const timestamp = "2026-07-28T08:00:00.000Z";
   const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
   const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
-  const registry = new StaticRegistry([toIdentity(accountA), toIdentity(accountB)]);
+  const directory = new StaticDirectory([toIdentity(accountA), toIdentity(accountB)]);
   const relay = new MemoryChatmailRelay();
   const connections = new MemoryTetiConnectionStorage();
   await connections.saveAll([makeConnectionRecord(accountB, "Confirmed", timestamp)]);
   const runtimeA = await makeRuntime(
     accountA,
     relay.adapter(accountA.address),
-    registry,
+    directory,
     connections
   );
   relay.pushRaw(accountA.address, accountB.address, JSON.stringify({
@@ -647,11 +648,11 @@ test("a confirmed 0.1 peer is reachable but explicitly requires upgrade and cann
 test("two peers execute an abstract receiver-local Compute Offer without sharing Runtime bindings", async () => {
   const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
   const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
-  const registry = new StaticRegistry([toIdentity(accountA), toIdentity(accountB)]);
+  const directory = new StaticDirectory([toIdentity(accountA), toIdentity(accountB)]);
   const relay = new MemoryChatmailRelay();
   const executor = new FakeLocalComputeTaskExecutor();
-  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), registry);
-  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), registry, undefined, {
+  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), directory);
+  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), directory, undefined, {
     taskExecutor: executor
   });
   const connection = await confirmPeers(runtimeA, runtimeB, "beta00002");
@@ -684,17 +685,17 @@ test("two peers execute an abstract receiver-local Compute Offer without sharing
 test("long-horizon collaboration survives Host restart, accepts input, and switches Child only explicitly", async () => {
   const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
   const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
-  const registry = new StaticRegistry([toIdentity(accountA), toIdentity(accountB)]);
+  const directory = new StaticDirectory([toIdentity(accountA), toIdentity(accountB)]);
   const relay = new MemoryChatmailRelay();
   const connectionsA = new MemoryTetiConnectionStorage();
   const connectionsB = new MemoryTetiConnectionStorage();
   const tasksA = new MemoryTaskTransportStore();
   const tasksB = new MemoryTaskTransportStore();
   const firstExecutor = new LongHorizonTaskExecutor();
-  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), registry, connectionsA, {
+  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), directory, connectionsA, {
     taskTransportStore: tasksA
   });
-  let runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), registry, connectionsB, {
+  let runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), directory, connectionsB, {
     taskTransportStore: tasksB,
     taskExecutor: firstExecutor
   });
@@ -726,7 +727,7 @@ test("long-horizon collaboration survives Host restart, accepts input, and switc
   // Recreate the receiver Runtime at a stage boundary. The persisted Host
   // session, Workspace revision and audit are the recovery source of truth.
   const restartedExecutor = new LongHorizonTaskExecutor();
-  runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), registry, connectionsB, {
+  runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), directory, connectionsB, {
     taskTransportStore: tasksB,
     taskExecutor: restartedExecutor
   });
@@ -769,11 +770,11 @@ test("long-horizon collaboration survives Host restart, accepts input, and switc
 test("Teti Host executes an explicit depth-one Delegation Plan and deterministically aggregates provenance", async () => {
   const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
   const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
-  const registry = new StaticRegistry([toIdentity(accountA), toIdentity(accountB)]);
+  const directory = new StaticDirectory([toIdentity(accountA), toIdentity(accountB)]);
   const relay = new MemoryChatmailRelay();
   const executor = new DelegationTaskExecutor();
-  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), registry);
-  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), registry, undefined, {
+  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), directory);
+  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), directory, undefined, {
     taskExecutor: executor
   });
   const connection = await confirmPeers(runtimeA, runtimeB, "beta00002");
@@ -840,11 +841,11 @@ test("Teti Host executes an explicit depth-one Delegation Plan and deterministic
 test("a failed Delegation step stops the frozen plan and never auto-switches to the next Child", async () => {
   const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
   const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
-  const registry = new StaticRegistry([toIdentity(accountA), toIdentity(accountB)]);
+  const directory = new StaticDirectory([toIdentity(accountA), toIdentity(accountB)]);
   const relay = new MemoryChatmailRelay();
   const executor = new FailingDelegationTaskExecutor();
-  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), registry);
-  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), registry, undefined, {
+  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), directory);
+  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), directory, undefined, {
     taskExecutor: executor
   });
   const connection = await confirmPeers(runtimeA, runtimeB, "beta00002");
@@ -876,11 +877,11 @@ test("a failed Delegation step stops the frozen plan and never auto-switches to 
 test("a Delegation target change between steps preserves prior Artifact and fails closed", async () => {
   const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
   const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
-  const registry = new StaticRegistry([toIdentity(accountA), toIdentity(accountB)]);
+  const directory = new StaticDirectory([toIdentity(accountA), toIdentity(accountB)]);
   const relay = new MemoryChatmailRelay();
   const executor = new ChangingDelegationTaskExecutor();
-  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), registry);
-  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), registry, undefined, {
+  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), directory);
+  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), directory, undefined, {
     taskExecutor: executor
   });
   const connection = await confirmPeers(runtimeA, runtimeB, "beta00002");
@@ -917,11 +918,11 @@ test("long-horizon stage rejects a changed Workspace revision and publishes no s
     await workspaceStore.initialize();
     const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
     const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
-    const registry = new StaticRegistry([toIdentity(accountA), toIdentity(accountB)]);
+    const directory = new StaticDirectory([toIdentity(accountA), toIdentity(accountB)]);
     const relay = new MemoryChatmailRelay();
     const executor = new DeferredLongHorizonTaskExecutor();
-    const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), registry);
-    const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), registry, undefined, {
+    const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), directory);
+    const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), directory, undefined, {
       taskExecutor: executor,
       workspaceStore
     });
@@ -963,11 +964,11 @@ test("an expired long-horizon stage cannot publish an Artifact after its lease",
   const now = () => new Date(nowMs);
   const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
   const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
-  const registry = new StaticRegistry([toIdentity(accountA), toIdentity(accountB)]);
+  const directory = new StaticDirectory([toIdentity(accountA), toIdentity(accountB)]);
   const relay = new MemoryChatmailRelay();
   const executor = new DeferredLongHorizonTaskExecutor();
-  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), registry, undefined, { now });
-  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), registry, undefined, {
+  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), directory, undefined, { now });
+  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), directory, undefined, {
     now,
     taskExecutor: executor
   });
@@ -1001,13 +1002,13 @@ test("two peers deliver a verified image Task, approve once, execute, and return
     ));
     const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
     const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
-    const registry = new StaticRegistry([toIdentity(accountA), toIdentity(accountB)]);
+    const directory = new StaticDirectory([toIdentity(accountA), toIdentity(accountB)]);
     const relay = new MemoryChatmailRelay();
     const executor = new FakeTaskExecutor();
-    const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), registry, undefined, {
+    const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), directory, undefined, {
       taskAttachmentStore: new FileTaskAttachmentStore(join(root, "a"))
     });
-    const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), registry, undefined, {
+    const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), directory, undefined, {
       taskAttachmentStore: new FileTaskAttachmentStore(join(root, "b")),
       taskExecutor: executor
     });
@@ -1052,14 +1053,14 @@ test("two-image editing returns a verified image Artifact after completed status
     await writeFile(source, sourceBytes);
     const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
     const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
-    const registry = new StaticRegistry([toIdentity(accountA), toIdentity(accountB)]);
+    const directory = new StaticDirectory([toIdentity(accountA), toIdentity(accountB)]);
     const relay = new MemoryChatmailRelay();
     const storeA = new FileTaskAttachmentStore(join(root, "a"));
     const storeB = new FileTaskAttachmentStore(join(root, "b"));
-    const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), registry, undefined, {
+    const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), directory, undefined, {
       taskAttachmentStore: storeA
     });
-    const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), registry, undefined, {
+    const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), directory, undefined, {
       taskAttachmentStore: storeB,
       taskExecutor: new FakeImageTaskExecutor(storeB, source)
     });
@@ -1118,15 +1119,15 @@ test("Task v6 resends only missing images until a four-image request is complete
     await writeFile(source, sourceBytes);
     const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
     const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
-    const registry = new StaticRegistry([toIdentity(accountA), toIdentity(accountB)]);
+    const directory = new StaticDirectory([toIdentity(accountA), toIdentity(accountB)]);
     const relay = new MemoryChatmailRelay();
     let clock = new Date();
     const now = () => new Date(clock);
-    const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), registry, undefined, {
+    const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), directory, undefined, {
       taskAttachmentStore: new FileTaskAttachmentStore(join(root, "a")),
       now
     });
-    const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), registry, undefined, {
+    const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), directory, undefined, {
       taskAttachmentStore: new FileTaskAttachmentStore(join(root, "b")),
       now
     });
@@ -1200,7 +1201,7 @@ for (const imageCount of [1, 2, 4] as const) {
       await writeFile(source, sourceBytes);
       const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
       const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
-      const registry = new StaticRegistry([toIdentity(accountA), toIdentity(accountB)]);
+      const directory = new StaticDirectory([toIdentity(accountA), toIdentity(accountB)]);
       const relay = new MemoryChatmailRelay({
         deferredAttachments: true,
         hideAttachmentTextUntilDone: true,
@@ -1208,10 +1209,10 @@ for (const imageCount of [1, 2, 4] as const) {
       });
       const storeA = new FileTaskAttachmentStore(join(root, "a"));
       const storeB = new FileTaskAttachmentStore(join(root, "b"));
-      const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), registry, undefined, {
+      const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), directory, undefined, {
         taskAttachmentStore: storeA
       });
-      const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), registry, undefined, {
+      const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), directory, undefined, {
         taskAttachmentStore: storeB
       });
       const connection = await confirmPeers(runtimeA, runtimeB, "beta00002");
@@ -1266,17 +1267,17 @@ test("a deferred generated image Artifact reaches the requester after slow downl
     await writeFile(source, sourceBytes);
     const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
     const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
-    const registry = new StaticRegistry([toIdentity(accountA), toIdentity(accountB)]);
+    const directory = new StaticDirectory([toIdentity(accountA), toIdentity(accountB)]);
     const relay = new MemoryChatmailRelay({
       deferredAttachments: true,
       hideAttachmentTextUntilDone: true
     });
     const storeA = new FileTaskAttachmentStore(join(root, "a"));
     const storeB = new FileTaskAttachmentStore(join(root, "b"));
-    const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), registry, undefined, {
+    const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), directory, undefined, {
       taskAttachmentStore: storeA
     });
-    const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), registry, undefined, {
+    const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), directory, undefined, {
       taskAttachmentStore: storeB,
       taskExecutor: new FakeImageTaskExecutor(storeB, source)
     });
@@ -1324,7 +1325,7 @@ test("an in-progress Task attachment survives a Runtime restart", async () => {
     await writeFile(source, sourceBytes);
     const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
     const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
-    const registry = new StaticRegistry([toIdentity(accountA), toIdentity(accountB)]);
+    const directory = new StaticDirectory([toIdentity(accountA), toIdentity(accountB)]);
     const relay = new MemoryChatmailRelay({
       deferredAttachments: true,
       hideAttachmentTextUntilDone: true
@@ -1337,14 +1338,14 @@ test("an in-progress Task attachment survives a Runtime restart", async () => {
     const runtimeA = await makeRuntime(
       accountA,
       relay.adapter(accountA.address),
-      registry,
+      directory,
       connectionStoreA,
       { taskAttachmentStore: attachmentStoreA }
     );
     const runtimeB = await makeRuntime(
       accountB,
       relay.adapter(accountB.address),
-      registry,
+      directory,
       connectionStoreB,
       { taskTransportStore: taskStoreB, taskAttachmentStore: attachmentStoreB }
     );
@@ -1363,7 +1364,7 @@ test("an in-progress Task attachment survives a Runtime restart", async () => {
     const restartedRuntimeB = await makeRuntime(
       accountB,
       relay.adapter(accountB.address),
-      registry,
+      directory,
       connectionStoreB,
       { taskTransportStore: taskStoreB, taskAttachmentStore: attachmentStoreB }
     );
@@ -1387,10 +1388,10 @@ test("an in-progress Task attachment survives a Runtime restart", async () => {
 test("image editing fails closed when an Adapter returns text without an image", async () => {
   const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
   const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
-  const registry = new StaticRegistry([toIdentity(accountA), toIdentity(accountB)]);
+  const directory = new StaticDirectory([toIdentity(accountA), toIdentity(accountB)]);
   const relay = new MemoryChatmailRelay();
-  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), registry);
-  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), registry, undefined, {
+  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), directory);
+  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), directory, undefined, {
     taskExecutor: new MissingImageTaskExecutor()
   });
   const connection = await confirmPeers(runtimeA, runtimeB, "beta00002");
@@ -1418,10 +1419,10 @@ test("image editing fails closed when an Adapter returns text without an image",
 test("rejection and requester cancellation converge on both peers without execution", async () => {
   const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
   const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
-  const registry = new StaticRegistry([toIdentity(accountA), toIdentity(accountB)]);
+  const directory = new StaticDirectory([toIdentity(accountA), toIdentity(accountB)]);
   const relay = new MemoryChatmailRelay();
-  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), registry);
-  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), registry);
+  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), directory);
+  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), directory);
   const connection = await confirmPeers(runtimeA, runtimeB, "beta00002");
 
   const rejectedTask = await runtimeA.sendTask({
@@ -1459,10 +1460,10 @@ test("rejection and requester cancellation converge on both peers without execut
 test("a completed status may safely skip a missing working update", async () => {
   const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
   const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
-  const registry = new StaticRegistry([toIdentity(accountA), toIdentity(accountB)]);
+  const directory = new StaticDirectory([toIdentity(accountA), toIdentity(accountB)]);
   const relay = new MemoryChatmailRelay();
-  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), registry);
-  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), registry, undefined, {
+  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), directory);
+  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), directory, undefined, {
     taskExecutor: new FakeTaskExecutor()
   });
   const connection = await confirmPeers(runtimeA, runtimeB, "beta00002");
@@ -1487,13 +1488,13 @@ test("a completed status may safely skip a missing working update", async () => 
 test("Artifact persistence failure leaves Chatmail fresh and succeeds on the next poll", async () => {
   const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
   const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
-  const registry = new StaticRegistry([toIdentity(accountA), toIdentity(accountB)]);
+  const directory = new StaticDirectory([toIdentity(accountA), toIdentity(accountB)]);
   const relay = new MemoryChatmailRelay();
   const storeA = new FailOnceArtifactStore();
-  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), registry, undefined, {
+  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), directory, undefined, {
     taskTransportStore: storeA
   });
-  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), registry, undefined, {
+  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), directory, undefined, {
     taskExecutor: new FakeTaskExecutor()
   });
   const connection = await confirmPeers(runtimeA, runtimeB, "beta00002");
@@ -1526,10 +1527,10 @@ test("Artifact persistence failure leaves Chatmail fresh and succeeds on the nex
 test("Artifact arriving before its Task record stays pending and is applied later", async () => {
   const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
   const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
-  const registry = new StaticRegistry([toIdentity(accountA), toIdentity(accountB)]);
+  const directory = new StaticDirectory([toIdentity(accountA), toIdentity(accountB)]);
   const relay = new MemoryChatmailRelay();
-  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), registry);
-  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), registry);
+  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), directory);
+  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), directory);
   const connection = await confirmPeers(runtimeA, runtimeB, "beta00002");
   const createdAt = new Date().toISOString();
   const artifactEnvelope = createApplicationEnvelope({
@@ -1574,10 +1575,10 @@ test("Artifact arriving before its Task record stays pending and is applied late
 test("out-of-order Task status and receipt messages cannot roll back newer state", async () => {
   const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
   const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
-  const registry = new StaticRegistry([toIdentity(accountA), toIdentity(accountB)]);
+  const directory = new StaticDirectory([toIdentity(accountA), toIdentity(accountB)]);
   const relay = new MemoryChatmailRelay();
-  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), registry);
-  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), registry, undefined, {
+  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), directory);
+  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), directory, undefined, {
     taskExecutor: new FakeTaskExecutor()
   });
   const connection = await confirmPeers(runtimeA, runtimeB, "beta00002");
@@ -1650,13 +1651,13 @@ test("out-of-order Task status and receipt messages cannot roll back newer state
 test("Runtime restart durably fails interrupted work and reports recovery to the requester", async () => {
   const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
   const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
-  const registry = new StaticRegistry([toIdentity(accountA), toIdentity(accountB)]);
+  const directory = new StaticDirectory([toIdentity(accountA), toIdentity(accountB)]);
   const relay = new MemoryChatmailRelay();
   const storeB = new MemoryTaskTransportStore();
   const connectionsA = new MemoryTetiConnectionStorage();
   const connectionsB = new MemoryTetiConnectionStorage();
-  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), registry, connectionsA);
-  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), registry, connectionsB, {
+  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), directory, connectionsA);
+  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), directory, connectionsB, {
     taskTransportStore: storeB,
     taskExecutor: new HangingTaskExecutor()
   });
@@ -1673,7 +1674,7 @@ test("Runtime restart durably fails interrupted work and reports recovery to the
   const restartedB = await makeRuntime(
     accountB,
     relay.adapter(accountB.address),
-    registry,
+    directory,
     connectionsB,
     { taskTransportStore: storeB }
   );
@@ -1690,11 +1691,11 @@ test("Runtime restart durably fails interrupted work and reports recovery to the
 test("expired Agent authentication returns to explicit allow-once after local login", async () => {
   const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
   const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
-  const registry = new StaticRegistry([toIdentity(accountA), toIdentity(accountB)]);
+  const directory = new StaticDirectory([toIdentity(accountA), toIdentity(accountB)]);
   const relay = new MemoryChatmailRelay();
   const executor = new RecoveringAuthTaskExecutor();
-  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), registry);
-  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), registry, undefined, {
+  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), directory);
+  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), directory, undefined, {
     taskExecutor: executor
   });
   const connection = await confirmPeers(runtimeA, runtimeB, "beta00002");
@@ -1731,10 +1732,10 @@ test("an auth-required Task still expires instead of remaining actionable foreve
   const now = () => new Date(nowMs);
   const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
   const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
-  const registry = new StaticRegistry([toIdentity(accountA), toIdentity(accountB)]);
+  const directory = new StaticDirectory([toIdentity(accountA), toIdentity(accountB)]);
   const relay = new MemoryChatmailRelay();
-  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), registry, undefined, { now });
-  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), registry, undefined, {
+  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), directory, undefined, { now });
+  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), directory, undefined, {
     now,
     taskExecutor: new RecoveringAuthTaskExecutor()
   });
@@ -1762,13 +1763,13 @@ test("an auth-required Task still expires instead of remaining actionable foreve
 test("Beta 0.2 refuses Task delivery to a peer advertising only v1", async () => {
   const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
   const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
-  const registry = new StaticRegistry([toIdentity(accountA), toIdentity(accountB)]);
+  const directory = new StaticDirectory([toIdentity(accountA), toIdentity(accountB)]);
   const relay = new MemoryChatmailRelay();
   const storeA = new MemoryTaskTransportStore();
-  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), registry, undefined, {
+  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), directory, undefined, {
     taskTransportStore: storeA
   });
-  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), registry, undefined, {
+  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), directory, undefined, {
     taskExecutor: new FakeTaskExecutor()
   });
   const connection = await confirmPeers(runtimeA, runtimeB, "beta00002");
@@ -1793,10 +1794,10 @@ test("Beta 0.2 refuses Task delivery to a peer advertising only v1", async () =>
 test("an oversized malicious envelope is isolated without blocking the next valid peer message", async () => {
   const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
   const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
-  const registry = new StaticRegistry([toIdentity(accountA), toIdentity(accountB)]);
+  const directory = new StaticDirectory([toIdentity(accountA), toIdentity(accountB)]);
   const relay = new MemoryChatmailRelay();
-  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), registry);
-  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), registry);
+  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), directory);
+  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), directory);
   await confirmPeers(runtimeA, runtimeB, "beta00002");
   relay.pushRaw(accountB.address, accountA.address, JSON.stringify({
     version: 1,
@@ -1828,7 +1829,7 @@ test("an oversized malicious envelope is isolated without blocking the next vali
 async function makeRuntime(
   account: TetiAccount,
   chatmailAdapter: ChatmailAdapter,
-  registry: TetiRegistryReader,
+  directory: TetiPublicDirectoryReader,
   connectionStorage: TetiConnectionStorage = new MemoryTetiConnectionStorage(),
   aiStatus: {
     passportSharing?: MemoryPassportSharingStore;
@@ -1849,8 +1850,9 @@ async function makeRuntime(
     accountStorage,
     connectionStorage,
     chatmailAdapter,
-    registry,
+    directory: directory,
     startIo: async () => undefined,
+    allowLegacyRelationshipAuthorityForTests: true,
     ...aiStatus
   });
 }
@@ -1979,7 +1981,7 @@ function makeAccount(id: string, address: string, chatmailAccountId: number): Te
   };
 }
 
-function toIdentity(account: TetiAccount): DiscoveryIdentity {
+function toIdentity(account: TetiAccount): TetiPublicDirectoryIdentity {
   return {
     version: 1,
     id: account.id,
@@ -1990,31 +1992,31 @@ function toIdentity(account: TetiAccount): DiscoveryIdentity {
   };
 }
 
-class StaticRegistry implements TetiRegistryReader {
-  private readonly identities: DiscoveryIdentity[];
-  constructor(identities: DiscoveryIdentity[]) { this.identities = identities; }
-  async discover(): Promise<DiscoveryIdentity[]> { return this.identities; }
-  async getIdentity(id: string): Promise<DiscoveryIdentity | null> {
+class StaticDirectory implements TetiPublicDirectoryReader {
+  private readonly identities: TetiPublicDirectoryIdentity[];
+  constructor(identities: TetiPublicDirectoryIdentity[]) { this.identities = identities; }
+  async discover(): Promise<TetiPublicDirectoryIdentity[]> { return this.identities; }
+  async getIdentity(id: string): Promise<TetiPublicDirectoryIdentity | null> {
     return this.identities.find((identity) => identity.id === id) ?? null;
   }
 }
 
-class RecoveringRegistry implements TetiRegistryReader {
+class RecoveringDirectory implements TetiPublicDirectoryReader {
   online = false;
   profileCalls = 0;
-  private readonly identities: DiscoveryIdentity[];
+  private readonly identities: TetiPublicDirectoryIdentity[];
 
-  constructor(identities: DiscoveryIdentity[]) {
+  constructor(identities: TetiPublicDirectoryIdentity[]) {
     this.identities = identities;
   }
 
-  async discover(): Promise<DiscoveryIdentity[]> {
+  async discover(): Promise<TetiPublicDirectoryIdentity[]> {
     return this.identities;
   }
 
-  async getIdentity(id: string): Promise<DiscoveryIdentity | null> {
+  async getIdentity(id: string): Promise<TetiPublicDirectoryIdentity | null> {
     this.profileCalls += 1;
-    if (!this.online) throw new Error("registry offline");
+    if (!this.online) throw new Error("directory offline");
     return this.identities.find((identity) => identity.id === id) ?? null;
   }
 }

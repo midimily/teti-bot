@@ -9,23 +9,27 @@ import { randomUUID } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
 import test from "node:test";
 import type { TetiAccount } from "../../../core/account/model.ts";
-import { MemoryTetiAccountStorage } from "../../../core/account/storage.ts";
+import { FileTetiAccountStorage } from "../../../core/account/storage.ts";
 import { HttpTetiNetworkClient } from "../client.ts";
-import { MemoryTetiNetworkCredentialStore } from "../credential-store.ts";
+import { FileTetiNetworkCredentialStore } from "../credential-store.ts";
 import { TetiNetworkClientError } from "../errors.ts";
 import { TetiNetworkIdentityService } from "../identity-service.ts";
-import { MemoryTetiNetworkRelationshipCommandStore } from "../relationship-command-store.ts";
+import { FileTetiNetworkRelationshipCommandStore } from "../relationship-command-store.ts";
 import { TetiNetworkRelationshipService } from "../relationship-service.ts";
+import { FileTetiNetworkRelationshipReconciliationStore } from "../relationship-reconciliation-store.ts";
+import type { TetiNetworkRelationshipDocument } from "../types.ts";
 
 const execFileAsync = promisify(execFile);
 const NETWORK_ROOT = "/Users/macstudio/Documents/MidiMily/teti-network";
 
-test("Beta 0.3.5 App converges and persists the full Relationship contract on an isolated local Network", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "teti-app-beta035-"));
+test("Beta 0.3.8 App reconciles and authorizes two isolated Runtime profiles on local Network", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "teti-app-beta036-"));
   const databasePath = join(directory, "network.db");
+  const profileAPath = join(directory, "app-profile-a");
+  const profileBPath = join(directory, "app-profile-b");
   const port = await availablePort();
   const baseUrl = `http://127.0.0.1:${port}`;
-  const redisPrefix = `teti-app-beta035:${randomUUID()}`;
+  const redisPrefix = `teti-app-beta036:${randomUUID()}`;
   let network: ChildProcess | undefined;
   try {
     network = startNetwork({ port, databasePath, redisPrefix });
@@ -37,14 +41,16 @@ test("Beta 0.3.5 App converges and persists the full Relationship contract on an
 
     const clientA = client(baseUrl);
     const clientB = client(baseUrl);
-    const identityA = await identityHarness(clientA, account("teti_reltesta1", "reltesta1@mail.seep.im", 1));
-    const identityB = await identityHarness(clientB, account("teti_reltestb1", "reltestb1@mail.seep.im", 2));
+    const accountA = account("teti_reltesta1", "reltesta1@mail.seep.im", 1);
+    const accountB = account("teti_reltestb1", "reltestb1@mail.seep.im", 2);
+    const identityA = await identityHarness(clientA, accountA, profileAPath);
+    const identityB = await identityHarness(clientB, accountB, profileBPath);
     const signerA = await identityA.getAuthenticatedSigner();
     const signerB = await identityB.getAuthenticatedSigner();
     assert.notEqual(signerA.tetiId, signerB.tetiId);
 
-    const relationshipA = relationshipService(clientA, signerA, "a");
-    const relationshipB = relationshipService(clientB, signerB, "b");
+    const relationshipA = relationshipService(clientA, signerA, "a", profileAPath);
+    const relationshipB = relationshipService(clientB, signerB, "b", profileBPath);
     const [fromA, fromB] = await Promise.all([
       relationshipA.request(signerB.tetiId),
       relationshipB.request(signerA.tetiId)
@@ -57,6 +63,12 @@ test("Beta 0.3.5 App converges and persists the full Relationship contract on an
     assert.equal(afterRaceA?.document.state, "confirmed");
     assert.equal(afterRaceB?.document.state, "confirmed");
     assert.equal(fromB.document.id, canonicalId);
+    assert.equal((await relationshipA.authorizePeer(signerB.tetiId)).decision, "allow");
+    assert.equal((await relationshipB.authorizePeer(signerA.tetiId)).reason, "confirmed");
+    const reconciledA: TetiNetworkRelationshipDocument[] = [];
+    await relationshipA.reconcile(async (document) => { reconciledA.push(document); });
+    assert.equal(reconciledA.at(-1)?.id, canonicalId);
+    assert.equal(reconciledA.at(-1)?.state, "confirmed");
 
     const addresseeRelationship = afterRaceA?.document.addresseeTetiId === signerA.tetiId
       ? relationshipA
@@ -81,6 +93,8 @@ test("Beta 0.3.5 App converges and persists the full Relationship contract on an
 
     const blocked = await relationshipA.block(canonicalId);
     assert.equal(blocked.document.state, "blocked");
+    assert.equal((await relationshipA.authorizePeer(signerB.tetiId)).decision, "deny");
+    assert.equal((await relationshipB.authorizePeer(signerA.tetiId)).reason, "blocked");
     assert.equal(blocked.document.blockedBy, "self");
     assert.equal((await relationshipB.getByPeer(signerA.tetiId))?.document.blockedBy, "peer");
     await assert.rejects(
@@ -90,12 +104,34 @@ test("Beta 0.3.5 App converges and persists the full Relationship contract on an
     );
     const revoked = await relationshipA.revoke(canonicalId);
     assert.equal(revoked.document.state, "revoked");
+    assert.equal((await relationshipB.authorizePeer(signerA.tetiId)).decision, "deny");
 
     await stopNetwork(network);
     network = startNetwork({ port, databasePath, redisPrefix });
     await waitForReady(baseUrl, network);
-    const afterRestartA = relationshipService(client(baseUrl), signerA, "restart-a");
-    const afterRestartB = relationshipService(client(baseUrl), signerB, "restart-b");
+    const restartedClientA = client(baseUrl);
+    const restartedClientB = client(baseUrl);
+    const restartedIdentityA = await identityHarness(restartedClientA, accountA, profileAPath);
+    const restartedIdentityB = await identityHarness(restartedClientB, accountB, profileBPath);
+    const restartedSignerA = await restartedIdentityA.getAuthenticatedSigner();
+    const restartedSignerB = await restartedIdentityB.getAuthenticatedSigner();
+    assert.equal(restartedSignerA.clientInstanceId, signerA.clientInstanceId);
+    assert.equal(restartedSignerB.clientInstanceId, signerB.clientInstanceId);
+    const afterRestartA = relationshipService(
+      restartedClientA,
+      restartedSignerA,
+      "restart-a",
+      profileAPath
+    );
+    const afterRestartB = relationshipService(
+      restartedClientB,
+      restartedSignerB,
+      "restart-b",
+      profileBPath
+    );
+    const restartedProjectionA: TetiNetworkRelationshipDocument[] = [];
+    await afterRestartA.reconcile(async (document) => { restartedProjectionA.push(document); });
+    assert.equal(restartedProjectionA.at(-1)?.state, "revoked");
     assert.equal((await afterRestartA.getByPeer(signerB.tetiId))?.document.state, "revoked");
     assert.equal((await afterRestartB.getByPeer(signerA.tetiId))?.document.id, canonicalId);
 
@@ -132,6 +168,8 @@ function startNetwork(input: { port: number; databasePath: string; redisPrefix: 
       RELATIONSHIP_READ_RATE_LIMIT_MAX_REQUESTS: "200",
       RELATIONSHIP_COMMAND_RATE_LIMIT_MAX_REQUESTS: "200",
       RELATIONSHIP_REQUEST_PEER_RATE_LIMIT_MAX_REQUESTS: "20",
+      RELATIONSHIP_AUTHORIZATION_RATE_LIMIT_MAX_REQUESTS: "500",
+      RELATIONSHIP_RECONCILIATION_RATE_LIMIT_MAX_REQUESTS: "500",
       IDENTITY_ADOPTION_MODE: "development_first_claim"
     },
     stdio: ["ignore", "pipe", "pipe"]
@@ -171,14 +209,21 @@ async function stopNetwork(child: ChildProcess): Promise<void> {
   });
 }
 
-async function identityHarness(client: HttpTetiNetworkClient, local: TetiAccount) {
-  const accountStorage = new MemoryTetiAccountStorage();
-  await accountStorage.save(local);
+async function identityHarness(
+  client: HttpTetiNetworkClient,
+  local: TetiAccount,
+  profilePath: string
+) {
+  const accountStorage = new FileTetiAccountStorage(join(profilePath, "account", "account.json"));
+  if (!(await accountStorage.exists())) await accountStorage.save(local);
   const service = new TetiNetworkIdentityService({
     client,
     accountStorage,
-    credentialStore: new MemoryTetiNetworkCredentialStore(),
-    appVersion: "0.3.5",
+    credentialStore: new FileTetiNetworkCredentialStore(
+      join(profilePath, "network", "credentials-v1.json")
+    ),
+    environment: "local_development",
+    appVersion: "0.3.8",
     platform: "macos"
   });
   await service.synchronize();
@@ -188,11 +233,17 @@ async function identityHarness(client: HttpTetiNetworkClient, local: TetiAccount
 function relationshipService(
   client: HttpTetiNetworkClient,
   signer: Awaited<ReturnType<TetiNetworkIdentityService["getAuthenticatedSigner"]>>,
-  prefix: string
+  prefix: string,
+  profilePath: string
 ): TetiNetworkRelationshipService {
   return new TetiNetworkRelationshipService({
     client,
-    store: new MemoryTetiNetworkRelationshipCommandStore(),
+    store: new FileTetiNetworkRelationshipCommandStore(
+      join(profilePath, "network", "relationship-command-v1.json")
+    ),
+    reconciliationStore: new FileTetiNetworkRelationshipReconciliationStore(
+      join(profilePath, "network", "relationship-reconciliation-v1.json")
+    ),
     getAuthentication: async () => signer,
     idempotencyKeyFactory: (operation) => `relationship.${operation}:${prefix}-${randomUUID()}`
   });
@@ -201,7 +252,7 @@ function relationshipService(
 function client(baseUrl: string): HttpTetiNetworkClient {
   return new HttpTetiNetworkClient({
     baseUrl,
-    clientVersion: "0.3.5",
+    clientVersion: "0.3.8",
     clientPlatform: "macos"
   });
 }

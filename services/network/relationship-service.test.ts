@@ -4,6 +4,7 @@ import { FakeTetiNetworkClient } from "./fake-client.ts";
 import { TetiNetworkClientError } from "./errors.ts";
 import { MemoryTetiNetworkRelationshipCommandStore } from "./relationship-command-store.ts";
 import { TetiNetworkRelationshipService } from "./relationship-service.ts";
+import { MemoryTetiNetworkRelationshipReconciliationStore } from "./relationship-reconciliation-store.ts";
 import { generateTetiNetworkSigningKey } from "./signing.ts";
 import type {
   TetiNetworkAuthenticatedSigner,
@@ -114,6 +115,91 @@ test("Relationship service uses the request base revision for reciprocal converg
   assert.equal(confirmed.document.state, "confirmed");
 });
 
+test("Relationship service closes snapshot with changes before persisting its checkpoint", async () => {
+  const client = new StatefulRelationshipClient();
+  const reconciliationStore = new MemoryTetiNetworkRelationshipReconciliationStore();
+  client.setRelationshipSnapshot({
+    schemaVersion: 1,
+    items: [relationship(2, "confirmed", "outgoing")],
+    baseCheckpoint: "rcp_base",
+    page: { limit: 100, returnedCount: 1, nextCursor: null }
+  });
+  client.setRelationshipChanges({
+    schemaVersion: 1,
+    items: [{
+      checkpoint: "rcp_blocked",
+      relationship: relationship(3, "blocked", "outgoing")
+    }],
+    checkpoint: "rcp_blocked",
+    page: { limit: 100, returnedCount: 1, hasMore: false }
+  });
+  const applied: Array<{ revision: number; state: string }> = [];
+
+  await createService(
+    client,
+    new MemoryTetiNetworkRelationshipCommandStore(),
+    reconciliationStore
+  ).reconcile(async (document) => {
+    applied.push({ revision: document.revision, state: document.state });
+  });
+
+  assert.deepEqual(applied, [
+    { revision: 2, state: "confirmed" },
+    { revision: 3, state: "blocked" }
+  ]);
+  assert.deepEqual(await reconciliationStore.load(), {
+    schemaVersion: 1,
+    tetiId: SELF,
+    checkpoint: "rcp_blocked"
+  });
+});
+
+test("Relationship service never advances a checkpoint past a failed local cache write", async () => {
+  const client = new StatefulRelationshipClient();
+  const reconciliationStore = new MemoryTetiNetworkRelationshipReconciliationStore();
+  client.setRelationshipSnapshot({
+    schemaVersion: 1,
+    items: [],
+    baseCheckpoint: "rcp_base",
+    page: { limit: 100, returnedCount: 0, nextCursor: null }
+  });
+  client.setRelationshipChanges({
+    schemaVersion: 1,
+    items: [{ checkpoint: "rcp_next", relationship: relationship(2, "confirmed", "outgoing") }],
+    checkpoint: "rcp_next",
+    page: { limit: 100, returnedCount: 1, hasMore: false }
+  });
+
+  await assert.rejects(
+    () => createService(
+      client,
+      new MemoryTetiNetworkRelationshipCommandStore(),
+      reconciliationStore
+    ).reconcile(async () => { throw new Error("cache write failed"); }),
+    /cache write failed/
+  );
+  assert.deepEqual(await reconciliationStore.load(), { schemaVersion: 1 });
+});
+
+test("Relationship service returns only confirmed Network authorization as allow", async () => {
+  const client = new StatefulRelationshipClient();
+  client.setRelationshipAuthorization({
+    schemaVersion: 1,
+    peerTetiId: PEER,
+    relationshipId: RELATIONSHIP_ID,
+    relationshipRevision: 2,
+    decision: "allow",
+    reason: "confirmed",
+    evaluatedAt: "2026-08-11T12:00:00.000Z"
+  });
+  const authorization = await createService(
+    client,
+    new MemoryTetiNetworkRelationshipCommandStore()
+  ).authorizePeer(PEER);
+  assert.equal(authorization.decision, "allow");
+  assert.deepEqual(client.relationshipAuthorizationCalls, [PEER]);
+});
+
 class StatefulRelationshipClient extends FakeTetiNetworkClient {
   current: TetiNetworkRelationshipDocument | null;
   nextWriteError: unknown = null;
@@ -185,12 +271,14 @@ class StatefulRelationshipClient extends FakeTetiNetworkClient {
 
 function createService(
   client: StatefulRelationshipClient,
-  store: MemoryTetiNetworkRelationshipCommandStore
+  store: MemoryTetiNetworkRelationshipCommandStore,
+  reconciliationStore = new MemoryTetiNetworkRelationshipReconciliationStore()
 ): TetiNetworkRelationshipService {
   let key = 0;
   return new TetiNetworkRelationshipService({
     client,
     store,
+    reconciliationStore,
     getAuthentication: async () => ({ tetiId: SELF, authentication }),
     idempotencyKeyFactory: (operation) => `relationship.${operation}:test-${++key}-000000000000`
   });
@@ -234,8 +322,8 @@ function notFound(): TetiNetworkClientError {
 function bootstrap() {
   return {
     protocolVersion: 1,
-    contractRevision: 6,
-    service: { name: "teti-network" as const, version: "0.1.5" },
+    contractRevision: 8,
+    service: { name: "teti-network" as const, version: "0.1.8" },
     serverTime: "2026-08-09T00:00:00.000Z",
     protocolSupport: { minimumSupportedVersion: 1, supportedVersions: [1] },
     releasePolicy: {
@@ -252,7 +340,7 @@ function bootstrap() {
       presence: true,
       publicProfile: true,
       relationships: true,
-      relayBindings: false,
+      relayBindings: true,
       invites: false
     },
     presencePolicy: {

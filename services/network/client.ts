@@ -43,12 +43,28 @@ import {
   type TetiNetworkPresenceReportRequest,
   type TetiNetworkPresenceReportResponse,
   type TetiNetworkRegisterIdentityRequest,
+  type TetiNetworkAdoptRelayBindingRequest,
+  type TetiNetworkMutateRelayBindingRequest,
+  type TetiNetworkPutRelayBindingRequest,
+  type TetiNetworkRelayBindingResult,
+  type TetiNetworkRelayBindingSet,
+  type TetiNetworkRelayBindingsEtag,
+  type TetiNetworkRelayBindingWriteOptions,
+  type TetiNetworkRelayBootstrap,
+  type TetiNetworkRelayCatalog,
+  type TetiNetworkRelayCatalogItem,
+  type TetiNetworkRelayStatus,
   type TetiNetworkRelationshipCommand,
+  type TetiNetworkRelationshipAuthorization,
+  type TetiNetworkRelationshipChangesPage,
+  type TetiNetworkRelationshipChangesQuery,
   type TetiNetworkRelationshipDocument,
   type TetiNetworkRelationshipEtag,
   type TetiNetworkRelationshipListPage,
   type TetiNetworkRelationshipListQuery,
   type TetiNetworkRelationshipResult,
+  type TetiNetworkRelationshipSnapshotPage,
+  type TetiNetworkRelationshipSnapshotQuery,
   type TetiNetworkRelationshipState,
   type TetiNetworkRelationshipWriteOptions,
   type TetiNetworkRequestRelationshipRequest,
@@ -71,6 +87,10 @@ const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9._:-]{16,128}$/;
 const PROFILE_ETAG_PATTERN = /^"profile-r(?:0|[1-9]\d*)"$/;
 const RELATIONSHIP_ID_PATTERN = /^rel_[A-Za-z0-9_-]{21}[AQgw]$/;
 const RELATIONSHIP_ETAG_PATTERN = /^"relationship-r(?:0|[1-9]\d*)"$/;
+const RELAY_ID_PATTERN = /^relay_[a-z0-9_]{3,58}$/;
+const RELAY_BINDING_ID_PATTERN = /^rb_[A-Za-z0-9_-]{3,64}$/;
+const RELAY_MAILBOX_PATTERN = /^[a-z0-9](?:[a-z0-9._+-]{0,62}[a-z0-9])?$/;
+const RELAY_BINDINGS_ETAG_PATTERN = /^"relay-bindings-r(?:0|[1-9]\d*)"$/;
 const RELATIONSHIP_STATES = new Set<TetiNetworkRelationshipState>([
   "requested",
   "confirmed",
@@ -173,6 +193,10 @@ export class HttpTetiNetworkClient implements TetiNetworkClient {
     return this.read("public_stats", "/v1/public/stats", parsePublicStats, signal);
   }
 
+  async listRelays(signal?: AbortSignal): Promise<TetiNetworkRelayCatalog> {
+    return this.read("relay_list", "/v1/relays", parseRelayCatalog, signal);
+  }
+
   async registerIdentity(
     input: TetiNetworkRegisterIdentityRequest,
     pendingClient: TetiNetworkSigningKey,
@@ -213,6 +237,66 @@ export class HttpTetiNetworkClient implements TetiNetworkClient {
       authentication,
       signal,
       parseIdentitySession
+    );
+  }
+
+  async getRelayBindingsSelf(
+    authentication: TetiNetworkAuthenticatedSigner,
+    signal?: AbortSignal
+  ): Promise<TetiNetworkRelayBindingResult> {
+    return this.signedRelayBindingRead(authentication, signal);
+  }
+
+  async createRelayBinding(
+    input: TetiNetworkPutRelayBindingRequest,
+    authentication: TetiNetworkAuthenticatedSigner,
+    options: TetiNetworkRelayBindingWriteOptions
+  ): Promise<TetiNetworkRelayBindingResult> {
+    return this.signedRelayBindingWrite(
+      "relay_binding_create",
+      "/v1/relay-bindings/create",
+      requireRelayBindingPutRequest(input, "relay_binding_create"),
+      authentication,
+      options,
+      true
+    );
+  }
+
+  async adoptRelayBinding(
+    input: TetiNetworkAdoptRelayBindingRequest,
+    authentication: TetiNetworkAuthenticatedSigner,
+    options: TetiNetworkRelayBindingWriteOptions
+  ): Promise<TetiNetworkRelayBindingResult> {
+    return this.signedRelayBindingWrite(
+      "relay_binding_adopt",
+      "/v1/relay-bindings/adopt",
+      requireRelayBindingAdoptRequest(input),
+      authentication,
+      options,
+      true
+    );
+  }
+
+  async mutateRelayBinding(
+    bindingId: string,
+    command: "activate" | "revoke",
+    input: TetiNetworkMutateRelayBindingRequest,
+    authentication: TetiNetworkAuthenticatedSigner,
+    options: TetiNetworkRelayBindingWriteOptions
+  ): Promise<TetiNetworkRelayBindingResult> {
+    const operation = command === "activate"
+      ? "relay_binding_activate" as const
+      : "relay_binding_revoke" as const;
+    if (!RELAY_BINDING_ID_PATTERN.test(bindingId)) {
+      throw invalidRequest(operation, "Teti Network RelayBinding ID is invalid.");
+    }
+    return this.signedRelayBindingWrite(
+      operation,
+      `/v1/relay-bindings/${encodeURIComponent(bindingId)}/${command}`,
+      requireRelayBindingMutation(input, operation),
+      authentication,
+      options,
+      false
     );
   }
 
@@ -374,6 +458,51 @@ export class HttpTetiNetworkClient implements TetiNetworkClient {
     );
   }
 
+  async getRelationshipAuthorization(
+    peerTetiId: string,
+    authentication: TetiNetworkAuthenticatedSigner,
+    signal?: AbortSignal
+  ): Promise<TetiNetworkRelationshipAuthorization> {
+    const peer = requirePublicTetiId(peerTetiId, "relationship_authorization", "request");
+    return this.signedRead(
+      "relationship_authorization",
+      `/v1/relationships/with/${encodeURIComponent(peer)}/authorization`,
+      authentication,
+      signal,
+      parseRelationshipAuthorization
+    );
+  }
+
+  async getRelationshipSnapshot(
+    query: TetiNetworkRelationshipSnapshotQuery = {},
+    authentication: TetiNetworkAuthenticatedSigner,
+    signal?: AbortSignal
+  ): Promise<TetiNetworkRelationshipSnapshotPage> {
+    const search = relationshipSnapshotQuery(query);
+    return this.signedRead(
+      "relationship_reconciliation_snapshot",
+      `/v1/relationships/reconciliation/snapshot${search ? `?${search}` : ""}`,
+      authentication,
+      signal,
+      parseRelationshipSnapshot
+    );
+  }
+
+  async getRelationshipChanges(
+    query: TetiNetworkRelationshipChangesQuery,
+    authentication: TetiNetworkAuthenticatedSigner,
+    signal?: AbortSignal
+  ): Promise<TetiNetworkRelationshipChangesPage> {
+    const search = relationshipChangesQuery(query);
+    return this.signedRead(
+      "relationship_reconciliation_changes",
+      `/v1/relationships/reconciliation/changes?${search}`,
+      authentication,
+      signal,
+      parseRelationshipChanges
+    );
+  }
+
   async requestRelationship(
     input: TetiNetworkRequestRelationshipRequest,
     authentication: TetiNetworkAuthenticatedSigner,
@@ -489,6 +618,89 @@ export class HttpTetiNetworkClient implements TetiNetworkClient {
     validateContractHeaders(response, body, operation);
     if (!response.ok) throw errorFromResponse(response, body, operation);
     return parseProfileResult(response, body, operation);
+  }
+
+  private async signedRelayBindingRead(
+    authentication: TetiNetworkAuthenticatedSigner,
+    signal?: AbortSignal
+  ): Promise<TetiNetworkRelayBindingResult> {
+    const operation = "relay_binding_self" as const;
+    if (!CLIENT_INSTANCE_ID_PATTERN.test(authentication.clientInstanceId)) {
+      throw invalidRequest(operation, "Teti Network client instance ID is invalid.");
+    }
+    const path = "/v1/relay-bindings/self";
+    const headers = this.signedHeaders({
+      operation,
+      method: "GET",
+      path,
+      principalId: authentication.clientInstanceId,
+      signingKey: authentication.signingKey,
+      rawBody: "",
+      idempotencyKey: ""
+    });
+    const response = await this.fetchResponse(operation, path, { method: "GET", headers }, signal);
+    const body = await readJson(response, operation);
+    validateContractHeaders(response, body, operation);
+    if (!response.ok) throw errorFromResponse(response, body, operation);
+    return parseRelayBindingResult(response, body, operation);
+  }
+
+  private async signedRelayBindingWrite(
+    operation:
+      | "relay_binding_create"
+      | "relay_binding_adopt"
+      | "relay_binding_activate"
+      | "relay_binding_revoke",
+    path: string,
+    input:
+      | TetiNetworkPutRelayBindingRequest
+      | TetiNetworkAdoptRelayBindingRequest
+      | TetiNetworkMutateRelayBindingRequest,
+    authentication: TetiNetworkAuthenticatedSigner,
+    options: TetiNetworkRelayBindingWriteOptions,
+    allowCreated: boolean
+  ): Promise<TetiNetworkRelayBindingResult> {
+    if (!CLIENT_INSTANCE_ID_PATTERN.test(authentication.clientInstanceId)) {
+      throw invalidRequest(operation, "Teti Network client instance ID is invalid.");
+    }
+    if (!IDEMPOTENCY_KEY_PATTERN.test(options.idempotencyKey)) {
+      throw invalidRequest(operation, "Teti Network idempotency key is invalid.");
+    }
+    const expectedEtag = relayBindingsEtag(input.expectedRevision);
+    if (!RELAY_BINDINGS_ETAG_PATTERN.test(options.ifMatch) || options.ifMatch !== expectedEtag) {
+      throw invalidRequest(
+        operation,
+        "Teti Network RelayBinding If-Match does not match expectedRevision."
+      );
+    }
+    const rawBody = options.rawBody ?? JSON.stringify(input);
+    if (options.rawBody !== undefined) assertPersistedBody(operation, input, options.rawBody);
+    const headers = this.signedHeaders({
+      operation,
+      method: "POST",
+      path,
+      principalId: authentication.clientInstanceId,
+      signingKey: authentication.signingKey,
+      rawBody,
+      idempotencyKey: options.idempotencyKey
+    });
+    headers["If-Match"] = options.ifMatch;
+    const response = await this.fetchResponse(operation, path, {
+      method: "POST",
+      headers,
+      body: rawBody
+    }, options.signal);
+    const body = await readJson(response, operation);
+    validateContractHeaders(response, body, operation);
+    if (!response.ok) throw errorFromResponse(response, body, operation);
+    if (response.status !== 200 && !(allowCreated && response.status === 201)) {
+      throw invalidResponse(
+        operation,
+        "Teti Network returned an invalid RelayBinding write status.",
+        response
+      );
+    }
+    return parseRelayBindingResult(response, body, operation);
   }
 
   private async signedRelationshipRead(
@@ -851,6 +1063,9 @@ function parseBootstrap(value: unknown): TetiNetworkBootstrap {
     capabilities[capability] = enabled;
   }
   const presencePolicy = parsePresencePolicy(value.presencePolicy, operation);
+  const relayBootstrap = value.relayBootstrap === undefined && contractRevision < 8
+    ? undefined
+    : parseRelayBootstrap(value.relayBootstrap, operation);
 
   return {
     protocolVersion,
@@ -860,7 +1075,95 @@ function parseBootstrap(value: unknown): TetiNetworkBootstrap {
     protocolSupport: { minimumSupportedVersion, supportedVersions },
     releasePolicy,
     capabilities,
-    presencePolicy
+    presencePolicy,
+    ...(relayBootstrap ? { relayBootstrap } : {})
+  };
+}
+
+function parseRelayBootstrap(
+  value: unknown,
+  operation: "bootstrap"
+): TetiNetworkRelayBootstrap {
+  if (!isRecord(value)
+    || !hasOnlyKeys(value, ["schemaVersion", "preferredRelay", "catalogPath"])
+    || value.schemaVersion !== 1
+    || value.catalogPath !== "/v1/relays"
+    || !isRecord(value.preferredRelay)
+    || !hasOnlyKeys(value.preferredRelay, ["id", "domain", "region", "accountProvisioning"])) {
+    throw invalidResponse(operation, "Teti Network Relay bootstrap is invalid.");
+  }
+  const preferredRelay = value.preferredRelay;
+  const id = requireRelayId(preferredRelay.id, operation, "response");
+  const domain = requireRelayDomain(preferredRelay.domain, operation, "response");
+  const region = requireRelayRegion(preferredRelay.region, operation, "response");
+  const accountProvisioning = parseRelayAccountProvisioning(
+    preferredRelay.accountProvisioning,
+    domain,
+    operation
+  );
+  return {
+    schemaVersion: 1,
+    preferredRelay: { id, domain, region, accountProvisioning },
+    catalogPath: "/v1/relays"
+  };
+}
+
+function parseRelayCatalog(value: unknown): TetiNetworkRelayCatalog {
+  const operation = "relay_list" as const;
+  if (!isRecord(value)
+    || !hasOnlyKeys(value, ["schemaVersion", "relays", "generatedAt"])
+    || value.schemaVersion !== 1
+    || !Array.isArray(value.relays)) {
+    throw invalidResponse(operation, "Teti Network Relay catalog is invalid.");
+  }
+  const relays = value.relays.map((entry) => parseRelayCatalogItem(entry, operation));
+  if (new Set(relays.map((relay) => relay.id)).size !== relays.length
+    || new Set(relays.map((relay) => relay.domain)).size !== relays.length) {
+    throw invalidResponse(operation, "Teti Network Relay catalog contains duplicates.");
+  }
+  return {
+    schemaVersion: 1,
+    relays,
+    generatedAt: requireTimestamp(
+      value.generatedAt,
+      operation,
+      "Teti Network Relay catalog timestamp is invalid."
+    )
+  };
+}
+
+function parseRelayCatalogItem(
+  value: unknown,
+  operation: TetiNetworkOperation
+): TetiNetworkRelayCatalogItem {
+  if (!isRecord(value)
+    || !hasOnlyKeys(value, [
+      "id",
+      "domain",
+      "region",
+      "status",
+      "acceptsNewAccounts",
+      "accountProvisioning"
+    ])
+    || typeof value.acceptsNewAccounts !== "boolean") {
+    throw invalidResponse(operation, "Teti Network Relay catalog item is invalid.");
+  }
+  const domain = requireRelayDomain(value.domain, operation, "response");
+  const status = requireRelayStatus(value.status, operation);
+  if (value.acceptsNewAccounts !== (status === "active")) {
+    throw invalidResponse(operation, "Teti Network Relay availability is inconsistent.");
+  }
+  return {
+    id: requireRelayId(value.id, operation, "response"),
+    domain,
+    region: requireRelayRegion(value.region, operation, "response"),
+    status,
+    acceptsNewAccounts: value.acceptsNewAccounts,
+    accountProvisioning: parseRelayAccountProvisioning(
+      value.accountProvisioning,
+      domain,
+      operation
+    )
   };
 }
 
@@ -1038,6 +1341,197 @@ function parseProfileDocument(
   };
 }
 
+function parseRelayBindingResult(
+  response: Response,
+  value: unknown,
+  operation:
+    | "relay_binding_self"
+    | "relay_binding_create"
+    | "relay_binding_adopt"
+    | "relay_binding_activate"
+    | "relay_binding_revoke"
+): TetiNetworkRelayBindingResult {
+  const document = parseRelayBindingSet(value, operation);
+  const etag = response.headers.get("etag");
+  if (etag !== relayBindingsEtag(document.revision)) {
+    throw invalidResponse(
+      operation,
+      "Teti Network RelayBinding ETag does not match its revision.",
+      response
+    );
+  }
+  if (response.headers.get("cache-control")?.trim().toLowerCase() !== "no-store") {
+    throw invalidResponse(
+      operation,
+      "Teti Network RelayBinding response is not marked no-store.",
+      response
+    );
+  }
+  return { document, etag: etag as TetiNetworkRelayBindingsEtag };
+}
+
+function parseRelayBindingSet(
+  value: unknown,
+  operation: TetiNetworkOperation
+): TetiNetworkRelayBindingSet {
+  if (!isRecord(value)
+    || !hasOnlyKeys(value, [
+      "schemaVersion",
+      "tetiId",
+      "revision",
+      "active",
+      "migrating",
+      "updatedAt"
+    ])
+    || value.schemaVersion !== 1) {
+    throw invalidResponse(operation, "Teti Network RelayBindingSet is invalid.");
+  }
+  const active = value.active === null
+    ? null
+    : parseRelayBindingProjection(value.active, "active", operation);
+  const migrating = value.migrating === null
+    ? null
+    : parseRelayBindingProjection(value.migrating, "migrating", operation);
+  if (active && migrating && active.id === migrating.id) {
+    throw invalidResponse(operation, "Teti Network RelayBindingSet duplicates a binding.");
+  }
+  return {
+    schemaVersion: 1,
+    tetiId: requirePublicTetiId(value.tetiId, operation, "response"),
+    revision: nonNegativeInteger(value.revision, operation),
+    active,
+    migrating,
+    updatedAt: nullableTimestamp(value.updatedAt, operation)
+  };
+}
+
+function parseRelayBindingProjection(
+  value: unknown,
+  expectedStatus: "active" | "migrating",
+  operation: TetiNetworkOperation
+) {
+  if (!isRecord(value)
+    || !hasOnlyKeys(value, [
+      "id",
+      "relay",
+      "mailbox",
+      "address",
+      "transportPublicKey",
+      "status",
+      "createdAt",
+      "updatedAt"
+    ])
+    || value.status !== expectedStatus
+    || !isRecord(value.relay)
+    || !hasOnlyKeys(value.relay, ["id", "domain", "region", "status"])) {
+    throw invalidResponse(operation, "Teti Network RelayBinding projection is invalid.");
+  }
+  const relayDomain = requireRelayDomain(value.relay.domain, operation, "response");
+  const mailbox = requireRelayMailbox(value.mailbox, operation, "response");
+  const address = requireDeliveryAddress(value.address, operation);
+  if (address !== `${mailbox}@${relayDomain}`) {
+    throw invalidResponse(operation, "Teti Network RelayBinding address is inconsistent.");
+  }
+  const transportPublicKey = value.transportPublicKey;
+  if (transportPublicKey !== null
+    && (typeof transportPublicKey !== "string"
+      || transportPublicKey.length < 1
+      || transportPublicKey.length > 32_768)) {
+    throw invalidResponse(operation, "Teti Network RelayBinding transport key is invalid.");
+  }
+  return {
+    id: requireRelayBindingId(value.id, operation, "response"),
+    relay: {
+      id: requireRelayId(value.relay.id, operation, "response"),
+      domain: relayDomain,
+      region: requireRelayRegion(value.relay.region, operation, "response"),
+      status: requireRelayStatus(value.relay.status, operation)
+    },
+    mailbox,
+    address,
+    transportPublicKey,
+    status: expectedStatus,
+    createdAt: requireTimestamp(
+      value.createdAt,
+      operation,
+      "Teti Network RelayBinding creation time is invalid."
+    ),
+    updatedAt: requireTimestamp(
+      value.updatedAt,
+      operation,
+      "Teti Network RelayBinding update time is invalid."
+    )
+  };
+}
+
+function requireRelayBindingPutRequest(
+  value: TetiNetworkPutRelayBindingRequest,
+  operation: "relay_binding_create" | "relay_binding_adopt"
+): TetiNetworkPutRelayBindingRequest {
+  if (!isRecord(value)
+    || !hasOnlyKeys(value, [
+      "schemaVersion",
+      "expectedRevision",
+      "relayId",
+      "mailbox",
+      "transportPublicKey"
+    ])
+    || value.schemaVersion !== 1
+    || !Number.isSafeInteger(value.expectedRevision)
+    || value.expectedRevision < 0
+    || (value.transportPublicKey !== null
+      && (typeof value.transportPublicKey !== "string"
+        || value.transportPublicKey.length < 1
+        || value.transportPublicKey.length > 32_768))) {
+    throw invalidRequest(operation, "Teti Network RelayBinding command is invalid.");
+  }
+  return {
+    schemaVersion: 1,
+    expectedRevision: value.expectedRevision,
+    relayId: requireRelayId(value.relayId, operation, "request"),
+    mailbox: requireRelayMailbox(value.mailbox, operation, "request"),
+    transportPublicKey: value.transportPublicKey
+  };
+}
+
+function requireRelayBindingAdoptRequest(
+  value: TetiNetworkAdoptRelayBindingRequest
+): TetiNetworkAdoptRelayBindingRequest {
+  const operation = "relay_binding_adopt" as const;
+  if (!isRecord(value)
+    || !hasOnlyKeys(value, [
+      "schemaVersion",
+      "expectedRevision",
+      "relayId",
+      "mailbox",
+      "transportPublicKey",
+      "adoptionGrant"
+    ])
+    || typeof value.adoptionGrant !== "string"
+    || value.adoptionGrant.length < 1
+    || value.adoptionGrant.length > 512) {
+    throw invalidRequest(operation, "Teti Network RelayBinding adoption is invalid.");
+  }
+  return {
+    ...requireRelayBindingPutRequest(value, operation),
+    adoptionGrant: value.adoptionGrant
+  };
+}
+
+function requireRelayBindingMutation(
+  value: TetiNetworkMutateRelayBindingRequest,
+  operation: "relay_binding_activate" | "relay_binding_revoke"
+): TetiNetworkMutateRelayBindingRequest {
+  if (!isRecord(value)
+    || !hasOnlyKeys(value, ["schemaVersion", "expectedRevision"])
+    || value.schemaVersion !== 1
+    || !Number.isSafeInteger(value.expectedRevision)
+    || value.expectedRevision < 0) {
+    throw invalidRequest(operation, "Teti Network RelayBinding mutation is invalid.");
+  }
+  return { schemaVersion: 1, expectedRevision: value.expectedRevision };
+}
+
 function parseRelationshipResult(
   response: Response,
   value: unknown,
@@ -1137,6 +1631,125 @@ function parseRelationshipDocument(
     createdAt,
     updatedAt,
     stateChangedAt
+  };
+}
+
+function parseRelationshipAuthorization(
+  value: unknown,
+  operation: TetiNetworkOperation
+): TetiNetworkRelationshipAuthorization {
+  if (!isRecord(value)
+    || !hasOnlyKeys(value, [
+      "schemaVersion",
+      "peerTetiId",
+      "relationshipId",
+      "relationshipRevision",
+      "decision",
+      "reason",
+      "evaluatedAt"
+    ])
+    || value.schemaVersion !== 1
+    || (value.decision !== "allow" && value.decision !== "deny")
+    || !["confirmed", "requested", "rejected", "blocked", "revoked", "not_found"].includes(
+      value.reason as string
+    )) {
+    throw invalidResponse(operation, "Teti Network Relationship authorization is invalid.");
+  }
+  const peerTetiId = requirePublicTetiId(value.peerTetiId, operation, "response");
+  const evaluatedAt = requireTimestamp(
+    value.evaluatedAt,
+    operation,
+    "Teti Network Relationship authorization time is invalid."
+  );
+  const absent = value.reason === "not_found";
+  const relationshipId = value.relationshipId === null
+    ? null
+    : requireRelationshipId(value.relationshipId, operation, "response");
+  const relationshipRevision = value.relationshipRevision === null
+    ? null
+    : boundedInteger(value.relationshipRevision, 1, Number.MAX_SAFE_INTEGER, operation);
+  if ((relationshipId === null) !== absent
+    || (relationshipRevision === null) !== absent
+    || (value.decision === "allow") !== (value.reason === "confirmed")) {
+    throw invalidResponse(operation, "Teti Network Relationship authorization is inconsistent.");
+  }
+  return {
+    schemaVersion: 1,
+    peerTetiId,
+    relationshipId,
+    relationshipRevision,
+    decision: value.decision,
+    reason: value.reason as TetiNetworkRelationshipAuthorization["reason"],
+    evaluatedAt
+  };
+}
+
+function parseRelationshipSnapshot(
+  value: unknown,
+  operation: TetiNetworkOperation
+): TetiNetworkRelationshipSnapshotPage {
+  if (!isRecord(value)
+    || !hasOnlyKeys(value, ["schemaVersion", "items", "baseCheckpoint", "page"])
+    || value.schemaVersion !== 1
+    || !Array.isArray(value.items)
+    || !isRecord(value.page)
+    || !hasOnlyKeys(value.page, ["limit", "returnedCount", "nextCursor"])) {
+    throw invalidResponse(operation, "Teti Network Relationship snapshot is invalid.");
+  }
+  const items = value.items.map((item) => parseRelationshipDocument(item, operation));
+  for (let index = 1; index < items.length; index += 1) {
+    if (items[index - 1]!.id.localeCompare(items[index]!.id) >= 0) {
+      throw invalidResponse(operation, "Teti Network Relationship snapshot order is invalid.");
+    }
+  }
+  const limit = boundedInteger(value.page.limit, 1, 100, operation);
+  const returnedCount = boundedInteger(value.page.returnedCount, 0, 100, operation);
+  const nextCursor = value.page.nextCursor;
+  if (returnedCount !== items.length
+    || returnedCount > limit
+    || (nextCursor !== null && !isReconciliationToken(nextCursor, "rrc_"))) {
+    throw invalidResponse(operation, "Teti Network Relationship snapshot page is invalid.");
+  }
+  return {
+    schemaVersion: 1,
+    items,
+    baseCheckpoint: parseReconciliationToken(value.baseCheckpoint, "rcp_", operation),
+    page: { limit, returnedCount, nextCursor }
+  };
+}
+
+function parseRelationshipChanges(
+  value: unknown,
+  operation: TetiNetworkOperation
+): TetiNetworkRelationshipChangesPage {
+  if (!isRecord(value)
+    || !hasOnlyKeys(value, ["schemaVersion", "items", "checkpoint", "page"])
+    || value.schemaVersion !== 1
+    || !Array.isArray(value.items)
+    || !isRecord(value.page)
+    || !hasOnlyKeys(value.page, ["limit", "returnedCount", "hasMore"])
+    || typeof value.page.hasMore !== "boolean") {
+    throw invalidResponse(operation, "Teti Network Relationship changes are invalid.");
+  }
+  const items = value.items.map((item) => {
+    if (!isRecord(item) || !hasOnlyKeys(item, ["checkpoint", "relationship"])) {
+      throw invalidResponse(operation, "Teti Network Relationship change is invalid.");
+    }
+    return {
+      checkpoint: parseReconciliationToken(item.checkpoint, "rcp_", operation),
+      relationship: parseRelationshipDocument(item.relationship, operation)
+    };
+  });
+  const limit = boundedInteger(value.page.limit, 1, 100, operation);
+  const returnedCount = boundedInteger(value.page.returnedCount, 0, 100, operation);
+  if (returnedCount !== items.length || returnedCount > limit) {
+    throw invalidResponse(operation, "Teti Network Relationship changes page is invalid.");
+  }
+  return {
+    schemaVersion: 1,
+    items,
+    checkpoint: parseReconciliationToken(value.checkpoint, "rcp_", operation),
+    page: { limit, returnedCount, hasMore: value.page.hasMore }
   };
 }
 
@@ -1523,6 +2136,67 @@ function relationshipListQuery(query: TetiNetworkRelationshipListQuery): string 
   return params.toString();
 }
 
+function relationshipSnapshotQuery(query: TetiNetworkRelationshipSnapshotQuery): string {
+  const operation = "relationship_reconciliation_snapshot" as const;
+  const params = new URLSearchParams();
+  appendRelationshipLimit(params, query.limit, operation);
+  if (query.cursor !== undefined) {
+    params.set("cursor", requireReconciliationToken(query.cursor, "rrc_", operation));
+  }
+  return params.toString();
+}
+
+function relationshipChangesQuery(query: TetiNetworkRelationshipChangesQuery): string {
+  const operation = "relationship_reconciliation_changes" as const;
+  if (!isRecord(query)) throw invalidRequest(operation, "Teti Network Relationship changes query is invalid.");
+  const params = new URLSearchParams();
+  params.set("after", requireReconciliationToken(query.after, "rcp_", operation));
+  appendRelationshipLimit(params, query.limit, operation);
+  return params.toString();
+}
+
+function appendRelationshipLimit(
+  params: URLSearchParams,
+  limit: number | undefined,
+  operation: TetiNetworkOperation
+): void {
+  if (limit === undefined) return;
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+    throw invalidRequest(operation, "Teti Network Relationship reconciliation limit is invalid.");
+  }
+  params.set("limit", String(limit));
+}
+
+function requireReconciliationToken(
+  value: unknown,
+  prefix: "rcp_" | "rrc_",
+  operation: TetiNetworkOperation
+): string {
+  if (!isReconciliationToken(value, prefix)) {
+    throw invalidRequest(operation, "Teti Network Relationship reconciliation token is invalid.");
+  }
+  return value;
+}
+
+function parseReconciliationToken(
+  value: unknown,
+  prefix: "rcp_" | "rrc_",
+  operation: TetiNetworkOperation
+): string {
+  if (!isReconciliationToken(value, prefix)) {
+    throw invalidResponse(operation, "Teti Network Relationship reconciliation token is invalid.");
+  }
+  return value;
+}
+
+function isReconciliationToken(value: unknown, prefix: "rcp_" | "rrc_"): value is string {
+  return typeof value === "string"
+    && value.length >= 5
+    && value.length <= 512
+    && value.startsWith(prefix)
+    && /^[A-Za-z0-9_-]+$/.test(value.slice(prefix.length));
+}
+
 function errorFromResponse(
   response: Response,
   body: unknown,
@@ -1556,6 +2230,20 @@ function mapServerError(code: string, status: number): TetiNetworkErrorCode {
   if (code === "RELATIONSHIP_BLOCKED") return "RELATIONSHIP_BLOCKED";
   if (code === "RELATIONSHIP_REVISION_CONFLICT") return "RELATIONSHIP_REVISION_CONFLICT";
   if (code === "PROFILE_REVISION_CONFLICT") return "PROFILE_REVISION_CONFLICT";
+  if (code === "RELAY_NOT_FOUND") return "RELAY_NOT_FOUND";
+  if (code === "RELAY_UNAVAILABLE") return "RELAY_UNAVAILABLE";
+  if (code === "RELAY_BINDING_NOT_FOUND") return "RELAY_BINDING_NOT_FOUND";
+  if (code === "RELAY_BINDING_CONFLICT") return "RELAY_BINDING_CONFLICT";
+  if (code === "MAILBOX_ALREADY_BOUND") return "MAILBOX_ALREADY_BOUND";
+  if (code === "RELAY_BINDING_TRANSITION_INVALID") {
+    return "RELAY_BINDING_TRANSITION_INVALID";
+  }
+  if (code === "RELAY_BINDING_REVISION_CONFLICT") {
+    return "RELAY_BINDING_REVISION_CONFLICT";
+  }
+  if (code === "RELAY_BINDING_ADOPTION_DENIED") {
+    return "RELAY_BINDING_ADOPTION_DENIED";
+  }
   if (status === 412) return "NETWORK_CONFLICT";
   if (code === "NETWORK_CONFLICT") return "NETWORK_CONFLICT";
   if (code === "PROTOCOL_UNSUPPORTED" || status === 426) return "PROTOCOL_UNSUPPORTED";
@@ -1578,6 +2266,99 @@ function profileEtag(revision: number): TetiNetworkProfileEtag {
 
 function relationshipEtag(revision: number): TetiNetworkRelationshipEtag {
   return `"relationship-r${revision}"`;
+}
+
+function relayBindingsEtag(revision: number): TetiNetworkRelayBindingsEtag {
+  return `"relay-bindings-r${revision}"`;
+}
+
+function parseRelayAccountProvisioning(
+  value: unknown,
+  relayDomain: string,
+  operation: TetiNetworkOperation
+) {
+  if (!isRecord(value)
+    || !hasOnlyKeys(value, ["type", "value"])
+    || value.type !== "chatmail_qr"
+    || value.value !== `dcaccount:${relayDomain}`) {
+    throw invalidResponse(operation, "Teti Network Relay provisioning metadata is invalid.");
+  }
+  return { type: "chatmail_qr" as const, value: value.value };
+}
+
+function requireRelayId(
+  value: unknown,
+  operation: TetiNetworkOperation,
+  source: "request" | "response"
+): string {
+  if (typeof value !== "string" || !RELAY_ID_PATTERN.test(value)) {
+    throw source === "request"
+      ? invalidRequest(operation, "Teti Network Relay ID is invalid.")
+      : invalidResponse(operation, "Teti Network Relay ID is invalid.");
+  }
+  return value;
+}
+
+function requireRelayBindingId(
+  value: unknown,
+  operation: TetiNetworkOperation,
+  source: "request" | "response"
+): string {
+  if (typeof value !== "string" || !RELAY_BINDING_ID_PATTERN.test(value)) {
+    throw source === "request"
+      ? invalidRequest(operation, "Teti Network RelayBinding ID is invalid.")
+      : invalidResponse(operation, "Teti Network RelayBinding ID is invalid.");
+  }
+  return value;
+}
+
+function requireRelayMailbox(
+  value: unknown,
+  operation: TetiNetworkOperation,
+  source: "request" | "response"
+): string {
+  if (typeof value !== "string" || !RELAY_MAILBOX_PATTERN.test(value)) {
+    throw source === "request"
+      ? invalidRequest(operation, "Teti Network Relay mailbox is invalid.")
+      : invalidResponse(operation, "Teti Network Relay mailbox is invalid.");
+  }
+  return value;
+}
+
+function requireRelayDomain(
+  value: unknown,
+  operation: TetiNetworkOperation,
+  source: "request" | "response"
+): string {
+  if (typeof value !== "string" || !DELIVERY_DOMAIN_PATTERN.test(value)) {
+    throw source === "request"
+      ? invalidRequest(operation, "Teti Network Relay domain is invalid.")
+      : invalidResponse(operation, "Teti Network Relay domain is invalid.");
+  }
+  return value;
+}
+
+function requireRelayRegion(
+  value: unknown,
+  operation: TetiNetworkOperation,
+  source: "request" | "response"
+): string {
+  if (typeof value !== "string" || !/^[a-z0-9][a-z0-9_-]{0,31}$/.test(value)) {
+    throw source === "request"
+      ? invalidRequest(operation, "Teti Network Relay region is invalid.")
+      : invalidResponse(operation, "Teti Network Relay region is invalid.");
+  }
+  return value;
+}
+
+function requireRelayStatus(
+  value: unknown,
+  operation: TetiNetworkOperation
+): TetiNetworkRelayStatus {
+  if (value !== "active" && value !== "draining" && value !== "offline") {
+    throw invalidResponse(operation, "Teti Network Relay status is invalid.");
+  }
+  return value;
 }
 
 function relationshipCommandOperation(

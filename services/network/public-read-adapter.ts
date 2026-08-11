@@ -1,8 +1,9 @@
-import type { DiscoverTetisInput, TetiPublicProfile } from "../discovery/types.ts";
 import type {
-  DiscoveryIdentity
-} from "../discovery/registry-client.ts";
-import type { TetiRegistryReader } from "../discovery/client.ts";
+  DiscoverTetisInput,
+  TetiPublicDirectoryIdentity,
+  TetiPublicProfile
+} from "../discovery/types.ts";
+import type { TetiPublicDirectoryReader } from "../discovery/client.ts";
 import { TetiNetworkClientError } from "./errors.ts";
 import type {
   TetiNetworkClient,
@@ -12,16 +13,16 @@ import type {
 } from "./types.ts";
 
 /** Normalizes the official Network v1 Public Read contract for existing App domain services. */
-export class TetiNetworkPublicReadAdapter implements TetiRegistryReader {
+export class TetiNetworkPublicReadAdapter implements TetiPublicDirectoryReader {
   private readonly client: TetiNetworkClient;
 
   constructor(client: TetiNetworkClient) {
     this.client = client;
   }
 
-  async getIdentity(id: string): Promise<DiscoveryIdentity | null> {
+  async getIdentity(id: string): Promise<TetiPublicDirectoryIdentity | null> {
     try {
-      return fullNodeToDiscoveryIdentity(await this.client.getPublicNode(id));
+      return fullNodeToDirectoryIdentity(await this.client.getPublicNode(id));
     } catch (error) {
       if (error instanceof TetiNetworkClientError && error.code === "IDENTITY_NOT_FOUND") {
         return null;
@@ -30,15 +31,15 @@ export class TetiNetworkPublicReadAdapter implements TetiRegistryReader {
     }
   }
 
-  async discover(input: DiscoverTetisInput = {}): Promise<DiscoveryIdentity[]> {
+  async discover(input: DiscoverTetisInput = {}): Promise<TetiPublicDirectoryIdentity[]> {
     const page = await this.client.listPublicNodes({
       ...(input.limit === undefined ? {} : { limit: normalizedLimit(input.limit) })
     });
-    return page.items.map(summaryToDiscoveryIdentity);
+    return page.items.map(summaryToDirectoryIdentity);
   }
 }
 
-export function fullNodeToDiscoveryIdentity(node: TetiNetworkPublicNode): DiscoveryIdentity {
+export function fullNodeToDirectoryIdentity(node: TetiNetworkPublicNode): TetiPublicDirectoryIdentity {
   return {
     version: 1,
     id: node.id,
@@ -51,7 +52,7 @@ export function fullNodeToDiscoveryIdentity(node: TetiNetworkPublicNode): Discov
   };
 }
 
-export function summaryToDiscoveryIdentity(node: TetiNetworkPublicNodeSummary): DiscoveryIdentity {
+export function summaryToDirectoryIdentity(node: TetiNetworkPublicNodeSummary): TetiPublicDirectoryIdentity {
   return {
     version: 1,
     id: node.id,

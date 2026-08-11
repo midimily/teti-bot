@@ -7,7 +7,7 @@ export type CreationMarkerStage =
   | "identity_created"
   | "persisting"
   | "persisted"
-  | "registering_discovery"
+  | "synchronizing_network_identity"
   | "complete"
   | "failed_recoverable"
   | "failed_fatal";
@@ -22,7 +22,7 @@ export interface CreationMarker {
   publicAddress?: string;
   errorCode?: string;
   errorMessage?: string;
-  failureDomain?: "chatmail" | "registry" | "local";
+  failureDomain?: "chatmail" | "network" | "local";
   failureStage?: string;
 }
 

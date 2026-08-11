@@ -4,10 +4,7 @@ import { basename, isAbsolute, join, resolve, sep } from "node:path";
 import { FileTetiAccountStorage } from "../../../core/account/storage.ts";
 import { TetiAccountManager, type TetiAccountManagerOptions } from "../../../core/account/manager.ts";
 import { RuntimeChatmailProvisioner } from "../../../integrations/chatmail/provisioner.ts";
-import {
-  resolveChatmailRelayConfig,
-  validateRealValidationRelayConfig
-} from "../../../integrations/chatmail/relay-config.ts";
+import type { TetiNetworkEnvironment } from "../../../services/network/config.ts";
 import type { LifecycleErrorDto } from "../src/lifecycle-bridge/protocol.ts";
 import { createLifecycleError } from "./security.ts";
 import { writeRuntimeDiagnostic } from "./diagnostics.ts";
@@ -26,9 +23,10 @@ export interface TetiProfile {
   accountDir: string;
   accountPath: string;
   credentialsDir: string;
-  networkCredentialsPath: string;
-  networkProfileSyncPath: string;
-  networkRelationshipCommandPath: string;
+  networkStatePaths: Record<TetiNetworkEnvironment, TetiNetworkStatePaths>;
+  legacyNetworkCredentialsPath: string;
+  legacyNetworkProfileSyncPath: string;
+  legacyNetworkRelationshipCommandPath: string;
   networkEnvironmentPath: string;
   chatmailAccountsPath: string;
   lifecycleDir: string;
@@ -38,6 +36,15 @@ export interface TetiProfile {
   manifestPath: string;
   productionRoot: string;
   isValidationProfile: boolean;
+}
+
+export interface TetiNetworkStatePaths {
+  root: string;
+  credentialsPath: string;
+  profileSyncPath: string;
+  relationshipCommandPath: string;
+  relationshipReconciliationPath: string;
+  relayBindingPath: string;
 }
 
 export interface ProfileValidationReport {
@@ -52,6 +59,7 @@ export async function resolveTetiProfile(env: NodeJS.ProcessEnv = process.env): 
   const root = normalizeProfileRoot(explicitRoot ?? defaultProductionProfileRoot());
   const productionRoot = normalizeProfileRoot(defaultProductionProfileRoot());
   const storeDir = join(root, "store-v2");
+  const networkStateRoot = join(storeDir, "network");
   const profile: TetiProfile = {
     root,
     storeDir,
@@ -60,9 +68,13 @@ export async function resolveTetiProfile(env: NodeJS.ProcessEnv = process.env): 
     accountDir: join(storeDir, "account"),
     accountPath: join(storeDir, "account", "account.json"),
     credentialsDir: join(storeDir, "credentials"),
-    networkCredentialsPath: join(storeDir, "credentials", "teti-network-identity-v1.json"),
-    networkProfileSyncPath: join(storeDir, "network-profile-sync-v1.json"),
-    networkRelationshipCommandPath: join(storeDir, "network-relationship-command-v1.json"),
+    networkStatePaths: {
+      production: networkStatePaths(networkStateRoot, "production"),
+      local_development: networkStatePaths(networkStateRoot, "local_development")
+    },
+    legacyNetworkCredentialsPath: join(storeDir, "credentials", "teti-network-identity-v1.json"),
+    legacyNetworkProfileSyncPath: join(storeDir, "network-profile-sync-v1.json"),
+    legacyNetworkRelationshipCommandPath: join(storeDir, "network-relationship-command-v1.json"),
     networkEnvironmentPath: join(storeDir, "network-environment-v1.json"),
     chatmailAccountsPath: join(storeDir, "credentials", "chatmail-accounts"),
     lifecycleDir: join(root, "lifecycle"),
@@ -80,12 +92,39 @@ export async function resolveTetiProfile(env: NodeJS.ProcessEnv = process.env): 
 export async function ensureProfileDirectories(profile: TetiProfile): Promise<void> {
   await ensureProfileBootstrapDirectories(profile);
   await migrateTetiProfileToV2(profile);
+  await removeLegacyUnscopedNetworkState(profile);
   await mkdir(profile.accountDir, { recursive: true });
   await mkdir(profile.credentialsDir, { recursive: true });
   await mkdir(profile.chatmailAccountsPath, { recursive: true });
   await mkdir(profile.lifecycleDir, { recursive: true });
   await mkdir(profile.logsDir, { recursive: true });
   await mkdir(profile.diagnosticsDir, { recursive: true });
+}
+
+export async function removeLegacyUnscopedNetworkState(profile: TetiProfile): Promise<void> {
+  const legacyPaths = [
+    profile.legacyNetworkCredentialsPath,
+    profile.legacyNetworkProfileSyncPath,
+    profile.legacyNetworkRelationshipCommandPath
+  ];
+  await Promise.all(
+    legacyPaths.flatMap((path) => [path, `${path}.tmp`]).map((path) => rm(path, { force: true }))
+  );
+}
+
+function networkStatePaths(
+  root: string,
+  environment: TetiNetworkEnvironment
+): TetiNetworkStatePaths {
+  const environmentRoot = join(root, environment);
+  return {
+    root: environmentRoot,
+    credentialsPath: join(environmentRoot, "identity-credentials-v1.json"),
+    profileSyncPath: join(environmentRoot, "profile-sync-v1.json"),
+    relationshipCommandPath: join(environmentRoot, "relationship-command-v1.json"),
+    relationshipReconciliationPath: join(environmentRoot, "relationship-reconciliation-v1.json"),
+    relayBindingPath: join(environmentRoot, "relay-binding-v1.json")
+  };
 }
 
 export async function ensureProfileBootstrapDirectories(profile: TetiProfile): Promise<void> {
@@ -97,9 +136,10 @@ export async function ensureProfileBootstrapDirectories(profile: TetiProfile): P
 
 export function createProfiledAccountManager(
   profile: TetiProfile,
-  options: Pick<TetiAccountManagerOptions, "onCreationStage"> = {}
+  options: Pick<TetiAccountManagerOptions, "onCreationStage"> & {
+    accountProvisioning?: { accountQr: string; expectedAddressSuffix: string };
+  } = {}
 ): TetiAccountManager {
-  const relay = resolveChatmailRelayConfig();
   return new TetiAccountManager({
     storage: new FileTetiAccountStorage(profile.accountPath),
     chatmailProvisioner: new RuntimeChatmailProvisioner({
@@ -116,13 +156,12 @@ export function createProfiledAccountManager(
         onStderr: (line) => writeRuntimeDiagnostic("chatmail.rpc.stderr", { line })
       }
     }, {
-      accountQr: relay.accountQr,
       onStage: (stage) => writeRuntimeDiagnostic("chatmail.provision", {
         stage,
         result: "started"
       })
     }),
-    expectedAddressSuffix: relay.expectedAddressSuffix,
+    expectedAddressSuffix: options.accountProvisioning?.expectedAddressSuffix,
     onCreationStage: options.onCreationStage
   });
 }
@@ -140,11 +179,6 @@ export async function validateAuthorizedProvisioningProfile(
 
   if (env[TETI_PROVISIONING_MODE] !== "real") {
     errors.push(createLifecycleError("ACCOUNT_CREATE_FAILED", "Real provisioning mode is required.", { recoverable: false }));
-  }
-
-  const relay = validateRealValidationRelayConfig(env);
-  for (const error of relay.errors) {
-    errors.push(createLifecycleError("ACCOUNT_CREATE_FAILED", error, { recoverable: false }));
   }
 
   if (profile.root !== profile.productionRoot) {
@@ -202,11 +236,6 @@ export async function validateRealProvisioningProfile(
         { recoverable: false }
       )
     );
-  }
-
-  const relay = validateRealValidationRelayConfig(env);
-  for (const error of relay.errors) {
-    errors.push(createLifecycleError("ACCOUNT_CREATE_FAILED", error, { recoverable: false }));
   }
 
   return {

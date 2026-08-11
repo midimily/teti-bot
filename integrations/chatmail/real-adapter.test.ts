@@ -3,7 +3,6 @@ import test from "node:test";
 import { RealChatmailAdapter } from "./real-adapter.ts";
 import {
   ChatmailProvisioningError,
-  DEFAULT_CHATMAIL_ACCOUNT_QR,
   RpcChatmailProvisioner
 } from "./provisioner.ts";
 import { ChatmailTransportError } from "./stdio-transport.ts";
@@ -34,6 +33,8 @@ import type {
   ReceiveChatmailMessagesInput,
   SendChatmailMessageInput
 } from "./types.ts";
+
+const TEST_CHATMAIL_ACCOUNT_QR = "dcaccount:mail.seep.im";
 
 test("real adapter reports RPC unavailable when no deltachat-rpc-server transport is configured", async () => {
   const adapter = new RealChatmailAdapter(new UnconfiguredChatmailRpcClient());
@@ -998,7 +999,9 @@ test("chatmail provisioner creates identity from display name without exposing p
   const rpc = new RecordingChatmailRpcClient();
   const provisioner = new RpcChatmailProvisioner(rpc);
 
-  const identity = await provisioner.createIdentity("Alex");
+  const identity = await provisioner.createIdentity("Alex", {
+    accountQr: TEST_CHATMAIL_ACCOUNT_QR
+  });
 
   assert.deepEqual(identity, {
     accountId: 7,
@@ -1020,7 +1023,7 @@ test("chatmail provisioner creates identity from display name without exposing p
       accountId: 7,
       input: {
         displayName: "Alex",
-        qr: DEFAULT_CHATMAIL_ACCOUNT_QR
+        qr: TEST_CHATMAIL_ACCOUNT_QR
       }
     }
   ]);
@@ -1044,7 +1047,7 @@ test("chatmail provisioner reports the relay configuration stage when it times o
   });
 
   await assert.rejects(
-    () => provisioner.createIdentity("Alex"),
+    () => provisioner.createIdentity("Alex", { accountQr: TEST_CHATMAIL_ACCOUNT_QR }),
     (error) => {
       assert.equal(error instanceof ChatmailProvisioningError, true);
       assert.equal((error as ChatmailProvisioningError).code, "CM_CFG_TIMEOUT");
@@ -1071,7 +1074,7 @@ test("chatmail provisioner preserves an accounts.lock transport diagnosis", asyn
   const provisioner = new RpcChatmailProvisioner(rpc);
 
   await assert.rejects(
-    () => provisioner.createIdentity("Alex"),
+    () => provisioner.createIdentity("Alex", { accountQr: TEST_CHATMAIL_ACCOUNT_QR }),
     (error) => {
       assert.equal(error instanceof ChatmailProvisioningError, true);
       assert.equal((error as ChatmailProvisioningError).code, "CM_RPC_LOCKED");

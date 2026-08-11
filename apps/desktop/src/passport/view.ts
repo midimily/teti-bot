@@ -17,6 +17,7 @@ const codexIconUrl = new URL("../../assets/codex-status.png", import.meta.url).h
 export function createAiPassportPanel(viewModel: AiPassportPanelViewModel): HTMLElement {
   const panel = document.createElement("div");
   panel.className = "teti-header-panel teti-ai-status-panel";
+  panel.dataset.scrollKey = "passport";
   panel.hidden = !viewModel.open;
   const panelHeading = document.createElement("div");
   panelHeading.className = "teti-panel-heading";
@@ -65,6 +66,7 @@ export function createPassportSettingsPanel(
 ): HTMLElement {
   const panel = document.createElement("div");
   panel.className = "teti-header-panel teti-sharing-panel";
+  panel.dataset.scrollKey = "settings";
   panel.hidden = !viewModel.open;
   const panelHeading = document.createElement("div");
   panelHeading.className = "teti-panel-heading";
@@ -85,16 +87,16 @@ export function createPassportSettingsPanel(
   identityValue.textContent = viewModel.identityLabel;
   identityValue.title = viewModel.identityLabel;
   identity.append(identityKey, identityValue);
-  const registry = document.createElement("div");
-  registry.className = "teti-settings-identity-row";
-  const registryKey = document.createElement("span");
-  registryKey.className = "teti-settings-label";
-  registryKey.textContent = "公开状态";
-  const registryValue = document.createElement("span");
-  registryValue.className = `teti-settings-identity-value is-${viewModel.registryTone}`;
-  registryValue.textContent = viewModel.registryLabel;
-  registry.append(registryKey, registryValue);
-  overview.append(identity, registry);
+  const networkIdentity = document.createElement("div");
+  networkIdentity.className = "teti-settings-identity-row";
+  const networkIdentityKey = document.createElement("span");
+  networkIdentityKey.className = "teti-settings-label";
+  networkIdentityKey.textContent = "Network 身份";
+  const networkIdentityValue = document.createElement("span");
+  networkIdentityValue.className = `teti-settings-identity-value is-${viewModel.networkIdentityTone}`;
+  networkIdentityValue.textContent = viewModel.networkIdentityLabel;
+  networkIdentity.append(networkIdentityKey, networkIdentityValue);
+  overview.append(identity, networkIdentity);
   const networkEnvironment = document.createElement("section");
   networkEnvironment.className = "teti-settings-card teti-network-environment";
   networkEnvironment.setAttribute("aria-label", "Teti Network 环境");
@@ -166,11 +168,14 @@ export function createPassportSettingsPanel(
     panel.append(createOsaurusNativeChildSection(viewModel, controller));
   }
   if (memoryController) panel.append(createChildMemorySection(memoryController, childAgents));
-  panel.append(createBuildInformation(viewModel));
+  panel.append(createBuildInformation(viewModel, controller));
   return panel;
 }
 
-function createBuildInformation(viewModel: PassportSettingsViewModel): HTMLElement {
+function createBuildInformation(
+  viewModel: PassportSettingsViewModel,
+  controller?: PassportController
+): HTMLElement {
   const footer = document.createElement("footer");
   footer.className = "teti-build-information";
   footer.setAttribute("aria-label", "Teti 程序版本与构建信息");
@@ -179,6 +184,29 @@ function createBuildInformation(viewModel: PassportSettingsViewModel): HTMLEleme
   versionLabel.textContent = "程序版本";
   const version = document.createElement("code");
   version.textContent = viewModel.appVersion;
+  const logout = document.createElement("button");
+  logout.type = "button";
+  logout.className = "teti-local-logout";
+  logout.dataset.focusKey = "settings-local-logout";
+  logout.textContent = viewModel.localLogoutBusy
+    ? "注销中"
+    : viewModel.localLogoutConfirmationRequired
+      ? "取消"
+      : "注销";
+  logout.disabled = viewModel.localLogoutBusy;
+  logout.setAttribute(
+    "aria-label",
+    viewModel.localLogoutConfirmationRequired
+      ? "取消注销本机 Teti Profile"
+      : "注销并清理本机 Teti Profile"
+  );
+  logout.addEventListener("click", () => {
+    if (viewModel.localLogoutConfirmationRequired) {
+      controller?.cancelLocalProfileLogout();
+    } else {
+      controller?.requestLocalProfileLogout();
+    }
+  });
 
   const timestampLabel = document.createElement("span");
   timestampLabel.textContent = "构建时间（UTC）";
@@ -188,7 +216,29 @@ function createBuildInformation(viewModel: PassportSettingsViewModel): HTMLEleme
     timestamp.dateTime = viewModel.buildTimestamp;
   }
 
-  footer.append(versionLabel, version, timestampLabel, timestamp);
+  footer.append(versionLabel, version, logout, timestampLabel, timestamp);
+  if (viewModel.localLogoutConfirmationRequired) {
+    const confirmation = document.createElement("div");
+    confirmation.className = "teti-local-logout-confirmation";
+    confirmation.setAttribute("role", "group");
+    confirmation.setAttribute("aria-label", "确认注销本机 Teti Profile");
+    const warning = document.createElement("small");
+    warning.textContent = "将清除本机 Profile、Network 凭据、建联缓存和消息数据；服务器身份暂不删除。";
+    const confirm = document.createElement("button");
+    confirm.type = "button";
+    confirm.className = "teti-local-logout-confirm";
+    confirm.textContent = "确认注销";
+    confirm.addEventListener("click", () => void controller?.confirmLocalProfileLogout());
+    confirmation.append(warning, confirm);
+    footer.prepend(confirmation);
+  }
+  if (viewModel.localLogoutError) {
+    const error = document.createElement("small");
+    error.className = "teti-local-logout-error";
+    error.setAttribute("role", "alert");
+    error.textContent = viewModel.localLogoutError;
+    footer.append(error);
+  }
   return footer;
 }
 

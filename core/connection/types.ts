@@ -48,6 +48,11 @@ export interface TetiConnectionRecord {
   direction: TetiConnectionDirection;
   remoteTetiId: string;
   remoteAddress: string;
+  /**
+   * Chatmail/OpenPGP delivery key copied from the peer's Network Public Identity.
+   * This is transport bootstrap data only; it never grants Relationship authority.
+   */
+  remotePublicKey?: string;
   request: TetiConnectionRequest;
   createdAt: string;
   updatedAt: string;
@@ -63,6 +68,8 @@ export interface TetiConnectionRecord {
     etag: `"relationship-r${number}"`;
     blockedBy: "self" | "peer" | null;
     stateChangedAt: string;
+    /** Canonical Network document digest used to detect same-revision divergence. */
+    documentFingerprint?: string;
   };
 }
 
@@ -78,6 +85,11 @@ export function isTetiConnectionArchived(connection: TetiConnectionRecord): bool
 export function isTetiConnectionConfirmed(connection: TetiConnectionRecord): boolean {
   return connection.state === TetiConnectionState.Confirmed
     && !isTetiConnectionArchived(connection);
+}
+
+export function isNetworkRelationshipConfirmed(connection: TetiConnectionRecord): boolean {
+  return isTetiConnectionConfirmed(connection)
+    && connection.networkRelationship?.state === "confirmed";
 }
 
 export type TetiConnectionEnvelopeType =

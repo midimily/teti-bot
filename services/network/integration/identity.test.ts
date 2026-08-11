@@ -11,42 +11,51 @@ import {
 import { DEVELOPMENT_TETI_NETWORK_BASE_URL, resolveTetiNetworkBaseUrl } from "../config.ts";
 import { TetiNetworkClientError } from "../errors.ts";
 import { TetiNetworkIdentityService } from "../identity-service.ts";
+import { MemoryTetiNetworkRelayBindingStore } from "../relay-binding-store.ts";
+import { TetiNetworkRelayService } from "../relay-service.ts";
 import {
   createTetiNetworkNonce,
   generateTetiNetworkSigningKey
 } from "../signing.ts";
 
-test("Beta 0.3.5 App preserves the local Revision 6 identity/auth lifecycle", async () => {
+test("Beta 0.3.8 App preserves the local Revision 8 identity/auth lifecycle", async () => {
+  const runId = randomUUID();
+  const adoptedId = "teti_old000001";
+  const adoptedAddress = "old000001@mail.seep.im";
+  const registeredCode = canonicalCode();
+  const registeredAddress = `${registeredCode}@mail.seep.im`;
+  const registrationCredentials = freshCredentials();
   const baseUrl = resolveTetiNetworkBaseUrl({
     TETI_NETWORK_BASE_URL: process.env.TETI_NETWORK_BASE_URL ?? DEVELOPMENT_TETI_NETWORK_BASE_URL
   });
   const client = new HttpTetiNetworkClient({
     baseUrl,
-    clientVersion: "0.3.5",
+    clientVersion: "0.3.8",
     clientPlatform: "macos"
   });
   const bootstrap = await client.getBootstrap();
-  assert.equal(bootstrap.contractRevision, 6);
+  assert.equal(bootstrap.contractRevision, 8);
   assert.equal(bootstrap.capabilities.identity, true);
   assert.equal(bootstrap.capabilities.clientAuthentication, true);
 
   // First-claim adoption deliberately runs before registration on a fresh dev DB.
   const adopted = await createIdentityHarness({
     client,
-    account: account("teti_old000001", "old000001@mail.seep.im"),
-    credentials: adoptionCredentials(),
-    idempotencyPrefix: "local-adopt-beta032-v1"
+    account: account(adoptedId, adoptedAddress),
+    credentials: legacyAdoptionCredentials(),
+    idempotencyPrefix: "local-adopt-beta032-v1",
+    appVersion: "0.3.3"
   });
   const adoptedAccount = await adopted.service.synchronize();
-  assert.equal(adoptedAccount.id, "teti_old000001");
-  assert.equal(adoptedAccount.address, "old000001@mail.seep.im");
+  assert.equal(adoptedAccount.id, adoptedId);
+  assert.equal(adoptedAccount.address, adoptedAddress);
   assert.equal((await adopted.service.synchronize()).networkIdentity?.state, "active");
 
   const clientLifecycle = identityService(
     client,
     adopted.accountStorage,
     adopted.credentialStore,
-    `local-client-beta032:${randomUUID()}`
+    `local-client-beta037:${runId}`
   );
   const newClient = generateTetiNetworkSigningKey();
   const enrolled = await clientLifecycle.enrollClientInstance(newClient, {
@@ -60,14 +69,14 @@ test("Beta 0.3.5 App preserves the local Revision 6 identity/auth lifecycle", as
   const replayRequestId = randomUUID();
   const replayClient = new HttpTetiNetworkClient({
     baseUrl,
-    clientVersion: "0.3.5",
+    clientVersion: "0.3.8",
     clientPlatform: "ios",
     requestIdFactory: () => replayRequestId,
     nonceFactory: () => replayNonce,
     now: () => new Date(bootstrap.serverTime)
   });
   const enrolledAuth = { clientInstanceId: enrolled.id, signingKey: newClient };
-  assert.equal((await replayClient.getIdentitySelf(enrolledAuth)).identity.tetiId, "teti_old000001");
+  assert.equal((await replayClient.getIdentitySelf(enrolledAuth)).identity.tetiId, adoptedId);
   await assert.rejects(
     () => replayClient.getIdentitySelf(enrolledAuth),
     (error) => error instanceof TetiNetworkClientError && error.code === "REQUEST_REPLAYED"
@@ -84,35 +93,48 @@ test("Beta 0.3.5 App preserves the local Revision 6 identity/auth lifecycle", as
   const registered = await createIdentityHarness({
     client,
     account: {
-      ...account("teti_fresh0321", "fresh0321@mail.seep.im"),
+      ...account("teti_fresh0321", registeredAddress),
       networkIdentity: { schemaVersion: 1, mode: "register", state: "pending" }
     },
-    credentials: registrationCredentials(),
-    idempotencyPrefix: "local-register-beta032-v1"
+    credentials: structuredClone(registrationCredentials),
+    idempotencyPrefix: `local-register-beta037:${runId}`
   });
   const registeredAccount = await registered.service.synchronize();
   assert.notEqual(registeredAccount.id, "teti_fresh0321");
-  assert.equal(registeredAccount.address, "fresh0321@mail.seep.im");
+  assert.equal(registeredAccount.address, registeredAddress);
   assert.equal(registeredAccount.chatmailAccountId, 7);
+
+  const relayStore = new MemoryTetiNetworkRelayBindingStore();
+  const relayService = new TetiNetworkRelayService({
+    client,
+    accountStorage: registered.accountStorage,
+    store: relayStore,
+    environment: "local_development",
+    getAuthentication: () => registered.service.getAuthenticatedSigner()
+  });
+  const relayBinding = await relayService.synchronize();
+  assert.equal(relayBinding.document.active?.address, registeredAccount.address);
+  assert.equal(relayBinding.document.active?.transportPublicKey, null);
+  assert.equal((await relayStore.load())?.environment, "local_development");
 
   const duplicate = await createIdentityHarness({
     client,
     account: {
-      ...account("teti_fresh0321", "fresh0321@mail.seep.im"),
+      ...account("teti_fresh0321", registeredAddress),
       networkIdentity: { schemaVersion: 1, mode: "register", state: "pending" }
     },
-    credentials: registrationCredentials(),
-    idempotencyPrefix: "local-register-duplicate-beta032-v1"
+    credentials: structuredClone(registrationCredentials),
+    idempotencyPrefix: `local-register-duplicate-beta037:${runId}`
   });
   assert.equal((await duplicate.service.synchronize()).id, registeredAccount.id);
 
   const keyConflict = await createIdentityHarness({
     client,
     account: {
-      ...account("teti_other0321", "other0321@mail.seep.im"),
+      ...account("teti_other0321", `${canonicalCode()}@mail.seep.im`),
       networkIdentity: { schemaVersion: 1, mode: "register", state: "pending" }
     },
-    credentials: registrationCredentials(),
+    credentials: structuredClone(registrationCredentials),
     idempotencyPrefix: `local-register-conflict:${randomUUID()}`
   });
   await assert.rejects(
@@ -126,7 +148,7 @@ test("Beta 0.3.5 App preserves the local Revision 6 identity/auth lifecycle", as
     client,
     registered.accountStorage,
     registered.credentialStore,
-    "local-register-beta032-v1"
+    `local-register-beta037:${runId}`
   );
   assert.equal((await restarted.synchronize()).id, registeredAccount.id);
 });
@@ -136,6 +158,7 @@ async function createIdentityHarness(input: {
   account: TetiAccount;
   credentials: TetiNetworkCredentialRecord;
   idempotencyPrefix: string;
+  appVersion?: string;
 }) {
   const accountStorage = new MemoryTetiAccountStorage();
   await accountStorage.save(input.account);
@@ -144,7 +167,13 @@ async function createIdentityHarness(input: {
   return {
     accountStorage,
     credentialStore,
-    service: identityService(input.client, accountStorage, credentialStore, input.idempotencyPrefix)
+    service: identityService(
+      input.client,
+      accountStorage,
+      credentialStore,
+      input.idempotencyPrefix,
+      input.appVersion
+    )
   };
 }
 
@@ -152,13 +181,15 @@ function identityService(
   client: HttpTetiNetworkClient,
   accountStorage: MemoryTetiAccountStorage,
   credentialStore: MemoryTetiNetworkCredentialStore,
-  prefix: string
+  prefix: string,
+  appVersion = "0.3.8"
 ): TetiNetworkIdentityService {
   return new TetiNetworkIdentityService({
     client,
     accountStorage,
     credentialStore,
-    appVersion: "0.3.3",
+    environment: "local_development",
+    appVersion,
     platform: "macos",
     adoptionGrant: "teti-development-first-claim",
     idempotencyKeyFactory: (operation) => `${prefix}:${operation}`
@@ -177,7 +208,23 @@ function account(id: string, address: string): TetiAccount {
   };
 }
 
-function adoptionCredentials(): TetiNetworkCredentialRecord {
+function freshCredentials(): TetiNetworkCredentialRecord {
+  const identityRoot = generateTetiNetworkSigningKey();
+  const clientInstance = generateTetiNetworkSigningKey();
+  return {
+    schemaVersion: 1,
+    identityRoot: {
+      privateSeed: identityRoot.privateSeed,
+      publicKey: identityRoot.publicKey
+    },
+    clientInstance: {
+      privateSeed: clientInstance.privateSeed,
+      publicKey: clientInstance.publicKey
+    }
+  };
+}
+
+function legacyAdoptionCredentials(): TetiNetworkCredentialRecord {
   return {
     schemaVersion: 1,
     identityRoot: {
@@ -191,16 +238,6 @@ function adoptionCredentials(): TetiNetworkCredentialRecord {
   };
 }
 
-function registrationCredentials(): TetiNetworkCredentialRecord {
-  return {
-    schemaVersion: 1,
-    identityRoot: {
-      privateSeed: "ed25519-seed:G-lO7ghQ7mxHYRYk1G0BKNjRR8GI9S6LDkbiQYsnwdg",
-      publicKey: "ed25519:zalosR03yQuAjSutFaYyR3a40sMwE-_XSo0Z3rwu728"
-    },
-    clientInstance: {
-      privateSeed: "ed25519-seed:P-2SaeRB68nAscuLX1r5CVlAwG7g8W4oznI4j6xA-54",
-      publicKey: "ed25519:3A4KHA_YBPCCfwieCUVPlB1x9xkZIsHt01_-qa0aU8U"
-    }
-  };
+function canonicalCode(): string {
+  return randomUUID().replaceAll("-", "").slice(0, 9);
 }

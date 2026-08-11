@@ -1,29 +1,25 @@
+import { randomBytes } from "node:crypto";
 import type { ChatmailAdapter } from "../../integrations/chatmail/types.ts";
 import { validateTetiDisplayName } from "./display-name.ts";
-import { assertAddressMatchesRelay } from "../../integrations/chatmail/relay-config.ts";
 import { RealChatmailAdapter } from "../../integrations/chatmail/real-adapter.ts";
 import {
   RuntimeChatmailProvisioner,
   type ChatmailProvisioner
 } from "../../integrations/chatmail/provisioner.ts";
 import { UnconfiguredChatmailRpcClient } from "../../integrations/chatmail/rpc-client.ts";
-import type { DiscoveryRegistrySyncClient } from "../../services/discovery/registry-client.ts";
-import { RegistryClientError } from "../../services/discovery/registry-client.ts";
-import { LegacyWorkerRegistrySyncAdapter } from "../../services/network/legacy-worker-adapter.ts";
 import {
   environmentScanToPublicProfile,
   scanEnvironment
 } from "../environment/scanner.ts";
 import type { EnvironmentScan } from "../environment/types.ts";
-import { normalizeTetiChatmailAddress } from "../identity/public-id.ts";
+import {
+  normalizeTetiPublicId,
+  normalizeTetiRelayChatmailAddress
+} from "../identity/public-id.ts";
 import {
   TETI_ACCOUNT_VERSION,
   createDefaultPublicProfile,
-  getTetiId,
-  getTetiIdFromAddress,
   type CreateTetiAccountInput,
-  type DiscoveryRegistrationPayload,
-  type RegistryStatus,
   type TetiAccount,
   type TetiStatus
 } from "./model.ts";
@@ -36,9 +32,9 @@ export interface TetiAccountManagerOptions {
   storage?: TetiAccountStorage;
   chatmailAdapter?: ChatmailAdapter;
   chatmailProvisioner?: ChatmailProvisioner;
-  discoveryClient?: DiscoveryRegistrySyncClient;
   environmentScanner?: () => Promise<EnvironmentScan>;
   expectedAddressSuffix?: string;
+  provisionalTetiIdFactory?: () => string;
   onCreationStage?: (stage: TetiAccountCreationStage, account?: TetiAccount) => Promise<void> | void;
 }
 
@@ -52,10 +48,10 @@ export class TetiAccountManager {
   private readonly storage: TetiAccountStorage;
   private readonly chatmailAdapter: ChatmailAdapter;
   private readonly chatmailProvisioner?: ChatmailProvisioner;
-  private readonly discoveryClient: DiscoveryRegistrySyncClient;
   private readonly environmentScanner: () => Promise<EnvironmentScan>;
   private readonly shouldUseProvisioner: boolean;
   private readonly expectedAddressSuffix?: string;
+  private readonly provisionalTetiIdFactory: () => string;
   private readonly onCreationStage?: TetiAccountManagerOptions["onCreationStage"];
 
   constructor(options: TetiAccountManagerOptions = {}) {
@@ -66,9 +62,9 @@ export class TetiAccountManager {
     this.chatmailAdapter =
       options.chatmailAdapter ?? new RealChatmailAdapter(new UnconfiguredChatmailRpcClient());
     this.shouldUseProvisioner = options.chatmailProvisioner !== undefined || !options.chatmailAdapter;
-    this.discoveryClient = options.discoveryClient ?? new LegacyWorkerRegistrySyncAdapter();
     this.environmentScanner = options.environmentScanner ?? scanEnvironment;
     this.expectedAddressSuffix = options.expectedAddressSuffix;
+    this.provisionalTetiIdFactory = options.provisionalTetiIdFactory ?? createProvisionalTetiId;
     this.onCreationStage = options.onCreationStage;
   }
 
@@ -81,7 +77,9 @@ export class TetiAccountManager {
     const displayName = input.displayName ?? input.name;
     const chatmailIdentity =
       this.shouldUseProvisioner && this.chatmailProvisioner
-        ? await this.chatmailProvisioner.createIdentity(requireDisplayName(displayName))
+        ? await this.chatmailProvisioner.createIdentity(requireDisplayName(displayName), {
+            accountQr: input.chatmailQr
+          })
         : await this.chatmailAdapter.createAccount({
             address: input.address,
             password: input.chatmailPassword,
@@ -93,7 +91,7 @@ export class TetiAccountManager {
       assertAddressMatchesRelay(chatmailIdentity.address, this.expectedAddressSuffix);
     }
 
-    const canonicalAddress = normalizeTetiChatmailAddress(chatmailIdentity.address);
+    const canonicalAddress = normalizeTetiRelayChatmailAddress(chatmailIdentity.address);
 
     const environmentProfile = environmentScanToPublicProfile(await this.environmentScanner());
     const publicProfile = createDefaultPublicProfile({
@@ -106,7 +104,9 @@ export class TetiAccountManager {
     });
     const account: TetiAccount = {
       version: TETI_ACCOUNT_VERSION,
-      id: getTetiIdFromAddress(canonicalAddress),
+      // Network replaces this recovery-only placeholder with the authoritative
+      // Teti ID during the immediately following register transaction.
+      id: normalizeTetiPublicId(this.provisionalTetiIdFactory()),
       address: canonicalAddress,
       chatmailAccountId: chatmailIdentity.accountId,
       publicKey: chatmailIdentity.publicKey,
@@ -146,7 +146,7 @@ export class TetiAccountManager {
     if (!account) {
       return {
         exists: false,
-        registry: { state: "unknown" },
+        networkIdentity: { state: "unknown" },
         onlineStatus: "unknown"
       };
     }
@@ -154,30 +154,9 @@ export class TetiAccountManager {
     return {
       exists: true,
       address: account.address,
-      registry: await this.readRegistryStatus(account),
+      networkIdentity: localNetworkIdentityStatus(account),
       onlineStatus: "unknown"
     };
-  }
-
-  async ensureTetiRegistration(): Promise<TetiAccount> {
-    const account = await this.storage.load();
-    if (!account) {
-      throw new Error("A local Teti account is required before synchronizing discovery.");
-    }
-
-    const status = await this.readRegistryStatus(account);
-    if (status.state === "registered") {
-      return this.refreshTetiEnvironment();
-    }
-    if (status.state === "not_registered") {
-      try {
-        await this.discoveryClient.registerIdentity(toDiscoveryRegistrationPayload(account));
-      } catch (error) {
-        throw new RegistryStatusError(registryStatusForError(error));
-      }
-      return account;
-    }
-    throw new RegistryStatusError(status);
   }
 
   async deleteTetiAccount(): Promise<void> {
@@ -186,7 +165,6 @@ export class TetiAccountManager {
       return;
     }
 
-    await this.discoveryClient.deleteIdentity(getTetiId(account));
     await this.chatmailAdapter.deleteAccount({
       accountId: account.chatmailAccountId
     });
@@ -213,9 +191,6 @@ export class TetiAccountManager {
     };
 
     await this.storage.save(updatedAccount);
-    await this.discoveryClient.heartbeatIdentity({
-      id: getTetiId(updatedAccount)
-    });
 
     return updatedAccount;
   }
@@ -224,61 +199,16 @@ export class TetiAccountManager {
     await this.onCreationStage?.(stage, account);
   }
 
-  private async readRegistryStatus(account: TetiAccount): Promise<RegistryStatus> {
-    const checkedAt = new Date().toISOString();
-    try {
-      const identity = await this.discoveryClient.getIdentity(getTetiId(account));
-      if (!identity) return { state: "not_registered", checkedAt };
-      if (
-        identity.address !== account.address
-        || identity.publicKey !== account.publicKey
-        || identity.displayName !== account.displayName
-      ) {
-        return {
-          state: "conflict",
-          checkedAt,
-          errorCode: "REG_IDENTITY_MISMATCH",
-          retryable: false
-        };
-      }
-      return { state: "registered", checkedAt };
-    } catch (error) {
-      return registryStatusForError(error, checkedAt);
-    }
-  }
 }
 
-function registryStatusForError(
-  error: unknown,
-  checkedAt = new Date().toISOString()
-): RegistryStatus {
-  if (error instanceof RegistryClientError) {
-    return {
-      state: error.kind === "conflict"
-        ? "conflict"
-        : error.kind === "rejected"
-          ? "rejected"
-          : "unreachable",
-      checkedAt,
-      errorCode: error.code,
-      retryable: error.retryable
-    };
-  }
+function localNetworkIdentityStatus(account: TetiAccount): TetiStatus["networkIdentity"] {
+  const binding = account.networkIdentity;
+  if (!binding) return { state: "unknown" };
   return {
-    state: "unreachable",
-    checkedAt,
-    errorCode: "REG_UNKNOWN",
-    retryable: true
+    state: binding.state,
+    ...(binding.lastVerifiedAt ? { checkedAt: binding.lastVerifiedAt } : {}),
+    ...(binding.errorCode ? { errorCode: binding.errorCode } : {})
   };
-}
-
-export class RegistryStatusError extends Error {
-  readonly registry: RegistryStatus;
-
-  constructor(registry: RegistryStatus) {
-    super(`Registry synchronization failed with state ${registry.state} (${registry.errorCode ?? "unknown"}).`);
-    this.registry = { ...registry };
-  }
 }
 
 export class LocalAccountPersistenceError extends Error {
@@ -295,21 +225,15 @@ function requireDisplayName(displayName: string | undefined): string {
   return validation.value;
 }
 
-export function toDiscoveryRegistrationPayload(account: TetiAccount): DiscoveryRegistrationPayload {
-  const payload: DiscoveryRegistrationPayload = {
-    version: TETI_ACCOUNT_VERSION,
-    id: getTetiId(account),
-    address: account.address,
-    publicProfile: account.publicProfile
-  };
+function createProvisionalTetiId(): string {
+  const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789";
+  return `teti_${[...randomBytes(9)]
+    .map((value) => alphabet[value % alphabet.length])
+    .join("")}`;
+}
 
-  if (account.publicKey) {
-    payload.publicKey = account.publicKey;
+function assertAddressMatchesRelay(address: string, expectedAddressSuffix: string): void {
+  if (!address.toLowerCase().endsWith(expectedAddressSuffix.toLowerCase())) {
+    throw new Error(`Chatmail address must end in ${expectedAddressSuffix}.`);
   }
-
-  if (account.displayName) {
-    payload.displayName = account.displayName;
-  }
-
-  return payload;
 }

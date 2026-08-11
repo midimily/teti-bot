@@ -14,12 +14,12 @@ import { TetiNetworkIdentityService } from "../identity-service.ts";
 import { TetiNetworkProfileService } from "../profile-service.ts";
 import { MemoryTetiNetworkProfileSyncStore } from "../profile-sync-store.ts";
 
-test("Beta 0.3.5 Runtime synchronizes PublicProfile against local Network Revision 6", async () => {
+test("Beta 0.3.8 Runtime synchronizes PublicProfile against local Network Revision 8", async () => {
   const client = new HttpTetiNetworkClient({
     baseUrl: resolveTetiNetworkBaseUrl({
       TETI_NETWORK_BASE_URL: process.env.TETI_NETWORK_BASE_URL ?? DEVELOPMENT_TETI_NETWORK_BASE_URL
     }),
-    clientVersion: "0.3.5",
+    clientVersion: "0.3.8",
     clientPlatform: "macos"
   });
   const accountStorage = new MemoryTetiAccountStorage();
@@ -30,6 +30,7 @@ test("Beta 0.3.5 Runtime synchronizes PublicProfile against local Network Revisi
     client,
     accountStorage,
     credentialStore,
+    environment: "local_development",
     // This deterministic first-claim fixture originated in Beta 0.3.2. A
     // bound ClientInstance keeps its enrollment version across App upgrades.
     appVersion: "0.3.3",

@@ -86,7 +86,7 @@ test("first-launch user copy avoids transport and credential internals", () => {
     { state: "naming", nameInput: "", submitting: false },
     { state: "creating_identity", nameInput: "Milo", submitting: true, phase: "provisioning_chatmail" },
     { state: "creating_identity", nameInput: "Milo", submitting: true, phase: "persisting_account" },
-    { state: "registering_discovery", nameInput: "Milo", submitting: true, phase: "registering_identity" },
+    { state: "synchronizing_network_identity", nameInput: "Milo", submitting: true, phase: "registering_identity" },
     { state: "fatal_error", nameInput: "", submitting: false }
   ] as const;
   const forbidden = /\b(IMAP|SMTP|Delta Chat RPC|RPC|DCACCOUNT|credentials|relay|cryptographic|keys|Chatmail)\b/i;
@@ -134,6 +134,12 @@ test("desktop shell exposes AI Passport and explicit Passport sharing consent", 
   assert.match(styles, /\.teti-task-header-button > svg\s*\{[\s\S]*color:\s*#70dafc;[\s\S]*filter:\s*saturate\(0\.78\);[\s\S]*opacity:\s*0\.82/);
   assert.match(styles, /\.teti-ai-status-panel,[\s\S]*rgba\(255, 255, 255, 0\.38\)/);
   assert.match(styles, /\.teti-sharing-panel[\s\S]*backdrop-filter:\s*blur\(28px\)/);
+  assert.match(passportView, /className = "teti-local-logout"/);
+  assert.doesNotMatch(passportView, /defaultView\?\.confirm|window\.confirm/);
+  assert.match(passportView, /controller\?\.requestLocalProfileLogout\(\)/);
+  assert.match(passportView, /controller\?\.confirmLocalProfileLogout\(\)/);
+  assert.match(passportView, /className = "teti-local-logout-confirmation"/);
+  assert.match(styles, /\.teti-local-logout\s*\{/);
   assert.equal(existsSync(join(desktopRoot, "assets", "codex-status.png")), true);
   assert.equal(existsSync(join(desktopRoot, "assets", "ai-tools-btn.png")), true);
   assert.equal(existsSync(join(desktopRoot, "assets", "settings.png")), true);

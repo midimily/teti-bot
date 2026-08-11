@@ -6,11 +6,9 @@ import test from "node:test";
 import {
   ALPHA_LOCAL_RESET_CONFIRMATION,
   LEGACY_TETI_DESKTOP_BUNDLE_ID,
-  ONBOARDING_REGISTRY_RESET_CONFIRMATION,
   ONBOARDING_RESET_CONFIRMATION,
   TETI_DESKTOP_BUNDLE_ID,
   assertAlphaLocalResetConfirmed,
-  assertOnboardingRegistryResetConfirmed,
   assertOnboardingResetConfirmed,
   defaultLocalResetTargets,
   onboardingResetTargets,
@@ -46,7 +44,7 @@ test("Alpha local reset removes first-install state locally without remote delet
 
     assert.equal(result.localOnly, true);
     assert.equal(result.remoteChatmailDeleted, false);
-    assert.equal(result.remoteDiscoveryDeleted, false);
+    assert.equal(result.remoteNetworkDeleted, false);
     assert.equal(result.results.find((item) => item.path === join(home, ".teti"))?.removed, true);
     await assert.rejects(() => stat(join(home, ".teti")), /ENOENT/);
     await assert.rejects(() => stat(targets[1]), /ENOENT/);
@@ -64,22 +62,13 @@ test("Alpha local reset recognizes current and legacy macOS UI containers withou
   assert.ok(targets.includes(join(home, "Library", "Application Support", LEGACY_TETI_DESKTOP_BUNDLE_ID)));
 });
 
-test("onboarding reset requires separate exact confirmations for local and Registry deletion", () => {
+test("onboarding reset requires the exact local confirmation", () => {
   assert.throws(
     () => assertOnboardingResetConfirmed(undefined),
     /RESET_TETI_ONBOARDING/
   );
   assert.doesNotThrow(
     () => assertOnboardingResetConfirmed(ONBOARDING_RESET_CONFIRMATION)
-  );
-  assert.throws(
-    () => assertOnboardingRegistryResetConfirmed(ONBOARDING_RESET_CONFIRMATION),
-    /DELETE_TETI_ONBOARDING_AND_REGISTRY/
-  );
-  assert.doesNotThrow(
-    () => assertOnboardingRegistryResetConfirmed(
-      ONBOARDING_REGISTRY_RESET_CONFIRMATION
-    )
   );
 });
 
@@ -114,11 +103,7 @@ test("onboarding reset clears first-launch state while preserving Chatmail accou
 
     assert.equal(result.preservedChatmail, true);
     assert.equal(result.localTetiId, "teti_abc123xyz");
-    assert.deepEqual(result.registry, {
-      requested: false,
-      deleted: false,
-      method: "not_requested"
-    });
+    assert.equal(result.remoteNetworkDeleted, false);
     await assert.rejects(() => stat(accountDir), /ENOENT/);
     await assert.rejects(() => stat(join(home, ".teti", "connections.json")), /ENOENT/);
     await assert.rejects(() => stat(uiState), /ENOENT/);
@@ -134,8 +119,12 @@ test("Beta 0.2 onboarding reset clears the active Store but preserves v2 Chatmai
     const storeDir = join(home, ".teti", "store-v2");
     const accountDir = join(storeDir, "account");
     const chatmailDir = join(storeDir, "credentials", "chatmail-accounts");
+    const productionNetworkDir = join(storeDir, "network", "production");
+    const developmentNetworkDir = join(storeDir, "network", "local_development");
     await mkdir(accountDir, { recursive: true });
     await mkdir(chatmailDir, { recursive: true });
+    await mkdir(productionNetworkDir, { recursive: true });
+    await mkdir(developmentNetworkDir, { recursive: true });
     await writeFile(
       join(accountDir, "account.json"),
       JSON.stringify({
@@ -153,6 +142,23 @@ test("Beta 0.2 onboarding reset clears the active Store but preserves v2 Chatmai
       await writeFile(join(storeDir, file), "{}", "utf8");
     }
     await writeFile(join(chatmailDir, "accounts.toml"), "preserved-v2", "utf8");
+    await writeFile(join(productionNetworkDir, "identity-credentials-v1.json"), "production", "utf8");
+    await writeFile(join(developmentNetworkDir, "identity-credentials-v1.json"), "development", "utf8");
+    await writeFile(
+      join(storeDir, "credentials", "teti-network-identity-v1.json"),
+      "legacy-unscoped",
+      "utf8"
+    );
+    await writeFile(
+      join(storeDir, "credentials", "teti-network-identity-v1.json.tmp"),
+      "legacy-unscoped-temporary",
+      "utf8"
+    );
+    await writeFile(
+      join(storeDir, "network-environment-v1.json"),
+      JSON.stringify({ schemaVersion: 1, useLocalDevelopmentNetwork: true }),
+      "utf8"
+    );
 
     const result = await resetTetiOnboarding({
       home,
@@ -160,8 +166,22 @@ test("Beta 0.2 onboarding reset clears the active Store but preserves v2 Chatmai
     });
 
     assert.equal(result.localTetiId, "teti_v2a123xyz");
+    assert.deepEqual(result.networkState, {
+      scope: "all_environments",
+      cleared: true
+    });
     await assert.rejects(() => stat(accountDir), /ENOENT/);
     await assert.rejects(() => stat(join(storeDir, "tasks.json")), /ENOENT/);
+    await assert.rejects(() => stat(join(storeDir, "network")), /ENOENT/);
+    await assert.rejects(
+      () => stat(join(storeDir, "credentials", "teti-network-identity-v1.json")),
+      /ENOENT/
+    );
+    await assert.rejects(
+      () => stat(join(storeDir, "credentials", "teti-network-identity-v1.json.tmp")),
+      /ENOENT/
+    );
+    await assert.rejects(() => stat(join(storeDir, "network-environment-v1.json")), /ENOENT/);
     assert.equal(await readFile(join(chatmailDir, "accounts.toml"), "utf8"), "preserved-v2");
   } finally {
     await rm(home, { recursive: true, force: true });
@@ -192,85 +212,6 @@ test("onboarding reset refuses to run while the Teti Runtime lock owner is alive
   }
 });
 
-test("optional Registry cleanup uses Cloudflare KV admin API before local removal", async () => {
-  const home = await mkdtemp(join(tmpdir(), "teti-onboarding-registry-"));
-  try {
-    const accountDir = join(home, ".teti", "account");
-    await mkdir(accountDir, { recursive: true });
-    await writeFile(
-      join(accountDir, "account.json"),
-      JSON.stringify({ id: "teti_abc123xyz" }),
-      "utf8"
-    );
-    const requests: Array<{ url: string; method?: string; authorization?: string }> = [];
-
-    const result = await resetTetiOnboarding({
-      home,
-      confirmation: ONBOARDING_RESET_CONFIRMATION,
-      registryConfirmation: ONBOARDING_REGISTRY_RESET_CONFIRMATION,
-      deleteRegistry: true,
-      env: {
-        CLOUDFLARE_ACCOUNT_ID: "account-id",
-        TETI_KV_NAMESPACE_ID: "namespace-id",
-        CLOUDFLARE_API_TOKEN: "admin-token"
-      },
-      fetchImpl: async (input, init) => {
-        const headers = new Headers(init?.headers);
-        requests.push({
-          url: String(input),
-          method: init?.method,
-          authorization: headers.get("authorization") ?? undefined
-        });
-        return Response.json({ success: true, result: null });
-      }
-    });
-
-    assert.deepEqual(result.registry, {
-      requested: true,
-      deleted: true,
-      method: "cloudflare_kv_admin"
-    });
-    assert.equal(requests.length, 1);
-    assert.equal(requests[0].method, "DELETE");
-    assert.equal(requests[0].authorization, "Bearer admin-token");
-    assert.match(requests[0].url, /teti%3Ateti_abc123xyz$/);
-    await assert.rejects(() => stat(accountDir), /ENOENT/);
-  } finally {
-    await rm(home, { recursive: true, force: true });
-  }
-});
-
-test("Registry cleanup failure keeps the local identity available for retry", async () => {
-  const home = await mkdtemp(join(tmpdir(), "teti-onboarding-registry-failure-"));
-  try {
-    const accountPath = join(home, ".teti", "account", "account.json");
-    await mkdir(join(home, ".teti", "account"), { recursive: true });
-    await writeFile(accountPath, JSON.stringify({ id: "teti_abc123xyz" }), "utf8");
-
-    await assert.rejects(
-      () => resetTetiOnboarding({
-        home,
-        confirmation: ONBOARDING_RESET_CONFIRMATION,
-        registryConfirmation: ONBOARDING_REGISTRY_RESET_CONFIRMATION,
-        deleteRegistry: true,
-        env: {
-          CLOUDFLARE_ACCOUNT_ID: "account-id",
-          TETI_KV_NAMESPACE_ID: "namespace-id",
-          CLOUDFLARE_API_TOKEN: "admin-token"
-        },
-        fetchImpl: async () => Response.json(
-          { success: false },
-          { status: 403 }
-        )
-      }),
-      /Local state was not removed/
-    );
-    assert.equal((await stat(accountPath)).isFile(), true);
-  } finally {
-    await rm(home, { recursive: true, force: true });
-  }
-});
-
 test("onboarding reset target list excludes the Chatmail credential directory", () => {
   const home = "/Users/tester";
   const targets = onboardingResetTargets(home);
@@ -282,6 +223,11 @@ test("onboarding reset target list excludes the Chatmail credential directory", 
   );
   assert.ok(targets.includes(join(home, ".teti", "account")));
   assert.ok(targets.includes(join(home, ".teti", "store-v2", "account")));
+  assert.ok(targets.includes(join(home, ".teti", "store-v2", "network")));
+  assert.ok(targets.includes(
+    join(home, ".teti", "store-v2", "credentials", "teti-network-identity-v1.json")
+  ));
+  assert.ok(targets.includes(join(home, ".teti", "store-v2", "network-environment-v1.json")));
   assert.ok(targets.includes(join(home, "Library", "Logs", "Teti")));
 });
 

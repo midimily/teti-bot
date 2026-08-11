@@ -43,6 +43,7 @@ test("confirmed connection can send application envelope", async () => {
   assert.equal(sent.envelope.fromTetiId, "teti_local0001");
   assert.equal(chatmailAdapter.sendCalls.length, 1);
   assert.equal(chatmailAdapter.sendCalls[0].peerAddress, "remote001@mail.seep.im");
+  assert.equal(chatmailAdapter.sendCalls[0].peerPublicKey, "remote-public-key");
   assert.deepEqual(JSON.parse(chatmailAdapter.sendCalls[0].text), sent.envelope);
 });
 
@@ -64,6 +65,66 @@ test("pending connection is rejected before sending", async () => {
     /Confirmed connection/
   );
   assert.equal(chatmailAdapter.sendCalls.length, 0);
+});
+
+test("fresh Network authorization fails closed before Chatmail send", async () => {
+  const accountStorage = new MemoryTetiAccountStorage();
+  await accountStorage.save(createLocalAccount());
+  const connectionStorage = new MemoryTetiConnectionStorage();
+  await connectionStorage.upsert(createConnection(TetiConnectionState.Confirmed));
+  const chatmailAdapter = new RecordingChatmailAdapter();
+  const checked: string[] = [];
+  const manager = new TetiApplicationManager({
+    accountStorage,
+    connectionStorage,
+    chatmailAdapter,
+    authorizePeer: async (peerTetiId) => {
+      checked.push(peerTetiId);
+      throw new Error("Network authorization unavailable");
+    }
+  });
+
+  await assert.rejects(
+    () => manager.sendPresence("request-1", {
+      status: "online",
+      timestamp: fixedNow,
+      collaborationProtocolEpoch: 2,
+      taskProtocolVersions: [6],
+      passportSchemaVersions: [4]
+    }),
+    /authorization unavailable/
+  );
+  assert.deepEqual(checked, ["teti_remote001"]);
+  assert.equal(chatmailAdapter.sendCalls.length, 0);
+});
+
+test("Chatmail failure remains distinct after fresh Network authorization succeeds", async () => {
+  const accountStorage = new MemoryTetiAccountStorage();
+  await accountStorage.save(createLocalAccount());
+  const connectionStorage = new MemoryTetiConnectionStorage();
+  await connectionStorage.upsert(createConnection(TetiConnectionState.Confirmed));
+  const chatmailAdapter = new RecordingChatmailAdapter();
+  chatmailAdapter.sendError = new Error("Chatmail unavailable");
+  const checked: string[] = [];
+  const manager = new TetiApplicationManager({
+    accountStorage,
+    connectionStorage,
+    chatmailAdapter,
+    authorizePeer: async (peerTetiId) => { checked.push(peerTetiId); }
+  });
+
+  await assert.rejects(
+    () => manager.sendPresence("request-1", {
+      status: "online",
+      timestamp: fixedNow,
+      collaborationProtocolEpoch: 2,
+      taskProtocolVersions: [6],
+      passportSchemaVersions: [4]
+    }),
+    /Chatmail unavailable/
+  );
+  assert.deepEqual(checked, ["teti_remote001"]);
+  assert.equal(chatmailAdapter.sendCalls.length, 1);
 });
 
 test("invalid application envelope is rejected", () => {
@@ -358,6 +419,7 @@ function createConnection(state: TetiConnectionState): TetiConnectionRecord {
     direction: "outgoing",
     remoteTetiId: "teti_remote001",
     remoteAddress: "remote001@mail.seep.im",
+    remotePublicKey: "remote-public-key",
     request: {
       version: 1,
       requestId: "request-1",
@@ -381,6 +443,7 @@ function createConnection(state: TetiConnectionState): TetiConnectionRecord {
 class RecordingChatmailAdapter implements ChatmailAdapter {
   readonly sendCalls: SendChatmailMessageInput[] = [];
   readonly receivedMessages: ChatmailReceivedMessage[] = [];
+  sendError: Error | null = null;
   private nextMessageId = 1;
 
   async createAccount(_input: CreateChatmailAccountInput): Promise<ChatmailIdentity> {
@@ -401,6 +464,7 @@ class RecordingChatmailAdapter implements ChatmailAdapter {
 
   async sendMessage(input: SendChatmailMessageInput): Promise<ChatmailSentMessage> {
     this.sendCalls.push(input);
+    if (this.sendError) throw this.sendError;
     return {
       messageId: this.nextMessageId++,
       chatId: input.accountId

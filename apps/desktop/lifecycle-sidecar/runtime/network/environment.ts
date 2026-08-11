@@ -2,10 +2,11 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import {
   DEFAULT_TETI_NETWORK_BASE_URL,
-  DEVELOPMENT_TETI_NETWORK_BASE_URL
+  DEVELOPMENT_TETI_NETWORK_BASE_URL,
+  type TetiNetworkEnvironment
 } from "../../../../../services/network/config.ts";
 
-export type TetiNetworkEnvironment = "production" | "local_development";
+export type { TetiNetworkEnvironment } from "../../../../../services/network/config.ts";
 
 export interface TetiNetworkEnvironmentPreference {
   schemaVersion: 1;

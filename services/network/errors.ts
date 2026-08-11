@@ -14,6 +14,14 @@ export type TetiNetworkErrorCode =
   | "RELATIONSHIP_TRANSITION_INVALID"
   | "RELATIONSHIP_BLOCKED"
   | "RELATIONSHIP_REVISION_CONFLICT"
+  | "RELAY_NOT_FOUND"
+  | "RELAY_UNAVAILABLE"
+  | "RELAY_BINDING_NOT_FOUND"
+  | "RELAY_BINDING_CONFLICT"
+  | "MAILBOX_ALREADY_BOUND"
+  | "RELAY_BINDING_TRANSITION_INVALID"
+  | "RELAY_BINDING_REVISION_CONFLICT"
+  | "RELAY_BINDING_ADOPTION_DENIED"
   | "IDENTITY_NOT_FOUND"
   | "IDENTITY_ALREADY_EXISTS"
   | "RELATIONSHIP_NOT_FOUND"
@@ -40,11 +48,20 @@ export type TetiNetworkOperation =
   | "relationship_list"
   | "relationship_get"
   | "relationship_get_by_peer"
+  | "relationship_authorization"
+  | "relationship_reconciliation_snapshot"
+  | "relationship_reconciliation_changes"
   | "relationship_request"
   | "relationship_accept"
   | "relationship_reject"
   | "relationship_block"
-  | "relationship_revoke";
+  | "relationship_revoke"
+  | "relay_list"
+  | "relay_binding_self"
+  | "relay_binding_create"
+  | "relay_binding_adopt"
+  | "relay_binding_activate"
+  | "relay_binding_revoke";
 
 export interface TetiNetworkClientErrorOptions {
   code: TetiNetworkErrorCode;

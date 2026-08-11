@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { TetiAccount } from "../../../../../core/account/model.ts";
 import type { TetiPublicProfile } from "../../../../../core/account/model.ts";
 import {
@@ -54,7 +55,8 @@ export function projectNetworkRelationshipRecovery(input: {
     state: document.state,
     etag: `"relationship-r${document.revision}"` as const,
     blockedBy: document.blockedBy,
-    stateChangedAt: document.stateChangedAt
+    stateChangedAt: document.stateChangedAt,
+    documentFingerprint: networkRelationshipDocumentFingerprint(document)
   };
   if (projection.archived) {
     return existing ? {
@@ -63,6 +65,7 @@ export function projectNetworkRelationshipRecovery(input: {
       direction: projection.direction,
       remoteTetiId: remoteIdentity.id,
       remoteAddress: remoteIdentity.address,
+      ...(remoteIdentity.publicKey ? { remotePublicKey: remoteIdentity.publicKey } : {}),
       updatedAt: document.updatedAt,
       networkRelationship
     } : null;
@@ -88,6 +91,7 @@ export function projectNetworkRelationshipRecovery(input: {
     direction: projection.direction,
     remoteTetiId: remoteIdentity.id,
     remoteAddress: remoteIdentity.address,
+    ...(remoteIdentity.publicKey ? { remotePublicKey: remoteIdentity.publicKey } : {}),
     request: {
       version: TETI_CONNECTION_VERSION,
       requestId: document.id,
@@ -120,4 +124,24 @@ function normalizeRecoveryProfile(profile: {
 
 export function isArchivedNetworkRelationship(connection: TetiConnectionRecord): boolean {
   return isTetiConnectionArchived(connection);
+}
+
+export function networkRelationshipDocumentFingerprint(
+  document: TetiNetworkRelationshipDocument
+): string {
+  const canonical = JSON.stringify({
+    schemaVersion: document.schemaVersion,
+    id: document.id,
+    revision: document.revision,
+    state: document.state,
+    peerTetiId: document.peerTetiId,
+    requesterTetiId: document.requesterTetiId,
+    addresseeTetiId: document.addresseeTetiId,
+    direction: document.direction,
+    blockedBy: document.blockedBy,
+    createdAt: document.createdAt,
+    updatedAt: document.updatedAt,
+    stateChangedAt: document.stateChangedAt
+  });
+  return createHash("sha256").update(canonical, "utf8").digest("base64url");
 }

@@ -22,7 +22,7 @@ export function projectNetworkPublicProfile(
         capabilityIds: canonicalSlugs(callableAgents.flatMap((agent) => agent.capabilityIds), 32)
       }
     },
-    // Existing Beta identities were public Registry identities. This flag is
+    // Existing Beta identities were public Network identities. This flag is
     // deliberately independent from confirmed-peer PassportSharingPolicy.
     isDiscoverable: true
   };

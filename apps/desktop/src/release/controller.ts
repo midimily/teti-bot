@@ -22,6 +22,7 @@ export class ReleaseController {
   private readonly cancel: NonNullable<ReleaseControllerOptions["cancel"]>;
   private timer: unknown;
   private running = false;
+  private presentationKeyValue: string;
   private statusValue: LocalReleaseStatus = {
     schemaVersion: 1,
     state: "checking",
@@ -35,6 +36,7 @@ export class ReleaseController {
     this.onChange = options.onChange ?? (() => undefined);
     this.schedule = options.schedule ?? ((callback, delayMs) => setTimeout(callback, delayMs));
     this.cancel = options.cancel ?? ((handle) => clearTimeout(handle as ReturnType<typeof setTimeout>));
+    this.presentationKeyValue = releasePresentationKey(this.statusValue);
   }
 
   get status(): LocalReleaseStatus {
@@ -56,7 +58,11 @@ export class ReleaseController {
   private async refresh(): Promise<void> {
     try {
       this.statusValue = await this.client.getStatus();
-      this.onChange();
+      const presentationKey = releasePresentationKey(this.statusValue);
+      if (presentationKey !== this.presentationKeyValue) {
+        this.presentationKeyValue = presentationKey;
+        this.onChange();
+      }
     } catch {
       // Runtime owns reachability semantics; a bridge failure must never create a false update lock.
     } finally {
@@ -65,6 +71,11 @@ export class ReleaseController {
       }
     }
   }
+}
+
+function releasePresentationKey(status: LocalReleaseStatus): string {
+  const { checkedAt: _checkedAt, ...presentation } = status;
+  return JSON.stringify(presentation);
 }
 
 export class BridgeReleaseStatusClient implements ReleaseStatusClient {

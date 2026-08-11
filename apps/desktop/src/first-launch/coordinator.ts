@@ -1,10 +1,5 @@
-import type { DiscoveryClient } from "../../../../services/discovery/registry-client.ts";
 import { validateTetiDisplayName } from "../../../../core/account/display-name.ts";
-import type {
-  DiscoveryRegistrationPayload,
-  TetiAccount,
-  TetiStatus
-} from "../../../../core/account/model.ts";
+import type { TetiAccount, TetiStatus } from "../../../../core/account/model.ts";
 import {
   createFirstLaunchError,
   FirstLaunchStateMachine,
@@ -17,6 +12,7 @@ export interface FirstLaunchAccountLifecycle {
   loadTetiAccount(): Promise<TetiAccount | null>;
   createTetiAccount(input: { name: string }): Promise<TetiAccount>;
   getTetiStatus?(): Promise<TetiStatus>;
+  synchronizeNetworkIdentity(): Promise<TetiAccount>;
 }
 
 export interface FirstLaunchDiagnostics {
@@ -27,7 +23,6 @@ export interface FirstLaunchDiagnostics {
 export interface FirstLaunchCoordinatorOptions {
   accountLifecycle: FirstLaunchAccountLifecycle;
   notchWindow: NotchWindowController;
-  discoveryClient?: Pick<DiscoveryClient, "registerIdentity">;
   diagnostics?: FirstLaunchDiagnostics;
   readyCollapseDelayMs?: number;
   schedule?: (callback: () => void, delayMs: number) => unknown;
@@ -37,17 +32,15 @@ export class FirstLaunchCoordinator {
   private readonly stateMachine = new FirstLaunchStateMachine();
   private readonly accountLifecycle: FirstLaunchAccountLifecycle;
   private readonly notchWindow: NotchWindowController;
-  private readonly discoveryClient?: Pick<DiscoveryClient, "registerIdentity">;
   private readonly diagnostics: FirstLaunchDiagnostics;
   private readonly readyCollapseDelayMs: number;
   private readonly schedule: (callback: () => void, delayMs: number) => unknown;
   private creationInFlight: Promise<FirstLaunchSnapshot> | null = null;
-  private discoveryRetryInFlight: Promise<FirstLaunchSnapshot> | null = null;
+  private networkIdentityRetryInFlight: Promise<FirstLaunchSnapshot> | null = null;
 
   constructor(options: FirstLaunchCoordinatorOptions) {
     this.accountLifecycle = options.accountLifecycle;
     this.notchWindow = options.notchWindow;
-    this.discoveryClient = options.discoveryClient;
     this.diagnostics = options.diagnostics ?? new NoopDiagnostics();
     this.readyCollapseDelayMs = options.readyCollapseDelayMs ?? 900;
     this.schedule = options.schedule ?? ((callback, delayMs) => setTimeout(callback, delayMs));
@@ -121,26 +114,26 @@ export class FirstLaunchCoordinator {
     }
   }
 
-  async retryDiscoveryRegistration(): Promise<FirstLaunchSnapshot> {
-    if (this.discoveryRetryInFlight) {
+  async retryNetworkIdentity(): Promise<FirstLaunchSnapshot> {
+    if (this.networkIdentityRetryInFlight) {
       return this.snapshot;
     }
 
-    if (!this.discoveryClient) {
+    if (!this.accountLifecycle.synchronizeNetworkIdentity) {
       return this.stateMachine.transition({
         type: "registration_retry_failed",
         error: createFirstLaunchError(
-          "discovery_registration_failure",
+          "network_identity_failure",
           "Teti could not finish connecting yet."
         )
       });
     }
 
-    this.discoveryRetryInFlight = this.retryDiscovery();
+    this.networkIdentityRetryInFlight = this.retryNetworkIdentitySynchronization();
     try {
-      return await this.discoveryRetryInFlight;
+      return await this.networkIdentityRetryInFlight;
     } finally {
-      this.discoveryRetryInFlight = null;
+      this.networkIdentityRetryInFlight = null;
     }
   }
 
@@ -191,7 +184,7 @@ export class FirstLaunchCoordinator {
     }
   }
 
-  private async retryDiscovery(): Promise<FirstLaunchSnapshot> {
+  private async retryNetworkIdentitySynchronization(): Promise<FirstLaunchSnapshot> {
     this.stateMachine.transition({ type: "registration_retry_started" });
 
     try {
@@ -207,8 +200,8 @@ export class FirstLaunchCoordinator {
         });
       }
 
-      await this.discoveryClient?.registerIdentity(toDiscoveryRegistrationPayload(account));
-      const verified = await this.verifyLoadedAccount(account);
+      const synchronized = await this.accountLifecycle.synchronizeNetworkIdentity();
+      const verified = await this.verifyLoadedAccount(synchronized);
       const snapshot = this.stateMachine.transition({
         type: "registration_retry_succeeded",
         account: verified
@@ -216,11 +209,11 @@ export class FirstLaunchCoordinator {
       this.scheduleReadyCollapse();
       return snapshot;
     } catch (error) {
-      this.diagnostics.warn("first_launch_discovery_retry_failed", sanitizeError(error));
+      this.diagnostics.warn("first_launch_network_identity_retry_failed", sanitizeError(error));
       return this.stateMachine.transition({
         type: "registration_retry_failed",
         error: createFirstLaunchError(
-          "discovery_registration_failure",
+          "network_identity_failure",
           "Teti could not finish connecting yet."
         )
       });
@@ -335,9 +328,9 @@ function classifyCreationError(error: unknown): FirstLaunchError {
     );
   }
 
-  if (/(network|fetch|registry|discover|register|cloudflare|ECONN|ENOTFOUND|timeout)/i.test(message)) {
+  if (/(network|fetch|identity|register|ECONN|ENOTFOUND|timeout)/i.test(message)) {
     return createFirstLaunchError(
-      "discovery_registration_failure",
+      "network_identity_failure",
       "Teti could not finish connecting yet."
     );
   }
@@ -376,19 +369,4 @@ function redactSecretLikeText(text: string): string {
 class NoopDiagnostics implements FirstLaunchDiagnostics {
   warn(): void {}
   error(): void {}
-}
-
-function toDiscoveryRegistrationPayload(account: TetiAccount): DiscoveryRegistrationPayload {
-  const payload: DiscoveryRegistrationPayload = {
-    version: 1,
-    id: account.id,
-    address: account.address,
-    publicProfile: account.publicProfile
-  };
-
-  if (account.publicKey) {
-    payload.publicKey = account.publicKey;
-  }
-
-  return payload;
 }

@@ -11,6 +11,10 @@ import {
   type AgentManagementSnapshot
 } from "../../../../core/observation/management.ts";
 import { toPassportViewModel } from "./view-model.ts";
+import {
+  DEFAULT_TETI_NETWORK_BASE_URL,
+  DEVELOPMENT_TETI_NETWORK_BASE_URL
+} from "../../../../services/network/config.ts";
 
 const PASSPORT_READ_INTERVAL_MS = 3_000;
 
@@ -25,6 +29,7 @@ export interface PassportClient {
   getNetworkEnvironmentSettings?(): Promise<TetiNetworkEnvironmentSettingsDto>;
   setLocalDevelopmentNetwork?(enabled: boolean): Promise<TetiNetworkEnvironmentSettingsDto>;
   getPresenceStatus?(): Promise<RuntimePresenceStatusDto | null>;
+  logoutLocalProfile?(): Promise<never>;
 }
 
 export interface PassportControllerSnapshot {
@@ -43,6 +48,9 @@ export interface PassportControllerSnapshot {
   presence?: RuntimePresenceStatusDto;
   networkEnvironmentBusy?: boolean;
   networkEnvironmentError?: string;
+  localLogoutConfirmationRequired?: boolean;
+  localLogoutBusy?: boolean;
+  localLogoutError?: string;
 }
 
 export class PassportController {
@@ -82,6 +90,8 @@ export class PassportController {
       osaurusNative: { schemaVersion: 1, agentId: null, readiness: "unconfigured" },
       osaurusNativeBusy: false,
       networkEnvironmentBusy: false,
+      localLogoutConfirmationRequired: false,
+      localLogoutBusy: false,
       openPanel: null
     };
     this.lastPresentationKey = this.presentationKey();
@@ -120,13 +130,16 @@ export class PassportController {
   }
 
   togglePanel(panel: "passport" | "sharing"): void {
-    this.snapshotValue.openPanel = this.snapshotValue.openPanel === panel ? null : panel;
+    const nextPanel = this.snapshotValue.openPanel === panel ? null : panel;
+    this.snapshotValue.openPanel = nextPanel;
+    if (nextPanel !== "sharing") this.snapshotValue.localLogoutConfirmationRequired = false;
     this.notifyChange();
   }
 
   closePanel(notify = true): void {
     if (this.snapshotValue.openPanel === null) return;
     this.snapshotValue.openPanel = null;
+    this.snapshotValue.localLogoutConfirmationRequired = false;
     if (notify) this.notifyChange();
   }
 
@@ -231,6 +244,40 @@ export class PassportController {
     })();
     this.networkEnvironmentWrite = write;
     return write;
+  }
+
+  requestLocalProfileLogout(): void {
+    if (this.snapshotValue.localLogoutBusy
+      || this.snapshotValue.localLogoutConfirmationRequired) return;
+    this.snapshotValue.localLogoutConfirmationRequired = true;
+    this.snapshotValue.localLogoutError = undefined;
+    this.notifyChange();
+  }
+
+  cancelLocalProfileLogout(): void {
+    if (this.snapshotValue.localLogoutBusy
+      || !this.snapshotValue.localLogoutConfirmationRequired) return;
+    this.snapshotValue.localLogoutConfirmationRequired = false;
+    this.notifyChange();
+  }
+
+  async confirmLocalProfileLogout(): Promise<void> {
+    if (this.snapshotValue.localLogoutBusy
+      || !this.snapshotValue.localLogoutConfirmationRequired) return;
+    this.snapshotValue.localLogoutConfirmationRequired = false;
+    this.snapshotValue.localLogoutBusy = true;
+    this.snapshotValue.localLogoutError = undefined;
+    this.stop();
+    this.notifyChange();
+    try {
+      if (!this.client.logoutLocalProfile) throw new Error("unavailable");
+      await this.client.logoutLocalProfile();
+    } catch {
+      this.snapshotValue.localLogoutBusy = false;
+      this.snapshotValue.localLogoutError = "本机 Teti Profile 暂时无法清理，请退出 App 后重试。";
+      this.start();
+      this.notifyChange();
+    }
   }
 
   private async readSnapshot(): Promise<void> {
@@ -392,6 +439,10 @@ export class BridgePassportClient implements PassportClient {
   getPresenceStatus(): Promise<RuntimePresenceStatusDto | null> {
     return this.bridge.request("presence.get") as Promise<RuntimePresenceStatusDto | null>;
   }
+
+  logoutLocalProfile(): Promise<never> {
+    return this.bridge.logoutLocalProfile();
+  }
 }
 
 export class MockPassportClient implements PassportClient {
@@ -412,9 +463,9 @@ export class MockPassportClient implements PassportClient {
     schemaVersion: 1,
     useLocalDevelopmentNetwork: false,
     activeEnvironment: "production",
-    activeBaseUrl: "https://network.teti.bot",
+    activeBaseUrl: DEFAULT_TETI_NETWORK_BASE_URL,
     configuredEnvironment: "production",
-    configuredBaseUrl: "https://network.teti.bot",
+    configuredBaseUrl: DEFAULT_TETI_NETWORK_BASE_URL,
     restartRequired: false
   };
 
@@ -468,7 +519,9 @@ export class MockPassportClient implements PassportClient {
       ...this.networkEnvironment,
       useLocalDevelopmentNetwork: enabled,
       configuredEnvironment: enabled ? "local_development" : "production",
-      configuredBaseUrl: enabled ? "http://127.0.0.1:8788" : "https://network.teti.bot",
+      configuredBaseUrl: enabled
+        ? DEVELOPMENT_TETI_NETWORK_BASE_URL
+        : DEFAULT_TETI_NETWORK_BASE_URL,
       restartRequired: enabled !== (this.networkEnvironment.activeEnvironment === "local_development")
     };
     return structuredClone(this.networkEnvironment);
@@ -476,6 +529,10 @@ export class MockPassportClient implements PassportClient {
 
   async getPresenceStatus(): Promise<RuntimePresenceStatusDto | null> {
     return null;
+  }
+
+  async logoutLocalProfile(): Promise<never> {
+    return new Promise<never>(() => undefined);
   }
 
   setConnections(connections: RuntimePassportSnapshot["connections"]): void {
@@ -492,7 +549,7 @@ export function emptyPassportSnapshot(now = new Date(0)): RuntimePassportSnapsho
     revision: 0,
     generatedAt,
     identity: null,
-    registry: { state: "unknown" },
+    networkIdentity: { state: "unknown" },
     localPassport: {
       schemaVersion: 3,
       generatedAt,

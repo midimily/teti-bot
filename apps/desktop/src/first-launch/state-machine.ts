@@ -6,7 +6,7 @@ export type FirstLaunchStateName =
   | "welcome"
   | "naming"
   | "creating_identity"
-  | "registering_discovery"
+  | "synchronizing_network_identity"
   | "ready"
   | "idle"
   | "recoverable_error"
@@ -27,7 +27,7 @@ export type FirstLaunchErrorKind =
   | "partial_account"
   | "chatmail_provisioning_failure"
   | "local_persistence_failure"
-  | "discovery_registration_failure"
+  | "network_identity_failure"
   | "loaded_account_verification_failure"
   | "unrecoverable_internal_state";
 
@@ -101,7 +101,7 @@ export class FirstLaunchStateMachine {
         this.assertState(current, event.type, [
           "checking_existing_account",
           "creating_identity",
-          "registering_discovery",
+          "synchronizing_network_identity",
           "recoverable_error"
         ]);
         return {
@@ -165,7 +165,7 @@ export class FirstLaunchStateMachine {
         };
 
       case "creation_succeeded":
-        this.assertState(current, event.type, ["creating_identity", "registering_discovery"]);
+        this.assertState(current, event.type, ["creating_identity", "synchronizing_network_identity"]);
         return {
           state: "ready",
           nameInput: event.account.displayName ?? current.nameInput,
@@ -188,14 +188,14 @@ export class FirstLaunchStateMachine {
         this.assertState(current, event.type, ["recoverable_error"]);
         return {
           ...current,
-          state: "registering_discovery",
+          state: "synchronizing_network_identity",
           submitting: true,
           phase: "registering_identity",
           error: undefined
         };
 
       case "registration_retry_succeeded":
-        this.assertState(current, event.type, ["registering_discovery"]);
+        this.assertState(current, event.type, ["synchronizing_network_identity"]);
         return {
           state: "ready",
           nameInput: event.account.displayName ?? current.nameInput,
@@ -205,7 +205,7 @@ export class FirstLaunchStateMachine {
         };
 
       case "registration_retry_failed":
-        this.assertState(current, event.type, ["registering_discovery"]);
+        this.assertState(current, event.type, ["synchronizing_network_identity"]);
         return {
           state: "recoverable_error",
           nameInput: current.nameInput,

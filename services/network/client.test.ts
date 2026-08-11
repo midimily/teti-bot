@@ -7,7 +7,7 @@ import { generateTetiNetworkSigningKey } from "./signing.ts";
 const SERVER_REQUEST_ID = "4a4f2fd6-62a8-49fd-9215-e79527bfc281";
 const CLIENT_REQUEST_ID = "55555555-5555-4555-8555-555555555555";
 
-test("HTTP client consumes Revision 6 bootstrap and sends versioned Runtime metadata", async () => {
+test("HTTP client consumes Revision 8 bootstrap and sends versioned Runtime metadata", async () => {
   let request: Request | undefined;
   const client = createClient(async (input, init) => {
     request = new Request(input, init);
@@ -24,7 +24,7 @@ test("HTTP client consumes Revision 6 bootstrap and sends versioned Runtime meta
   assert.equal(request?.method, "GET");
   assert.equal(request?.headers.get("accept"), "application/json");
   assert.equal(request?.headers.get("Teti-Protocol-Version"), "1");
-  assert.equal(request?.headers.get("Teti-Client-Version"), "0.3.5");
+  assert.equal(request?.headers.get("Teti-Client-Version"), "0.3.8");
   assert.equal(request?.headers.get("Teti-Client-Platform"), "macos");
   assert.equal(request?.headers.get("Teti-Client-Request-ID"), CLIENT_REQUEST_ID);
   assert.deepEqual(result, bootstrapBody());
@@ -88,6 +88,95 @@ test("HTTP client parses durable public stats and rejects inconsistent counts", 
     generatedAt: "2026-08-08T12:00:00.000Z"
   }));
   await assertInvalidResponse(() => malformed.getPublicStats());
+});
+
+test("HTTP client consumes Relay catalog and preserves exact signed RelayBinding commands", async () => {
+  const requests: Request[] = [];
+  const client = createClient(async (input, init) => {
+    const request = new Request(input, init);
+    requests.push(request);
+    if (request.url.endsWith("/v1/relays")) {
+      return contractResponse(relayCatalog());
+    }
+    const revision = request.method === "POST" ? 2 : 1;
+    return contractResponse(
+      relayBindingDocument(revision, request.method === "POST"),
+      request.method === "POST" ? 201 : 200,
+      { etag: `"relay-bindings-r${revision}"`, "cache-control": "no-store" }
+    );
+  });
+  const authentication = {
+    clientInstanceId: "ci_AAAAAAAAAAAAAAAAAAAAAA",
+    signingKey: generateTetiNetworkSigningKey()
+  };
+
+  const catalog = await client.listRelays();
+  const current = await client.getRelayBindingsSelf(authentication);
+  const input = {
+    schemaVersion: 1 as const,
+    expectedRevision: 1,
+    relayId: "relay_mail2_seep_im",
+    mailbox: "a1b2c3d4e-next",
+    transportPublicKey: "CHATMAIL-TRANSPORT-KEY-B"
+  };
+  const rawBody = JSON.stringify(input);
+  const updated = await client.createRelayBinding(input, authentication, {
+    ifMatch: '"relay-bindings-r1"',
+    idempotencyKey: "relay.create:00000000-0000-4000-8000-000000000000",
+    rawBody
+  });
+
+  assert.equal(catalog.relays[1]?.status, "draining");
+  assert.equal(current.document.active?.address, "a1b2c3d4e@mail.seep.im");
+  assert.equal(updated.document.migrating?.address, "a1b2c3d4e-next@mail2.seep.im");
+  assert.equal(requests[0]?.headers.get("Teti-Idempotency-Key"), null);
+  assert.equal(requests[1]?.headers.get("Teti-Client-Instance-ID"), authentication.clientInstanceId);
+  assert.equal(requests[2]?.headers.get("If-Match"), '"relay-bindings-r1"');
+  assert.equal(
+    requests[2]?.headers.get("Teti-Idempotency-Key"),
+    "relay.create:00000000-0000-4000-8000-000000000000"
+  );
+  assert.equal(await requests[2]?.text(), rawBody);
+});
+
+test("HTTP client maps Relay revision conflicts and rejects binding/address drift", async () => {
+  const authentication = {
+    clientInstanceId: "ci_AAAAAAAAAAAAAAAAAAAAAA",
+    signingKey: generateTetiNetworkSigningKey()
+  };
+  const stale = createClient(async () => contractResponse({
+    error: {
+      code: "RELAY_BINDING_REVISION_CONFLICT",
+      message: "The RelayBinding revision does not match.",
+      retryable: false
+    },
+    requestId: SERVER_REQUEST_ID
+  }, 412));
+  await assert.rejects(
+    () => stale.mutateRelayBinding(
+      "rb_BBBBBBBBBBBBBBBBBBBBBB",
+      "activate",
+      { schemaVersion: 1, expectedRevision: 2 },
+      authentication,
+      {
+        ifMatch: '"relay-bindings-r2"',
+        idempotencyKey: "relay.activate:00000000-0000-4000-8000-000000000000"
+      }
+    ),
+    (error) => error instanceof TetiNetworkClientError
+      && error.code === "RELAY_BINDING_REVISION_CONFLICT"
+      && error.operation === "relay_binding_activate"
+      && !error.retryable
+  );
+
+  const malformed = createClient(async () => contractResponse({
+    ...relayBindingDocument(1, false),
+    active: {
+      ...relayBindingDocument(1, false).active,
+      address: "another@mail.seep.im"
+    }
+  }, 200, { etag: '"relay-bindings-r1"', "cache-control": "no-store" }));
+  await assertInvalidResponse(() => malformed.getRelayBindingsSelf(authentication));
 });
 
 test("HTTP client maps identity 404 and rate-limit retry metadata by operation", async () => {
@@ -318,6 +407,98 @@ test("HTTP client signs private Relationship reads and preserves exact command b
   assert.equal(await requests[1]?.text(), rawBody);
 });
 
+test("HTTP client consumes authoritative Relationship authorization and reconciliation", async () => {
+  const requests: Request[] = [];
+  const client = createClient(async (input, init) => {
+    const request = new Request(input, init);
+    requests.push(request);
+    if (request.url.includes("/authorization")) {
+      return contractResponse({
+        schemaVersion: 1,
+        peerTetiId: "teti_bbbbbbbbb",
+        relationshipId: "rel_AAAAAAAAAAAAAAAAAAAAAA",
+        relationshipRevision: 2,
+        decision: "allow",
+        reason: "confirmed",
+        evaluatedAt: "2026-08-11T12:00:00.000Z"
+      }, 200, { "cache-control": "no-store" });
+    }
+    if (request.url.includes("/snapshot")) {
+      return contractResponse({
+        schemaVersion: 1,
+        items: [relationshipDocument(2, "confirmed")],
+        baseCheckpoint: "rcp_base",
+        page: { limit: 100, returnedCount: 1, nextCursor: null }
+      }, 200, { "cache-control": "no-store" });
+    }
+    return contractResponse({
+      schemaVersion: 1,
+      items: [{
+        checkpoint: "rcp_next",
+        relationship: relationshipDocument(2, "confirmed")
+      }],
+      checkpoint: "rcp_next",
+      page: { limit: 100, returnedCount: 1, hasMore: false }
+    }, 200, { "cache-control": "no-store" });
+  });
+  const authentication = {
+    clientInstanceId: "ci_AAAAAAAAAAAAAAAAAAAAAA",
+    signingKey: generateTetiNetworkSigningKey()
+  };
+
+  const authorization = await client.getRelationshipAuthorization(
+    "teti_bbbbbbbbb",
+    authentication
+  );
+  const snapshot = await client.getRelationshipSnapshot({ limit: 100 }, authentication);
+  const changes = await client.getRelationshipChanges({ after: snapshot.baseCheckpoint, limit: 100 }, authentication);
+
+  assert.equal(authorization.decision, "allow");
+  assert.equal(snapshot.items[0]?.revision, 2);
+  assert.equal(changes.checkpoint, "rcp_next");
+  assert.equal(
+    requests[0]?.url,
+    "http://127.0.0.1:8788/v1/relationships/with/teti_bbbbbbbbb/authorization"
+  );
+  assert.equal(
+    requests[1]?.url,
+    "http://127.0.0.1:8788/v1/relationships/reconciliation/snapshot?limit=100"
+  );
+  assert.equal(
+    requests[2]?.url,
+    "http://127.0.0.1:8788/v1/relationships/reconciliation/changes?after=rcp_base&limit=100"
+  );
+  assert.equal(requests.every((request) => request.headers.get("Teti-Idempotency-Key") === null), true);
+});
+
+test("HTTP client rejects inconsistent Relationship authorization and reconciliation", async () => {
+  const authentication = {
+    clientInstanceId: "ci_AAAAAAAAAAAAAAAAAAAAAA",
+    signingKey: generateTetiNetworkSigningKey()
+  };
+  await assertInvalidResponse(() => createClient(async () => contractResponse({
+    schemaVersion: 1,
+    peerTetiId: "teti_bbbbbbbbb",
+    relationshipId: "rel_AAAAAAAAAAAAAAAAAAAAAA",
+    relationshipRevision: 2,
+    decision: "deny",
+    reason: "confirmed",
+    evaluatedAt: "2026-08-11T12:00:00.000Z"
+  })).getRelationshipAuthorization("teti_bbbbbbbbb", authentication));
+  await assertInvalidResponse(() => createClient(async () => contractResponse({
+    schemaVersion: 1,
+    items: [relationshipDocument(2, "confirmed"), relationshipDocument(1, "requested")],
+    baseCheckpoint: "rcp_base",
+    page: { limit: 100, returnedCount: 2, nextCursor: null }
+  })).getRelationshipSnapshot({ limit: 100 }, authentication));
+  await assertInvalidResponse(() => createClient(async () => contractResponse({
+    schemaVersion: 1,
+    items: [],
+    checkpoint: "not-a-checkpoint",
+    page: { limit: 100, returnedCount: 0, hasMore: false }
+  })).getRelationshipChanges({ after: "rcp_base" }, authentication));
+});
+
 test("HTTP client maps stale Relationship commands and rejects ETag drift", async () => {
   const authentication = {
     clientInstanceId: "ci_AAAAAAAAAAAAAAAAAAAAAA",
@@ -436,7 +617,7 @@ test("HTTP client validates client metadata before sending", () => {
 function createClient(fetchImpl: typeof fetch, timeoutMs = 5_000): HttpTetiNetworkClient {
   return new HttpTetiNetworkClient({
     baseUrl: "http://127.0.0.1:8788",
-    clientVersion: "0.3.5",
+    clientVersion: "0.3.8",
     clientPlatform: "macos",
     fetchImpl,
     timeoutMs,
@@ -447,8 +628,8 @@ function createClient(fetchImpl: typeof fetch, timeoutMs = 5_000): HttpTetiNetwo
 function bootstrapBody() {
   return {
     protocolVersion: 1,
-    contractRevision: 6,
-    service: { name: "teti-network" as const, version: "0.1.5" },
+    contractRevision: 8,
+    service: { name: "teti-network" as const, version: "0.1.8" },
     serverTime: "2026-08-08T12:00:00.000Z",
     protocolSupport: { minimumSupportedVersion: 1, supportedVersions: [1] },
     releasePolicy: {
@@ -465,7 +646,7 @@ function bootstrapBody() {
       presence: true,
       publicProfile: true,
       relationships: true,
-      relayBindings: false,
+      relayBindings: true,
       invites: false
     },
     presencePolicy: {
@@ -473,6 +654,16 @@ function bootstrapBody() {
       viewing_connect: { reportEverySeconds: 5, ttlSeconds: 20 },
       online: { reportEverySeconds: 15, ttlSeconds: 45 },
       background: { reportEverySeconds: 30, ttlSeconds: 90 }
+    },
+    relayBootstrap: {
+      schemaVersion: 1 as const,
+      preferredRelay: {
+        id: "relay_mail_seep_im",
+        domain: "mail.seep.im",
+        region: "osaka",
+        accountProvisioning: { type: "chatmail_qr" as const, value: "dcaccount:mail.seep.im" }
+      },
+      catalogPath: "/v1/relays" as const
     }
   };
 }
@@ -533,6 +724,60 @@ function directoryPage() {
   };
 }
 
+function relayCatalog() {
+  return {
+    schemaVersion: 1,
+    relays: [
+      {
+        id: "relay_mail_seep_im",
+        domain: "mail.seep.im",
+        region: "osaka",
+        status: "active",
+        acceptsNewAccounts: true,
+        accountProvisioning: { type: "chatmail_qr", value: "dcaccount:mail.seep.im" }
+      },
+      {
+        id: "relay_mail2_seep_im",
+        domain: "mail2.seep.im",
+        region: "tokyo",
+        status: "draining",
+        acceptsNewAccounts: false,
+        accountProvisioning: { type: "chatmail_qr", value: "dcaccount:mail2.seep.im" }
+      }
+    ],
+    generatedAt: "2026-08-11T10:00:00.000Z"
+  };
+}
+
+function relayBindingDocument(revision: number, withMigrating: boolean) {
+  return {
+    schemaVersion: 1,
+    tetiId: "teti_a1b2c3d4e",
+    revision,
+    active: {
+      id: "rb_AAAAAAAAAAAAAAAAAAAAAA",
+      relay: { id: "relay_mail_seep_im", domain: "mail.seep.im", region: "osaka", status: "active" },
+      mailbox: "a1b2c3d4e",
+      address: "a1b2c3d4e@mail.seep.im",
+      transportPublicKey: "CHATMAIL-TRANSPORT-KEY-A",
+      status: "active",
+      createdAt: "2026-08-11T09:00:00.000Z",
+      updatedAt: "2026-08-11T09:00:00.000Z"
+    },
+    migrating: withMigrating ? {
+      id: "rb_BBBBBBBBBBBBBBBBBBBBBB",
+      relay: { id: "relay_mail2_seep_im", domain: "mail2.seep.im", region: "tokyo", status: "active" },
+      mailbox: "a1b2c3d4e-next",
+      address: "a1b2c3d4e-next@mail2.seep.im",
+      transportPublicKey: "CHATMAIL-TRANSPORT-KEY-B",
+      status: "migrating",
+      createdAt: "2026-08-11T10:00:00.000Z",
+      updatedAt: "2026-08-11T10:00:00.000Z"
+    } : null,
+    updatedAt: "2026-08-11T10:00:00.000Z"
+  };
+}
+
 function relationshipDocument(revision: number, state: "requested" | "confirmed") {
   return {
     schemaVersion: 1,
@@ -564,7 +809,7 @@ function contractResponse(
 function contractHeaders(): Record<string, string> {
   return {
     "Teti-Protocol-Version": "1",
-    "Teti-Contract-Revision": "6",
+    "Teti-Contract-Revision": "8",
     "X-Request-ID": SERVER_REQUEST_ID
   };
 }

@@ -88,7 +88,7 @@ test("Runtime Passport reads aggregate local caches only and keep revision stabl
       },
       getConnections() { return [connection]; },
       getCodexUsage() { return readyUsage(); },
-      getRegistry() { return { state: "registered" }; },
+      getNetworkIdentity() { return { state: "active" }; },
       async getSharing() {
         sharingReads += 1;
         return resourceSharingPolicy(false);
@@ -117,7 +117,7 @@ test("Runtime Passport projects only qualified Callable Agents, never Observer r
       getConnections() { return []; },
       getCodexUsage() { return readyUsage(); },
       getCallableAgents() { return agents; },
-      getRegistry() { return { state: "registered" }; },
+      getNetworkIdentity() { return { state: "active" }; },
       async getSharing() { return resourceSharingPolicy(false); }
     },
     now: () => new Date("2026-07-25T00:00:00.000Z")

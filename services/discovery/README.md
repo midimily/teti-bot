@@ -21,7 +21,7 @@ import {
 import { TetiNetworkPublicReadAdapter } from "./services/network/public-read-adapter.ts";
 
 const discovery = new TetiDiscoveryService({
-  registry: new TetiNetworkPublicReadAdapter(runtimeNetworkClient)
+  directory: new TetiNetworkPublicReadAdapter(runtimeNetworkClient)
 });
 
 const tetis = await discovery.discoverTetis({ limit: 20 });

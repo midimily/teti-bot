@@ -6,10 +6,14 @@ import type {
   TetiNetworkRelationshipCommandStore
 } from "./relationship-command-store.ts";
 import type {
+  TetiNetworkRelationshipReconciliationStore
+} from "./relationship-reconciliation-store.ts";
+import type {
   TetiNetworkAuthenticatedSigner,
   TetiNetworkClient,
   TetiNetworkMutateRelationshipRequest,
   TetiNetworkRelationshipCommand,
+  TetiNetworkRelationshipAuthorization,
   TetiNetworkRelationshipDocument,
   TetiNetworkRelationshipResult,
   TetiNetworkRequestRelationshipRequest
@@ -18,6 +22,7 @@ import type {
 export interface TetiNetworkRelationshipServiceOptions {
   client: TetiNetworkClient;
   store: TetiNetworkRelationshipCommandStore;
+  reconciliationStore: TetiNetworkRelationshipReconciliationStore;
   getAuthentication(): Promise<{ tetiId: string; authentication: TetiNetworkAuthenticatedSigner }>;
   idempotencyKeyFactory?: (operation: "request" | TetiNetworkRelationshipCommand) => string;
 }
@@ -26,26 +31,65 @@ export interface TetiNetworkRelationshipServiceOptions {
 export class TetiNetworkRelationshipService {
   private readonly client: TetiNetworkClient;
   private readonly store: TetiNetworkRelationshipCommandStore;
+  private readonly reconciliationStore: TetiNetworkRelationshipReconciliationStore;
   private readonly getAuthentication: TetiNetworkRelationshipServiceOptions["getAuthentication"];
   private readonly idempotencyKeyFactory: NonNullable<
     TetiNetworkRelationshipServiceOptions["idempotencyKeyFactory"]
   >;
   private queue: Promise<void> = Promise.resolve();
+  private compatible = false;
 
   constructor(options: TetiNetworkRelationshipServiceOptions) {
     this.client = options.client;
     this.store = options.store;
+    this.reconciliationStore = options.reconciliationStore;
     this.getAuthentication = options.getAuthentication;
     this.idempotencyKeyFactory = options.idempotencyKeyFactory
       ?? ((operation) => `relationship.${operation}:${randomUUID()}`);
   }
 
   synchronize(signal?: AbortSignal): Promise<TetiNetworkRelationshipDocument[]> {
+    const documents: TetiNetworkRelationshipDocument[] = [];
+    return this.reconcile(async (document) => {
+      documents.push(document);
+    }, signal).then(() => documents);
+  }
+
+  reconcile(
+    apply: (document: TetiNetworkRelationshipDocument) => Promise<void>,
+    signal?: AbortSignal
+  ): Promise<void> {
     return this.serial(async () => {
       const identity = await this.prepare(signal);
       await this.recoverPending(identity, signal);
-      return this.listAll(identity, signal);
+      const stored = await this.reconciliationStore.load();
+      if (stored.tetiId && stored.tetiId !== identity.tetiId) {
+        await this.reconciliationStore.save({ schemaVersion: 1 });
+      }
+      let checkpoint = stored.tetiId === identity.tetiId ? stored.checkpoint : undefined;
+      if (!checkpoint) checkpoint = await this.scanSnapshot(identity, apply, signal);
+      await this.scanChanges(checkpoint, identity, apply, signal);
     });
+  }
+
+  async authorizePeer(
+    peerTetiId: string,
+    signal?: AbortSignal
+  ): Promise<TetiNetworkRelationshipAuthorization> {
+    const identity = await this.prepare(signal);
+    const authorization = await this.client.getRelationshipAuthorization(
+      peerTetiId,
+      identity.authentication,
+      signal
+    );
+    if (authorization.peerTetiId !== peerTetiId
+      || (authorization.decision === "allow") !== (authorization.reason === "confirmed")) {
+      throw conflict(
+        "relationship_authorization",
+        "Network Relationship authorization does not match the requested peer."
+      );
+    }
+    return authorization;
   }
 
   getByPeer(peerTetiId: string, signal?: AbortSignal): Promise<TetiNetworkRelationshipResult | null> {
@@ -102,34 +146,95 @@ export class TetiNetworkRelationshipService {
   }
 
   private async prepare(signal?: AbortSignal): Promise<AuthenticatedIdentity> {
-    assertTetiNetworkCompatible(await this.client.getBootstrap(signal));
+    if (!this.compatible) {
+      assertTetiNetworkCompatible(await this.client.getBootstrap(signal));
+      this.compatible = true;
+    }
     return this.getAuthentication();
   }
 
-  private async listAll(
+  private async scanSnapshot(
     identity: AuthenticatedIdentity,
+    apply: (document: TetiNetworkRelationshipDocument) => Promise<void>,
     signal?: AbortSignal
-  ): Promise<TetiNetworkRelationshipDocument[]> {
-    const documents: TetiNetworkRelationshipDocument[] = [];
+  ): Promise<string> {
     const seenCursors = new Set<string>();
     let cursor: string | undefined;
+    let baseCheckpoint: string | undefined;
     do {
-      const page = await this.client.listRelationships(
+      const page = await this.client.getRelationshipSnapshot(
         cursor ? { limit: 100, cursor } : { limit: 100 },
         identity.authentication,
         signal
       );
+      if (baseCheckpoint && page.baseCheckpoint !== baseCheckpoint) {
+        throw conflict(
+          "relationship_reconciliation_snapshot",
+          "Network Relationship snapshot checkpoint changed between pages."
+        );
+      }
+      baseCheckpoint = page.baseCheckpoint;
       for (const document of page.items) {
         this.assertProjection(document, identity.tetiId);
-        documents.push(document);
+        await apply(document);
       }
       cursor = page.page.nextCursor ?? undefined;
       if (cursor && seenCursors.has(cursor)) {
-        throw conflict("relationship_list", "Network Relationship cursor repeated.");
+        throw conflict(
+          "relationship_reconciliation_snapshot",
+          "Network Relationship snapshot cursor repeated."
+        );
       }
       if (cursor) seenCursors.add(cursor);
     } while (cursor);
-    return documents;
+    if (!baseCheckpoint) {
+      throw conflict(
+        "relationship_reconciliation_snapshot",
+        "Network Relationship snapshot omitted its base checkpoint."
+      );
+    }
+    return baseCheckpoint;
+  }
+
+  private async scanChanges(
+    initialCheckpoint: string,
+    identity: AuthenticatedIdentity,
+    apply: (document: TetiNetworkRelationshipDocument) => Promise<void>,
+    signal?: AbortSignal
+  ): Promise<void> {
+    const seenCheckpoints = new Set<string>();
+    let checkpoint = initialCheckpoint;
+    while (true) {
+      if (seenCheckpoints.has(checkpoint)) {
+        throw conflict(
+          "relationship_reconciliation_changes",
+          "Network Relationship changes checkpoint repeated."
+        );
+      }
+      seenCheckpoints.add(checkpoint);
+      const page = await this.client.getRelationshipChanges(
+        { after: checkpoint, limit: 100 },
+        identity.authentication,
+        signal
+      );
+      if (page.page.hasMore && page.items.length === 0) {
+        throw conflict(
+          "relationship_reconciliation_changes",
+          "Network Relationship changes reported an empty continuation page."
+        );
+      }
+      for (const change of page.items) {
+        this.assertProjection(change.relationship, identity.tetiId);
+        await apply(change.relationship);
+      }
+      await this.reconciliationStore.save({
+        schemaVersion: 1,
+        tetiId: identity.tetiId,
+        checkpoint: page.checkpoint
+      });
+      if (!page.page.hasMore) return;
+      checkpoint = page.checkpoint;
+    }
   }
 
   private async readByPeer(
@@ -296,7 +401,12 @@ interface AuthenticatedIdentity {
 }
 
 function conflict(
-  operation: "relationship_list" | "relationship_get",
+  operation:
+    | "relationship_list"
+    | "relationship_get"
+    | "relationship_authorization"
+    | "relationship_reconciliation_snapshot"
+    | "relationship_reconciliation_changes",
   message: string
 ): TetiNetworkClientError {
   return new TetiNetworkClientError({

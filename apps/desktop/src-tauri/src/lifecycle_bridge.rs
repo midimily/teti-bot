@@ -8,6 +8,7 @@ use std::{
     path::PathBuf,
     process::{Child, ChildStdin, Command, Stdio},
     sync::{
+        atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver, SyncSender},
         Arc, Mutex,
     },
@@ -58,6 +59,7 @@ pub struct LifecycleCommandError {
 #[derive(Clone, Default)]
 pub struct LifecycleBridge {
     process: Arc<Mutex<Option<ManagedSidecar>>>,
+    disabled_for_local_logout: Arc<AtomicBool>,
 }
 
 struct ManagedSidecar {
@@ -103,6 +105,17 @@ impl LifecycleBridge {
         request: LifecycleCommandRequest,
     ) -> LifecycleCommandResponse {
         let id = request.id.clone();
+        if self.disabled_for_local_logout.load(Ordering::SeqCst) {
+            return failure(
+                Some(id),
+                bridge_error(
+                    "SIDECAR_UNAVAILABLE",
+                    "Teti's local lifecycle service is stopped for local profile logout.",
+                    false,
+                    None,
+                ),
+            );
+        }
         let mut guard = match self.process.lock() {
             Ok(guard) => guard,
             Err(_) => {
@@ -247,6 +260,11 @@ impl LifecycleBridge {
         let process = self.process.lock().ok().and_then(|mut guard| guard.take());
         drop(process);
     }
+
+    pub fn shutdown_for_local_logout(&self) {
+        self.disabled_for_local_logout.store(true, Ordering::SeqCst);
+        self.shutdown();
+    }
 }
 
 impl Drop for ManagedSidecar {
@@ -324,7 +342,6 @@ fn spawn_sidecar(app: &AppHandle) -> Result<ManagedSidecar, String> {
         .arg(sidecar_path)
         .env("TETI_DESKTOP_NATIVE_PROVISIONING", "1")
         .env("TETI_PROVISIONING_MODE", "real")
-        .env("TETI_CHATMAIL_RELAY_DOMAIN", "mail.seep.im")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -634,8 +651,7 @@ pub fn timeout_for_method(method: &str) -> Duration {
         "osaurus.native.set" => 5_000,
         "account.status" | "account.load" => 5_000,
         "account.create" => 120_000,
-        "discovery.register" | "discovery.retry" => 15_000,
-        "discovery.heartbeat" => 30_000,
+        "network.identity.retry" => 30_000,
         "connection.resolve" => 15_000,
         "connection.request" | "connection.accept" | "connection.reject" => 30_000,
         "task.send" => 30_000,
@@ -675,9 +691,7 @@ fn is_allowed_method(method: &str) -> bool {
             | "account.status"
             | "account.load"
             | "account.create"
-            | "discovery.register"
-            | "discovery.retry"
-            | "discovery.heartbeat"
+            | "network.identity.retry"
             | "connection.resolve"
             | "connection.request"
             | "connection.accept"
@@ -739,7 +753,7 @@ fn bridge_error(
     }
 }
 
-fn append_sanitized_log_line(source: &str, line: &str) {
+pub(crate) fn append_sanitized_log_line(source: &str, line: &str) {
     if let Some(path) = log_file_path() {
         if let Some(parent) = path.parent() {
             let _ = create_dir_all(parent);
@@ -794,10 +808,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn local_logout_permanently_disables_sidecar_respawn_for_this_app_process() {
+        let bridge = LifecycleBridge::default();
+        assert!(!bridge.disabled_for_local_logout.load(Ordering::SeqCst));
+        bridge.shutdown_for_local_logout();
+        assert!(bridge.disabled_for_local_logout.load(Ordering::SeqCst));
+    }
+
+    #[test]
     fn timeout_values_are_method_specific() {
         for method in [
             "release.status",
-            "discovery.heartbeat",
+            "network.identity.retry",
             "passport.get",
             "agent.observation.get",
             "task.send",
@@ -837,11 +859,7 @@ mod tests {
             Duration::from_millis(120_000)
         );
         assert_eq!(
-            timeout_for_method("discovery.retry"),
-            Duration::from_millis(15_000)
-        );
-        assert_eq!(
-            timeout_for_method("discovery.heartbeat"),
+            timeout_for_method("network.identity.retry"),
             Duration::from_millis(30_000)
         );
         assert_eq!(

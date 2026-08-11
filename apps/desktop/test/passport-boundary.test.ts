@@ -10,7 +10,7 @@ test("Renderer consumes Passport ViewModels and has no legacy AI data dependency
   ]);
   const renderer = `${app}\n${view}`;
 
-  assert.doesNotMatch(renderer, /RemoteAiStatusSnapshot|CodexUsageState|statusSharing|Registry|Chatmail/);
+  assert.doesNotMatch(renderer, /RemoteAiStatusSnapshot|CodexUsageState|statusSharing|NetworkClient|Chatmail/);
   assert.doesNotMatch(renderer, /openai\.codex/);
   assert.doesNotMatch(controller, /connection\.poll|usage\.(get|refresh)|sharing\.get/);
   assert.match(controller, /passport\.get/);

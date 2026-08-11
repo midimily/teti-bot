@@ -43,26 +43,26 @@ test("Passport settings show the local Teti name and nine-character ID", () => {
   assert.ok(viewModel.settings.buildTimestamp.length > 0);
 });
 
-test("Passport settings distinguish Registry network recovery from missing registration", () => {
+test("Passport settings distinguish Network recovery from an unbound identity", () => {
   const passport = emptyPassportSnapshot();
-  passport.registry = {
-    state: "unreachable",
+  passport.networkIdentity = {
+    state: "unavailable",
     checkedAt: "2026-07-23T10:00:00.000Z",
-    errorCode: "REG_DNS",
+    errorCode: "NETWORK_TIMEOUT",
     retryable: true
   };
 
   let viewModel = toPassportViewModel({ passport, sharingBusy: false, openPanel: "sharing" });
-  assert.equal(viewModel.settings.registryLabel, "待同步 [REG-DNS]");
-  assert.equal(viewModel.settings.registryTone, "pending");
+  assert.equal(viewModel.settings.networkIdentityLabel, "Network 暂不可用 [NET-TO]");
+  assert.equal(viewModel.settings.networkIdentityTone, "pending");
 
-  passport.registry = {
-    state: "not_registered",
+  passport.networkIdentity = {
+    state: "pending",
     checkedAt: "2026-07-23T10:01:00.000Z",
     retryable: true
   };
   viewModel = toPassportViewModel({ passport, sharingBusy: false, openPanel: "sharing" });
-  assert.equal(viewModel.settings.registryLabel, "待同步 [REG-NF]");
+  assert.equal(viewModel.settings.networkIdentityLabel, "身份同步中");
 });
 
 test("Presence shows authentication failures instead of reporting Network unavailable", () => {

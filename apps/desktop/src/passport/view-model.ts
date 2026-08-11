@@ -5,7 +5,7 @@ import type {
   RuntimePassportSnapshot
 } from "../../../../core/passport/snapshot.ts";
 import {
-  isCanonicalTetiChatmailAddress,
+  isCanonicalTetiRelayChatmailAddress,
   isCanonicalTetiPublicId,
   TETI_PUBLIC_ID_CODE_LENGTH,
   TETI_PUBLIC_ID_PREFIX
@@ -21,6 +21,7 @@ import type { PassportControllerSnapshot } from "./controller.ts";
 import type { AgentObservation } from "../../../../core/observation/types.ts";
 import { emptyAgentManagementSnapshot } from "../../../../core/observation/management.ts";
 import { TETI_BUILD_INFO } from "../build-info.ts";
+import { DEFAULT_TETI_NETWORK_BASE_URL } from "../../../../services/network/config.ts";
 
 export type ResourceTone = "free" | "plus" | "pro" | "unknown" | "unavailable";
 export type ResourceIcon = "codex" | "generic";
@@ -125,8 +126,8 @@ export interface AiPassportPanelViewModel {
 export interface PassportSettingsViewModel {
   title: string;
   identityLabel: string;
-  registryLabel: string;
-  registryTone: "ok" | "pending" | "error";
+  networkIdentityLabel: string;
+  networkIdentityTone: "ok" | "pending" | "error";
   toggleLabel: string;
   open: boolean;
   enabled: boolean;
@@ -148,6 +149,9 @@ export interface PassportSettingsViewModel {
   networkEnvironmentError?: string;
   presenceLabel: string;
   presenceTone: "ok" | "pending" | "error";
+  localLogoutConfirmationRequired: boolean;
+  localLogoutBusy: boolean;
+  localLogoutError?: string;
   appVersion: string;
   buildTimestamp: string;
 }
@@ -211,7 +215,7 @@ export function toPassportViewModel(
     settings: {
       title: "设置",
       identityLabel: formatLocalTetiIdentity(snapshot.passport.identity),
-      ...formatRegistryStatus(snapshot.passport.registry),
+      ...formatNetworkIdentityStatus(snapshot.passport.networkIdentity),
       toggleLabel: "Passport 分享",
       open: snapshot.openPanel === "sharing",
       enabled: snapshot.passport.sharing.resourceSummary
@@ -239,9 +243,9 @@ export function toPassportViewModel(
       useLocalDevelopmentNetwork: snapshot.networkEnvironment?.useLocalDevelopmentNetwork ?? false,
       networkEnvironmentBusy: snapshot.networkEnvironmentBusy ?? false,
       networkEnvironmentEndpoint: snapshot.networkEnvironment?.activeBaseUrl
-        ?? "https://network.teti.bot",
+        ?? DEFAULT_TETI_NETWORK_BASE_URL,
       networkEnvironmentNextEndpoint: snapshot.networkEnvironment?.configuredBaseUrl
-        ?? "https://network.teti.bot",
+        ?? DEFAULT_TETI_NETWORK_BASE_URL,
       networkEnvironmentActiveLabel:
         snapshot.networkEnvironment?.activeEnvironment === "local_development"
           ? "本机开发环境"
@@ -251,6 +255,9 @@ export function toPassportViewModel(
         ? { networkEnvironmentError: snapshot.networkEnvironmentError }
         : {}),
       ...formatPresenceStatus(snapshot.presence),
+      localLogoutConfirmationRequired: snapshot.localLogoutConfirmationRequired ?? false,
+      localLogoutBusy: snapshot.localLogoutBusy ?? false,
+      ...(snapshot.localLogoutError ? { localLogoutError: snapshot.localLogoutError } : {}),
       appVersion: TETI_BUILD_INFO.appVersion,
       buildTimestamp: TETI_BUILD_INFO.buildTimestamp
     },
@@ -394,41 +401,44 @@ function toManagedAgentViewModel(
   };
 }
 
-function formatRegistryStatus(
-  status: RuntimePassportSnapshot["registry"]
-): Pick<PassportSettingsViewModel, "registryLabel" | "registryTone"> {
-  if (status.state === "registered") {
-    return { registryLabel: "已公开", registryTone: "ok" };
+function formatNetworkIdentityStatus(
+  status: RuntimePassportSnapshot["networkIdentity"]
+): Pick<PassportSettingsViewModel, "networkIdentityLabel" | "networkIdentityTone"> {
+  if (status.state === "active") {
+    return { networkIdentityLabel: "已连接 Network", networkIdentityTone: "ok" };
   }
   if (status.state === "unknown") {
-    return { registryLabel: "检查中", registryTone: "pending" };
+    return { networkIdentityLabel: "检查中", networkIdentityTone: "pending" };
   }
-  if (status.state === "not_registered") {
-    return { registryLabel: "待同步 [REG-NF]", registryTone: "pending" };
+  if (status.state === "pending") {
+    return { networkIdentityLabel: "身份同步中", networkIdentityTone: "pending" };
   }
-  if (status.state === "unreachable") {
+  if (status.state === "unavailable") {
     return {
-      registryLabel: `待同步 [${shortRegistryCode(status.errorCode, "REG-NET")}]`,
-      registryTone: "pending"
+      networkIdentityLabel: `Network 暂不可用 [${shortNetworkCode(status.errorCode)}]`,
+      networkIdentityTone: "pending"
     };
   }
-  if (status.state === "rejected") {
-    return { registryLabel: "同步被拒绝 [REG-REJ]", registryTone: "error" };
+  if (status.state === "unauthorized") {
+    return { networkIdentityLabel: "Network 身份认证失败", networkIdentityTone: "error" };
   }
-  return { registryLabel: "身份冲突 [REG-CON]", registryTone: "error" };
+  if (status.state === "revoked") {
+    return { networkIdentityLabel: "Network 客户端已撤销", networkIdentityTone: "error" };
+  }
+  return { networkIdentityLabel: "Network 身份冲突", networkIdentityTone: "error" };
 }
 
-function shortRegistryCode(code: string | undefined, fallback: string): string {
+function shortNetworkCode(code: string | undefined): string {
   const known: Record<string, string> = {
-    REG_DNS: "REG-DNS",
-    REG_TIMEOUT: "REG-TO",
-    REG_TLS: "REG-TLS",
-    REG_NETWORK: "REG-NET",
-    REG_HTTP_5XX: "REG-5XX",
-    REG_INVALID_RESPONSE: "REG-JSON",
-    REG_UNKNOWN: "REG-NET"
+    NETWORK_TIMEOUT: "NET-TO",
+    NETWORK_UNAVAILABLE: "NET-DOWN",
+    SERVER_UNAVAILABLE: "NET-SERVER",
+    DEPENDENCY_UNAVAILABLE: "NET-DEP",
+    NETWORK_INVALID_RESPONSE: "NET-JSON",
+    PROTOCOL_UNSUPPORTED: "NET-PROTO",
+    RATE_LIMITED: "NET-RATE"
   };
-  return code ? known[code] ?? fallback : fallback;
+  return code ? known[code] ?? "NET-DOWN" : "NET-DOWN";
 }
 
 export function formatLocalTetiIdentity(identity: PassportIdentity | null): string {
@@ -436,7 +446,7 @@ export function formatLocalTetiIdentity(identity: PassportIdentity | null): stri
   const displayName = identity.displayName?.trim() || "未命名";
   const publicIdCode = isCanonicalTetiPublicId(identity.tetiId)
     ? identity.tetiId.slice(TETI_PUBLIC_ID_PREFIX.length)
-    : isCanonicalTetiChatmailAddress(identity.address)
+    : isCanonicalTetiRelayChatmailAddress(identity.address)
       ? identity.address.slice(0, TETI_PUBLIC_ID_CODE_LENGTH)
       : null;
   return publicIdCode
@@ -493,7 +503,7 @@ function publicTetiIdCode(identity: PassportIdentity): string | null {
   if (isCanonicalTetiPublicId(identity.tetiId)) {
     return identity.tetiId.slice(TETI_PUBLIC_ID_PREFIX.length);
   }
-  if (isCanonicalTetiChatmailAddress(identity.address)) {
+  if (isCanonicalTetiRelayChatmailAddress(identity.address)) {
     return identity.address.slice(0, TETI_PUBLIC_ID_CODE_LENGTH);
   }
   return null;

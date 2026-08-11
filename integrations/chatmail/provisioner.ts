@@ -1,10 +1,7 @@
 import { createRuntimeChatmailRpcClient } from "./create-runtime-client.ts";
 import type { RuntimeChatmailClientOptions } from "./create-runtime-client.ts";
-import { accountQrFromRelayDomain, REQUIRED_REAL_VALIDATION_RELAY_DOMAIN } from "./relay-config.ts";
 import type { ChatmailRpcClient } from "./types.ts";
 import { ChatmailTransportError } from "./stdio-transport.ts";
-
-export const DEFAULT_CHATMAIL_ACCOUNT_QR = accountQrFromRelayDomain(REQUIRED_REAL_VALIDATION_RELAY_DOMAIN);
 
 export interface ChatmailProvisionedIdentity {
   accountId: number;
@@ -15,7 +12,10 @@ export interface ChatmailProvisionedIdentity {
 }
 
 export interface ChatmailProvisioner {
-  createIdentity(displayName: string): Promise<ChatmailProvisionedIdentity>;
+  createIdentity(
+    displayName: string,
+    options?: { accountQr?: string }
+  ): Promise<ChatmailProvisionedIdentity>;
 }
 
 export interface RpcChatmailProvisionerOptions {
@@ -83,23 +83,34 @@ export const DEFAULT_CHATMAIL_PROVISIONING_TIMEOUTS: ChatmailProvisioningTimeout
 
 export class RpcChatmailProvisioner implements ChatmailProvisioner {
   private readonly rpc: ChatmailRpcClient;
-  private readonly accountQr: string;
+  private readonly accountQr?: string;
   private readonly cleanupOnFailure: boolean;
   private readonly timeouts: ChatmailProvisioningTimeouts;
   private readonly onStage: NonNullable<RpcChatmailProvisionerOptions["onStage"]>;
 
   constructor(rpc: ChatmailRpcClient, options: RpcChatmailProvisionerOptions = {}) {
     this.rpc = rpc;
-    this.accountQr = options.accountQr ?? DEFAULT_CHATMAIL_ACCOUNT_QR;
+    this.accountQr = options.accountQr;
     this.cleanupOnFailure = options.cleanupOnFailure ?? true;
     this.timeouts = { ...DEFAULT_CHATMAIL_PROVISIONING_TIMEOUTS, ...options.timeouts };
     this.onStage = options.onStage ?? (() => undefined);
   }
 
-  async createIdentity(displayName: string): Promise<ChatmailProvisionedIdentity> {
+  async createIdentity(
+    displayName: string,
+    options: { accountQr?: string } = {}
+  ): Promise<ChatmailProvisionedIdentity> {
     const normalizedDisplayName = displayName.trim();
     if (!normalizedDisplayName) {
       throw new Error("Teti display name is required for chatmail identity provisioning.");
+    }
+    const accountQr = options.accountQr ?? this.accountQr;
+    if (!accountQr || !/^dcaccount:[a-z0-9.-]+$/.test(accountQr)) {
+      throw new ChatmailProvisioningError(
+        "CM_CFG",
+        "relay_config",
+        "Teti Network did not provide a valid Chatmail provisioning URI."
+      );
     }
 
     const accountId = await this.runStage(
@@ -116,7 +127,7 @@ export class RpcChatmailProvisioner implements ChatmailProvisioner {
         "CM_CFG",
         () => this.rpc.configureAccount(accountId, {
           displayName: normalizedDisplayName,
-          qr: this.accountQr
+          qr: accountQr
         })
       );
       await this.runStage(
@@ -229,12 +240,16 @@ export class RuntimeChatmailProvisioner implements ChatmailProvisioner {
     this.provisionerOptions = provisionerOptions;
   }
 
-  async createIdentity(displayName: string): Promise<ChatmailProvisionedIdentity> {
+  async createIdentity(
+    displayName: string,
+    identityOptions: { accountQr?: string } = {}
+  ): Promise<ChatmailProvisionedIdentity> {
     const client = createRuntimeChatmailRpcClient(this.options);
 
     try {
       return await new RpcChatmailProvisioner(client, this.provisionerOptions).createIdentity(
-        displayName
+        displayName,
+        identityOptions
       );
     } finally {
       await client.close();

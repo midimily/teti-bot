@@ -1,6 +1,6 @@
 import type { RemoteAiStatusSnapshot } from "../../../../core/ai-status/types.ts";
 import type { RuntimePassportSnapshot } from "../../../../core/passport/snapshot.ts";
-import type { RegistryStatus } from "../../../../core/account/model.ts";
+import type { NetworkIdentityStatus } from "../../../../core/account/model.ts";
 import type { AgentManagementSnapshot } from "../../../../core/observation/management.ts";
 import type {
   CollaborationTaskSummarySnapshot,
@@ -29,9 +29,7 @@ export type LifecycleMethod =
   | "account.status"
   | "account.load"
   | "account.create"
-  | "discovery.register"
-  | "discovery.retry"
-  | "discovery.heartbeat"
+  | "network.identity.retry"
   | "connection.resolve"
   | "connection.request"
   | "connection.accept"
@@ -77,9 +75,7 @@ export const LIFECYCLE_METHODS: readonly LifecycleMethod[] = [
   "account.status",
   "account.load",
   "account.create",
-  "discovery.register",
-  "discovery.retry",
-  "discovery.heartbeat",
+  "network.identity.retry",
   "connection.resolve",
   "connection.request",
   "connection.accept",
@@ -211,7 +207,7 @@ export interface LifecycleHealthResult {
 
 export interface LifecycleStatusResult {
   exists: boolean;
-  registry: RegistryStatus;
+  networkIdentity: NetworkIdentityStatus;
   onlineStatus: "unknown" | "offline" | "online";
   account?: PublicTetiAccount;
 }
@@ -296,8 +292,7 @@ export type LifecycleErrorCode =
   | "ACCOUNT_LOAD_FAILED"
   | "ACCOUNT_ALREADY_EXISTS"
   | "ACCOUNT_CREATE_FAILED"
-  | "DISCOVERY_REGISTRATION_FAILED"
-  | "DISCOVERY_HEARTBEAT_FAILED"
+  | "NETWORK_IDENTITY_FAILED"
   | "CONNECTION_RESOLVE_FAILED"
   | "CONNECTION_REQUEST_FAILED"
   | "TASK_TRANSPORT_FAILED"
@@ -317,9 +312,7 @@ export const LIFECYCLE_TIMEOUT_MS: Record<LifecycleMethod, number> = {
   "account.status": 5_000,
   "account.load": 5_000,
   "account.create": 120_000,
-  "discovery.register": 15_000,
-  "discovery.retry": 15_000,
-  "discovery.heartbeat": 30_000,
+  "network.identity.retry": 30_000,
   "connection.resolve": 15_000,
   "connection.request": 30_000,
   "connection.accept": 30_000,

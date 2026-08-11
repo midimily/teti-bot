@@ -14,8 +14,6 @@ try {
     const result = await resetTetiOnboarding({
       home: homedir(),
       confirmation: stringArg(args, "confirm"),
-      registryConfirmation: stringArg(args, "registry-confirm"),
-      deleteRegistry: Boolean(args["delete-registry"]),
       dryRun: Boolean(args["dry-run"])
     });
     console.log(JSON.stringify(result, null, 2));

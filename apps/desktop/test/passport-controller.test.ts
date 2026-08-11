@@ -196,12 +196,65 @@ test("Settings exposes an explicit restart-bound local Network opt-in", async ()
   controller.stop();
 });
 
+test("Settings local logout stops polling and reports a local cleanup failure", async () => {
+  const client = new FakePassportClient();
+  client.failLogout = true;
+  const controller = new PassportController({ client, onChange: () => undefined });
+  controller.start();
+  await flushPromises();
+
+  controller.requestLocalProfileLogout();
+  await controller.confirmLocalProfileLogout();
+
+  assert.equal(client.logoutCalls, 1);
+  assert.equal(controller.snapshot.localLogoutBusy, false);
+  assert.match(controller.snapshot.localLogoutError ?? "", /本机 Teti Profile/);
+  controller.stop();
+});
+
+test("Settings local logout remains busy while native cleanup restarts the App", async () => {
+  const client = new FakePassportClient();
+  const controller = new PassportController({ client, onChange: () => undefined });
+
+  controller.requestLocalProfileLogout();
+  void controller.confirmLocalProfileLogout();
+  await flushPromises();
+
+  assert.equal(client.logoutCalls, 1);
+  assert.equal(controller.snapshot.localLogoutBusy, true);
+});
+
+test("Settings local logout requires an explicit in-panel second confirmation", async () => {
+  const client = new FakePassportClient();
+  const controller = new PassportController({ client, onChange: () => undefined });
+
+  await controller.confirmLocalProfileLogout();
+  assert.equal(client.logoutCalls, 0, "cleanup cannot start without the first intent click");
+
+  controller.requestLocalProfileLogout();
+  assert.equal(controller.snapshot.localLogoutConfirmationRequired, true);
+  assert.equal(client.logoutCalls, 0);
+
+  controller.cancelLocalProfileLogout();
+  assert.equal(controller.snapshot.localLogoutConfirmationRequired, false);
+  assert.equal(client.logoutCalls, 0);
+
+  controller.requestLocalProfileLogout();
+  void controller.confirmLocalProfileLogout();
+  await flushPromises();
+  assert.equal(controller.snapshot.localLogoutConfirmationRequired, false);
+  assert.equal(controller.snapshot.localLogoutBusy, true);
+  assert.equal(client.logoutCalls, 1);
+});
+
 class FakePassportClient implements PassportClient {
   getCalls = 0;
   failSet = false;
   failAgentRead = false;
   failOsaurusRead = false;
   provideNetworkSettings = false;
+  failLogout = false;
+  logoutCalls = 0;
   snapshot = emptyPassportSnapshot(new Date("2026-07-22T00:00:00.000Z"));
   agents = emptyAgentManagementSnapshot(new Date("2026-07-22T00:00:00.000Z"));
   networkEnvironment = {
@@ -264,6 +317,12 @@ class FakePassportClient implements PassportClient {
       panelVisible: false,
       collaborationActive: false
     };
+  }
+
+  async logoutLocalProfile(): Promise<never> {
+    this.logoutCalls += 1;
+    if (this.failLogout) throw new Error("profile busy");
+    return new Promise<never>(() => undefined);
   }
 
   async rescanAgents(): Promise<AgentManagementSnapshot> {

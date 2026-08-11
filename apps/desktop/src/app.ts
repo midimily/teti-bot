@@ -63,6 +63,10 @@ import {
   ReleaseController,
   SupportedMockReleaseStatusClient
 } from "./release/controller.ts";
+import {
+  capturePanelScrollPositions,
+  restorePanelScrollPositions
+} from "./panel-scroll-position.ts";
 import "./styles.css";
 
 const aiToolsButtonIconUrl = new URL("../assets/ai-tools-btn.png", import.meta.url).href;
@@ -152,7 +156,6 @@ export async function createDesktopApp(options: DesktopAppOptions): Promise<Desk
   const coordinator = new FirstLaunchCoordinator({
     accountLifecycle: selection.lifecycle,
     notchWindow,
-    discoveryClient: selection.discoveryClient ?? (selection.config.mode === "mock" ? new MockDiscoveryClient() : undefined),
     schedule: (callback, delayMs) =>
       baseSchedule(() => {
         callback();
@@ -375,6 +378,7 @@ export function renderSnapshot(
     }
   }
   const focusKey = focusKeyWithin(root);
+  const panelScrollPositions = capturePanelScrollPositions(root);
   const nextContent = taskOpen
     ? createTaskWorkspace(
         tasks!,
@@ -387,6 +391,7 @@ export function renderSnapshot(
       : createIsland(viewModel, config, coordinator, connections, passport, tasks, memory);
   root.replaceChildren(nextContent);
   restoreFocusKey(root, focusKey);
+  restorePanelScrollPositions(root, panelScrollPositions);
 }
 
 function focusKeyWithin(root: HTMLElement): string | undefined {
@@ -1350,7 +1355,7 @@ async function retryDiscoveryAndRender(
   tasks?: TaskController,
   memory?: MemoryController
 ): Promise<void> {
-  const pending = coordinator.retryDiscoveryRegistration();
+  const pending = coordinator.retryNetworkIdentity();
   if (root) {
     renderSnapshot(root, coordinator.snapshot, config, coordinator, connections, passport, tasks, memory);
   }
@@ -1358,21 +1363,5 @@ async function retryDiscoveryAndRender(
   await pending;
   if (root) {
     renderSnapshot(root, coordinator.snapshot, config, coordinator, connections, passport, tasks, memory);
-  }
-}
-
-class MockDiscoveryClient {
-  async registerIdentity(): Promise<{
-    version: 1;
-    id: string;
-    address: string;
-    publicProfile: Record<string, unknown>;
-  }> {
-    return {
-      version: 1,
-      id: "mock",
-      address: "mock@mail.seep.im",
-      publicProfile: {}
-    };
   }
 }

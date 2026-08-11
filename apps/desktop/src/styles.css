@@ -1524,7 +1524,7 @@ input {
 
 .teti-build-information {
   display: grid;
-  grid-template-columns: max-content minmax(0, 1fr);
+  grid-template-columns: max-content minmax(0, 1fr) max-content;
   gap: 4px 10px;
   margin-top: 10px;
   padding: 9px 10px 4px;
@@ -1542,6 +1542,72 @@ input {
   font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
   font-size: inherit;
   user-select: text;
+}
+
+.teti-local-logout {
+  align-self: center;
+  min-width: 34px;
+  padding: 1px 5px;
+  border: 1px solid rgba(197, 77, 77, 0.2);
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.34);
+  color: #b34f4f;
+  font-size: 8px;
+  font-weight: 700;
+  line-height: 12px;
+  cursor: pointer;
+}
+
+.teti-local-logout:hover:not(:disabled) {
+  background: rgba(197, 77, 77, 0.1);
+}
+
+.teti-local-logout:disabled {
+  cursor: wait;
+  opacity: 0.55;
+}
+
+.teti-local-logout-confirmation {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) max-content;
+  align-items: center;
+  gap: 7px;
+  margin-top: 3px;
+  padding: 7px 8px;
+  border: 1px solid rgba(197, 77, 77, 0.2);
+  border-radius: 7px;
+  background: rgba(197, 77, 77, 0.06);
+}
+
+.teti-local-logout-confirmation small {
+  color: #9a4c4c;
+  font-size: 8px;
+  line-height: 11px;
+}
+
+.teti-local-logout-confirm {
+  min-width: 50px;
+  padding: 3px 6px;
+  border: 1px solid rgba(197, 77, 77, 0.3);
+  border-radius: 5px;
+  background: rgba(197, 77, 77, 0.12);
+  color: #a13f3f;
+  font-size: 8px;
+  font-weight: 750;
+  line-height: 12px;
+  cursor: pointer;
+}
+
+.teti-local-logout-confirm:hover {
+  background: rgba(197, 77, 77, 0.2);
+}
+
+.teti-local-logout-error {
+  grid-column: 1 / -1;
+  color: var(--teti-error);
+  font-size: 8px;
+  line-height: 11px;
 }
 
 .teti-sharing-error {

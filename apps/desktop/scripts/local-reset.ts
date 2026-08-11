@@ -1,13 +1,12 @@
 import { readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, isAbsolute, join, resolve, sep } from "node:path";
+import { isCanonicalTetiRelayChatmailAddress } from "../../../core/identity/public-id.ts";
 
 export const TETI_DESKTOP_BUNDLE_ID = "bot.teti.app";
 export const LEGACY_TETI_DESKTOP_BUNDLE_ID = "im.midimily.teti.desktop";
 export const ALPHA_LOCAL_RESET_CONFIRMATION = "DELETE_LOCAL_TETI";
 export const ONBOARDING_RESET_CONFIRMATION = "RESET_TETI_ONBOARDING";
-export const ONBOARDING_REGISTRY_RESET_CONFIRMATION =
-  "DELETE_TETI_ONBOARDING_AND_REGISTRY";
 
 const TETI_ID_PATTERN = /^teti_[a-z0-9]{9}$/;
 const UNKNOWN_RUNTIME_LOCK_GRACE_MS = 30_000;
@@ -25,7 +24,7 @@ export interface LocalResetResult {
   dryRun: boolean;
   localOnly: true;
   remoteChatmailDeleted: false;
-  remoteDiscoveryDeleted: false;
+  remoteNetworkDeleted: false;
   bundleId: string;
   note: string;
   results: Array<{ path: string; existed: boolean; removed: boolean }>;
@@ -34,12 +33,8 @@ export interface LocalResetResult {
 export interface OnboardingResetOptions {
   home: string;
   confirmation?: string;
-  registryConfirmation?: string;
-  deleteRegistry?: boolean;
   dryRun?: boolean;
   bundleId?: string;
-  env?: Record<string, string | undefined>;
-  fetchImpl?: typeof fetch;
   isProcessAlive?: (pid: number) => boolean;
   now?: () => Date;
 }
@@ -49,12 +44,12 @@ export interface OnboardingResetResult {
   dryRun: boolean;
   mode: "onboarding_regression";
   preservedChatmail: true;
-  localTetiId?: string;
-  registry: {
-    requested: boolean;
-    deleted: boolean;
-    method: "not_requested" | "dry_run" | "cloudflare_kv_admin";
+  networkState: {
+    scope: "all_environments";
+    cleared: boolean;
   };
+  localTetiId?: string;
+  remoteNetworkDeleted: false;
   note: string;
   results: Array<{ path: string; existed: boolean; removed: boolean }>;
 }
@@ -82,7 +77,7 @@ export async function resetLocalTeti(options: LocalResetOptions): Promise<LocalR
     dryRun,
     localOnly: true,
     remoteChatmailDeleted: false,
-    remoteDiscoveryDeleted: false,
+    remoteNetworkDeleted: false,
     bundleId,
     note: "Quit Teti before running this command so local state is not recreated while cleanup runs.",
     results
@@ -102,38 +97,6 @@ export async function resetTetiOnboarding(
   );
   const identity = await readLocalTetiIdentity(options.home);
 
-  let registry: OnboardingResetResult["registry"] = {
-    requested: false,
-    deleted: false,
-    method: "not_requested"
-  };
-  if (options.deleteRegistry) {
-    assertOnboardingRegistryResetConfirmed(options.registryConfirmation);
-    if (!identity) {
-      throw new Error(
-        "Cannot delete the Registry record because no canonical local Teti identity was found."
-      );
-    }
-    if (dryRun) {
-      registry = {
-        requested: true,
-        deleted: false,
-        method: "dry_run"
-      };
-    } else {
-      await deleteRegistryKvRecord({
-        tetiId: identity.id,
-        env: options.env ?? process.env,
-        fetchImpl: options.fetchImpl ?? globalThis.fetch.bind(globalThis)
-      });
-      registry = {
-        requested: true,
-        deleted: true,
-        method: "cloudflare_kv_admin"
-      };
-    }
-  }
-
   const results: OnboardingResetResult["results"] = [];
   for (const target of onboardingResetTargets(options.home, bundleId)) {
     const exists = await pathExists(target);
@@ -148,11 +111,15 @@ export async function resetTetiOnboarding(
     dryRun,
     mode: "onboarding_regression",
     preservedChatmail: true,
+    networkState: {
+      scope: "all_environments",
+      cleared: !dryRun
+    },
     ...(identity ? { localTetiId: identity.id } : {}),
-    registry,
+    remoteNetworkDeleted: false,
     note: dryRun
-      ? "Dry run only. Teti onboarding state would be reset while Chatmail account storage remains preserved."
-      : "Teti onboarding state was reset. Chatmail account storage was preserved; old relay identities may remain locally.",
+      ? "Dry run only. Teti onboarding and all production/development Network state would be reset while Chatmail account storage remains preserved."
+      : "Teti onboarding and all production/development Network state were reset. Chatmail account storage was preserved; old relay identities may remain locally.",
     results
   };
 }
@@ -161,7 +128,7 @@ export function assertAlphaLocalResetConfirmed(value: string | undefined): void 
   if (value !== ALPHA_LOCAL_RESET_CONFIRMATION) {
     throw new Error(
       `Alpha local reset requires --confirm ${ALPHA_LOCAL_RESET_CONFIRMATION}. ` +
-      "This permanently removes the local Teti profile while leaving remote KV and Chatmail data untouched."
+      "This permanently removes the local Teti profile while leaving Network and Chatmail data untouched."
     );
   }
 }
@@ -171,16 +138,6 @@ export function assertOnboardingResetConfirmed(value: string | undefined): void 
     throw new Error(
       `Onboarding reset requires --confirm ${ONBOARDING_RESET_CONFIRMATION}. ` +
       "Quit Teti first. This removes the active local Teti identity and first-launch state."
-    );
-  }
-}
-
-export function assertOnboardingRegistryResetConfirmed(value: string | undefined): void {
-  if (value !== ONBOARDING_REGISTRY_RESET_CONFIRMATION) {
-    throw new Error(
-      "Registry cleanup requires " +
-      `--registry-confirm ${ONBOARDING_REGISTRY_RESET_CONFIRMATION}. ` +
-      "It permanently deletes the current public Teti Registry KV record."
     );
   }
 }
@@ -214,6 +171,17 @@ export function onboardingResetTargets(
   const storeV2 = join(profileRoot, "store-v2");
   return unique([
     join(storeV2, "account"),
+    join(storeV2, "network"),
+    join(storeV2, "credentials", "teti-network-identity-v1.json"),
+    join(storeV2, "credentials", "teti-network-identity-v1.json.tmp"),
+    join(storeV2, "network-profile-sync-v1.json"),
+    join(storeV2, "network-profile-sync-v1.json.tmp"),
+    join(storeV2, "network-relationship-command-v1.json"),
+    join(storeV2, "network-relationship-command-v1.json.tmp"),
+    join(storeV2, "network-environment-v1.json"),
+    join(storeV2, "network-environment-v1.json.tmp"),
+    join(storeV2, "network-release-policy-v1.json"),
+    join(storeV2, "network-release-policy-v1.json.tmp"),
     join(storeV2, "connections.json"),
     join(storeV2, "settings.json"),
     join(storeV2, "messages.json"),
@@ -261,9 +229,9 @@ async function assertNoRealAccountWouldBeOrphaned(home: string, allowed: boolean
   ]) {
     try {
       const account = JSON.parse(await readFile(accountPath, "utf8")) as { address?: unknown };
-      if (typeof account.address === "string" && account.address.endsWith("@mail.seep.im")) {
+      if (typeof account.address === "string" && isCanonicalTetiRelayChatmailAddress(account.address)) {
         throw new Error(
-          "Refusing to remove a real Chatmail profile because that would orphan its Relay account and TETI_REGISTRY record. " +
+          "Refusing to remove a real Chatmail profile because that would orphan its Relay account and Teti Network identity. " +
           "Use the Alpha local reset command only when remote cleanup is intentionally out of scope."
         );
       }
@@ -341,49 +309,6 @@ async function assertTetiRuntimeStopped(
   if (now().getTime() - metadata.mtimeMs < UNKNOWN_RUNTIME_LOCK_GRACE_MS) {
     throw new Error("Teti Runtime lock is recent. Quit Teti and try again shortly.");
   }
-}
-
-async function deleteRegistryKvRecord(options: {
-  tetiId: string;
-  env: Record<string, string | undefined>;
-  fetchImpl: typeof fetch;
-}): Promise<void> {
-  const accountId = requiredRegistryAdminEnv(options.env, "CLOUDFLARE_ACCOUNT_ID");
-  const namespaceId = requiredRegistryAdminEnv(options.env, "TETI_KV_NAMESPACE_ID");
-  const apiToken = requiredRegistryAdminEnv(options.env, "CLOUDFLARE_API_TOKEN");
-  const registryKey = `teti:${options.tetiId}`;
-  const url =
-    `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(accountId)}` +
-    `/storage/kv/namespaces/${encodeURIComponent(namespaceId)}` +
-    `/values/${encodeURIComponent(registryKey)}`;
-  const response = await options.fetchImpl(url, {
-    method: "DELETE",
-    headers: {
-      authorization: `Bearer ${apiToken}`
-    }
-  });
-  const body = await response.json().catch(() => null) as {
-    success?: unknown;
-  } | null;
-  if (!response.ok || body?.success !== true) {
-    throw new Error(
-      `Cloudflare Registry KV cleanup failed with HTTP ${response.status}. Local state was not removed.`
-    );
-  }
-}
-
-function requiredRegistryAdminEnv(
-  env: Record<string, string | undefined>,
-  name: string
-): string {
-  const value = env[name]?.trim();
-  if (!value) {
-    throw new Error(
-      `${name} is required for --delete-registry. ` +
-      "Use a Cloudflare token with Workers KV Storage Edit permission."
-    );
-  }
-  return value;
 }
 
 function defaultIsProcessAlive(pid: number): boolean {

@@ -15,6 +15,18 @@ export interface TetiIdentity {
   updatedAt?: string;
 }
 
+/** Runtime-facing public directory projection produced only by NetworkClient. */
+export interface TetiPublicDirectoryIdentity {
+  version: 1;
+  id: string;
+  address: string;
+  displayName?: string;
+  publicKey?: string;
+  publicProfile: Record<string, unknown>;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
 export interface DiscoverTetisInput {
   limit?: number;
 }

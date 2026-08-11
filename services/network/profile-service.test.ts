@@ -195,8 +195,8 @@ function profileResult(
 function bootstrap() {
   return {
     protocolVersion: 1,
-    contractRevision: 6,
-    service: { name: "teti-network" as const, version: "0.1.5" },
+    contractRevision: 8,
+    service: { name: "teti-network" as const, version: "0.1.8" },
     serverTime: "2026-08-09T09:00:00.000Z",
     protocolSupport: { minimumSupportedVersion: 1, supportedVersions: [1] },
     releasePolicy: {
@@ -213,7 +213,7 @@ function bootstrap() {
       presence: true,
       publicProfile: true,
       relationships: true,
-      relayBindings: false,
+      relayBindings: true,
       invites: false
     },
     presencePolicy: {

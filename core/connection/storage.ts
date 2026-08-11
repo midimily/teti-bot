@@ -183,6 +183,11 @@ export function validateConnectionRecord(connection: TetiConnectionRecord): void
     throw new Error("Teti connection record is missing required identity fields.");
   }
 
+  if (connection.remotePublicKey !== undefined
+    && (typeof connection.remotePublicKey !== "string" || !connection.remotePublicKey.trim())) {
+    throw new Error("Teti connection remote public key must be a non-empty string.");
+  }
+
   if (connection.networkRelationship !== undefined) {
     const relationship = connection.networkRelationship;
     if (relationship.schemaVersion !== 1
@@ -194,7 +199,9 @@ export function validateConnectionRecord(connection: TetiConnectionRecord): void
       || relationship.etag !== `"relationship-r${relationship.revision}"`
       || !["self", "peer", null].includes(relationship.blockedBy)
       || (relationship.state === "blocked") !== (relationship.blockedBy !== null)
-      || !Number.isFinite(Date.parse(relationship.stateChangedAt))) {
+      || !Number.isFinite(Date.parse(relationship.stateChangedAt))
+      || (relationship.documentFingerprint !== undefined
+        && !/^[A-Za-z0-9_-]{43}$/.test(relationship.documentFingerprint))) {
       throw new Error("Teti Network Relationship recovery metadata is invalid.");
     }
   }

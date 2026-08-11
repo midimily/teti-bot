@@ -185,12 +185,53 @@ test("pending register for another Chatmail account is rebuilt for the current a
   assert.equal(client.registerCalls[0]?.delivery.publicKey, currentAccount.publicKey);
 });
 
+test("Runtime clears bound credentials owned by another local account before registering", async () => {
+  const currentAccount = account({
+    id: "teti_fresh0001",
+    address: "fresh0001@mail.seep.im",
+    networkIdentity: { schemaVersion: 1, mode: "register", state: "pending" }
+  });
+  const accountStorage = await accountStore(currentAccount);
+  const stale = testCredentials();
+  const staleBound: TetiNetworkCredentialRecord = {
+    ...stale,
+    scope: {
+      environment: "local_development",
+      deliveryAddress: "previous1@mail.seep.im",
+      transportPublicKey: "PREVIOUS-OPENPGP-TRANSPORT-PUBLIC-KEY"
+    },
+    tetiId: "teti_stale0001",
+    clientInstance: {
+      ...stale.clientInstance,
+      id: "ci_AAAAAAAAAAAAAAAAAAAAAA",
+      platform: "macos",
+      appVersion: "0.3.2"
+    }
+  };
+  const credentialStore = new MemoryTetiNetworkCredentialStore();
+  await credentialStore.save(staleBound);
+  const client = new GeneratedRegistrationClient(bootstrap());
+
+  const synchronized = await identityService(client, accountStorage, credentialStore).synchronize();
+
+  assert.equal(client.selfCalls.length, 0);
+  assert.equal(client.registerCalls.length, 1);
+  assert.equal(synchronized.id, "teti_new000001");
+  const rebound = await credentialStore.load();
+  assert.equal(rebound?.scope?.environment, "local_development");
+  assert.equal(rebound?.scope?.deliveryAddress, currentAccount.address);
+  assert.equal(rebound?.scope?.transportPublicKey, currentAccount.publicKey);
+  assert.notEqual(rebound?.identityRoot.publicKey, staleBound.identityRoot.publicKey);
+  assert.notEqual(rebound?.clientInstance.publicKey, staleBound.clientInstance.publicKey);
+});
+
 test("active binding refuses silent key regeneration when credentials are missing", async () => {
   const accountStorage = await accountStore(account({
     id: "teti_bound0001",
     address: "bound0001@mail.seep.im",
     networkIdentity: {
       schemaVersion: 1,
+      environment: "local_development",
       mode: "register",
       state: "active",
       identityPublicKey: "ed25519:A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
@@ -243,6 +284,37 @@ class FlakyRegistrationClient extends FakeTetiNetworkClient {
   }
 }
 
+class GeneratedRegistrationClient extends FakeTetiNetworkClient {
+  override async registerIdentity(
+    input: TetiNetworkRegisterIdentityRequest,
+    pendingClient: TetiNetworkSigningKey,
+    options: TetiNetworkWriteOptions
+  ): Promise<TetiNetworkIdentitySession> {
+    this.registerCalls.push(structuredClone(input));
+    if (options.signal?.aborted) throw options.signal.reason ?? new Error("aborted");
+    return {
+      identity: {
+        tetiId: "teti_new000001",
+        identityPublicKey: input.identityPublicKey,
+        status: "active",
+        createdAt: "2026-08-08T12:00:00.000Z",
+        updatedAt: "2026-08-08T12:00:00.000Z"
+      },
+      clientInstance: {
+        id: "ci_BBBBBBBBBBBBBBBBBBBBBB",
+        publicKey: pendingClient.publicKey,
+        platform: input.clientInstance.platform,
+        appVersion: input.clientInstance.appVersion,
+        status: "active",
+        createdAt: "2026-08-08T12:00:00.000Z",
+        lastSeenAt: null,
+        revokedAt: null
+      },
+      delivery: structuredClone(input.delivery)
+    };
+  }
+}
+
 function identityService(
   client: FakeTetiNetworkClient,
   accountStorage: MemoryTetiAccountStorage,
@@ -252,6 +324,7 @@ function identityService(
     client,
     accountStorage,
     credentialStore: credentials,
+    environment: "local_development",
     appVersion: "0.3.2",
     platform: "macos",
     adoptionGrant: "TEST_ONLY_32_BYTE_ADOPTION_GRANT_TOKEN",
@@ -354,8 +427,8 @@ function session(
 function bootstrap() {
   return {
     protocolVersion: 1,
-    contractRevision: 6,
-    service: { name: "teti-network" as const, version: "0.1.5" },
+    contractRevision: 8,
+    service: { name: "teti-network" as const, version: "0.1.8" },
     serverTime: "2026-08-08T12:00:00.000Z",
     protocolSupport: { minimumSupportedVersion: 1, supportedVersions: [1] },
     releasePolicy: {
@@ -372,7 +445,7 @@ function bootstrap() {
       presence: true,
       publicProfile: true,
       relationships: true,
-      relayBindings: false,
+      relayBindings: true,
       invites: false
     },
     presencePolicy: {

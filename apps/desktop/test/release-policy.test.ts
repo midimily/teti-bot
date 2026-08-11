@@ -74,8 +74,8 @@ test("a newer network policy can advance the local version floor", async () => {
 test("Release Policy consumes the official Network bootstrap", async () => {
   const network = new FakeTetiNetworkClient({
     protocolVersion: 1,
-    contractRevision: 6,
-    service: { name: "teti-network", version: "0.1.5" },
+    contractRevision: 8,
+    service: { name: "teti-network", version: "0.1.8" },
     serverTime: "2026-08-08T12:00:00.000Z",
     protocolSupport: { minimumSupportedVersion: 1, supportedVersions: [1] },
     releasePolicy: {
@@ -92,7 +92,7 @@ test("Release Policy consumes the official Network bootstrap", async () => {
       presence: true,
       publicProfile: true,
       relationships: true,
-      relayBindings: false,
+      relayBindings: true,
       invites: false
     },
     presencePolicy: {

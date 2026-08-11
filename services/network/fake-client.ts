@@ -17,10 +17,21 @@ import type {
   TetiNetworkPresenceReportRequest,
   TetiNetworkPresenceReportResponse,
   TetiNetworkRegisterIdentityRequest,
+  TetiNetworkAdoptRelayBindingRequest,
+  TetiNetworkMutateRelayBindingRequest,
+  TetiNetworkPutRelayBindingRequest,
+  TetiNetworkRelayBindingResult,
+  TetiNetworkRelayBindingWriteOptions,
+  TetiNetworkRelayCatalog,
   TetiNetworkRelationshipCommand,
+  TetiNetworkRelationshipAuthorization,
+  TetiNetworkRelationshipChangesPage,
+  TetiNetworkRelationshipChangesQuery,
   TetiNetworkRelationshipListPage,
   TetiNetworkRelationshipListQuery,
   TetiNetworkRelationshipResult,
+  TetiNetworkRelationshipSnapshotPage,
+  TetiNetworkRelationshipSnapshotQuery,
   TetiNetworkRelationshipWriteOptions,
   TetiNetworkRequestRelationshipRequest,
   TetiNetworkMutateRelationshipRequest,
@@ -34,9 +45,25 @@ export class FakeTetiNetworkClient implements TetiNetworkClient {
   readonly publicNodeCalls: string[] = [];
   readonly publicDirectoryCalls: TetiNetworkPublicDirectoryQuery[] = [];
   publicStatsCalls = 0;
+  relayListCalls = 0;
   readonly registerCalls: TetiNetworkRegisterIdentityRequest[] = [];
   readonly adoptCalls: TetiNetworkAdoptIdentityRequest[] = [];
   readonly selfCalls: TetiNetworkAuthenticatedSigner[] = [];
+  readonly relayBindingSelfCalls: TetiNetworkAuthenticatedSigner[] = [];
+  readonly relayBindingCreateCalls: Array<{
+    input: TetiNetworkPutRelayBindingRequest;
+    options: TetiNetworkRelayBindingWriteOptions;
+  }> = [];
+  readonly relayBindingAdoptCalls: Array<{
+    input: TetiNetworkAdoptRelayBindingRequest;
+    options: TetiNetworkRelayBindingWriteOptions;
+  }> = [];
+  readonly relayBindingMutationCalls: Array<{
+    bindingId: string;
+    command: "activate" | "revoke";
+    input: TetiNetworkMutateRelayBindingRequest;
+    options: TetiNetworkRelayBindingWriteOptions;
+  }> = [];
   readonly enrollCalls: TetiNetworkEnrollClientInstanceRequest[] = [];
   readonly revokeCalls: string[] = [];
   readonly presenceReportCalls: TetiNetworkPresenceReportRequest[] = [];
@@ -49,6 +76,9 @@ export class FakeTetiNetworkClient implements TetiNetworkClient {
   readonly relationshipListCalls: TetiNetworkRelationshipListQuery[] = [];
   readonly relationshipGetCalls: string[] = [];
   readonly relationshipPeerCalls: string[] = [];
+  readonly relationshipAuthorizationCalls: string[] = [];
+  readonly relationshipSnapshotCalls: TetiNetworkRelationshipSnapshotQuery[] = [];
+  readonly relationshipChangesCalls: TetiNetworkRelationshipChangesQuery[] = [];
   readonly relationshipRequestCalls: Array<{
     input: TetiNetworkRequestRelationshipRequest;
     options: TetiNetworkRelationshipWriteOptions;
@@ -72,6 +102,12 @@ export class FakeTetiNetworkClient implements TetiNetworkClient {
     discoverableNodeCount: 0,
     generatedAt: new Date(0).toISOString()
   };
+  private relayCatalogValue: TetiNetworkRelayCatalog = {
+    schemaVersion: 1,
+    relays: [],
+    generatedAt: new Date(0).toISOString()
+  };
+  private relayBindingResultValue: TetiNetworkRelayBindingResult | null = null;
   private identitySessionValue: TetiNetworkIdentitySession | null = null;
   private clientMutationValue: TetiNetworkClientInstanceDocument | null = null;
   private presenceReportValue: TetiNetworkPresenceReportResponse | null = null;
@@ -83,6 +119,19 @@ export class FakeTetiNetworkClient implements TetiNetworkClient {
   };
   private readonly relationshipValues = new Map<string, TetiNetworkRelationshipResult>();
   private readonly relationshipPeerValues = new Map<string, TetiNetworkRelationshipResult>();
+  private readonly relationshipAuthorizationValues = new Map<string, TetiNetworkRelationshipAuthorization>();
+  private relationshipSnapshotValue: TetiNetworkRelationshipSnapshotPage = {
+    schemaVersion: 1,
+    items: [],
+    baseCheckpoint: "rcp_empty",
+    page: { limit: 100, returnedCount: 0, nextCursor: null }
+  };
+  private relationshipChangesValue: TetiNetworkRelationshipChangesPage = {
+    schemaVersion: 1,
+    items: [],
+    checkpoint: "rcp_empty",
+    page: { limit: 100, returnedCount: 0, hasMore: false }
+  };
 
   constructor(bootstrap: TetiNetworkBootstrap) {
     this.bootstrapValue = structuredClone(bootstrap);
@@ -107,6 +156,14 @@ export class FakeTetiNetworkClient implements TetiNetworkClient {
 
   setPublicStats(stats: TetiNetworkPublicStats): void {
     this.publicStatsValue = structuredClone(stats);
+  }
+
+  setRelayCatalog(catalog: TetiNetworkRelayCatalog): void {
+    this.relayCatalogValue = structuredClone(catalog);
+  }
+
+  setRelayBindingResult(result: TetiNetworkRelayBindingResult): void {
+    this.relayBindingResultValue = structuredClone(result);
   }
 
   setIdentitySession(session: TetiNetworkIdentitySession): void {
@@ -136,6 +193,18 @@ export class FakeTetiNetworkClient implements TetiNetworkClient {
   setRelationshipResult(result: TetiNetworkRelationshipResult): void {
     this.relationshipValues.set(result.document.id, structuredClone(result));
     this.relationshipPeerValues.set(result.document.peerTetiId, structuredClone(result));
+  }
+
+  setRelationshipAuthorization(value: TetiNetworkRelationshipAuthorization): void {
+    this.relationshipAuthorizationValues.set(value.peerTetiId, structuredClone(value));
+  }
+
+  setRelationshipSnapshot(page: TetiNetworkRelationshipSnapshotPage): void {
+    this.relationshipSnapshotValue = structuredClone(page);
+  }
+
+  setRelationshipChanges(page: TetiNetworkRelationshipChangesPage): void {
+    this.relationshipChangesValue = structuredClone(page);
   }
 
   async getBootstrap(signal?: AbortSignal): Promise<TetiNetworkBootstrap> {
@@ -176,6 +245,13 @@ export class FakeTetiNetworkClient implements TetiNetworkClient {
     return structuredClone(this.publicStatsValue);
   }
 
+  async listRelays(signal?: AbortSignal): Promise<TetiNetworkRelayCatalog> {
+    assertNotAborted(signal);
+    this.relayListCalls += 1;
+    if (this.errorValue !== null) throw this.errorValue;
+    return structuredClone(this.relayCatalogValue);
+  }
+
   async registerIdentity(
     input: TetiNetworkRegisterIdentityRequest,
     _pendingClient: TetiNetworkSigningKey,
@@ -203,6 +279,52 @@ export class FakeTetiNetworkClient implements TetiNetworkClient {
     assertNotAborted(signal);
     this.selfCalls.push(authentication);
     return this.requireIdentitySession();
+  }
+
+  async getRelayBindingsSelf(
+    authentication: TetiNetworkAuthenticatedSigner,
+    signal?: AbortSignal
+  ): Promise<TetiNetworkRelayBindingResult> {
+    assertNotAborted(signal);
+    this.relayBindingSelfCalls.push(authentication);
+    return this.requireRelayBindingResult();
+  }
+
+  async createRelayBinding(
+    input: TetiNetworkPutRelayBindingRequest,
+    _authentication: TetiNetworkAuthenticatedSigner,
+    options: TetiNetworkRelayBindingWriteOptions
+  ): Promise<TetiNetworkRelayBindingResult> {
+    assertNotAborted(options.signal);
+    this.relayBindingCreateCalls.push({ input: structuredClone(input), options: { ...options } });
+    return this.requireRelayBindingResult();
+  }
+
+  async adoptRelayBinding(
+    input: TetiNetworkAdoptRelayBindingRequest,
+    _authentication: TetiNetworkAuthenticatedSigner,
+    options: TetiNetworkRelayBindingWriteOptions
+  ): Promise<TetiNetworkRelayBindingResult> {
+    assertNotAborted(options.signal);
+    this.relayBindingAdoptCalls.push({ input: structuredClone(input), options: { ...options } });
+    return this.requireRelayBindingResult();
+  }
+
+  async mutateRelayBinding(
+    bindingId: string,
+    command: "activate" | "revoke",
+    input: TetiNetworkMutateRelayBindingRequest,
+    _authentication: TetiNetworkAuthenticatedSigner,
+    options: TetiNetworkRelayBindingWriteOptions
+  ): Promise<TetiNetworkRelayBindingResult> {
+    assertNotAborted(options.signal);
+    this.relayBindingMutationCalls.push({
+      bindingId,
+      command,
+      input: structuredClone(input),
+      options: { ...options }
+    });
+    return this.requireRelayBindingResult();
   }
 
   async getProfileSelf(
@@ -311,6 +433,47 @@ export class FakeTetiNetworkClient implements TetiNetworkClient {
     return this.requireRelationship(this.relationshipPeerValues.get(peerTetiId));
   }
 
+  async getRelationshipAuthorization(
+    peerTetiId: string,
+    _authentication: TetiNetworkAuthenticatedSigner,
+    signal?: AbortSignal
+  ): Promise<TetiNetworkRelationshipAuthorization> {
+    assertNotAborted(signal);
+    this.relationshipAuthorizationCalls.push(peerTetiId);
+    if (this.errorValue !== null) throw this.errorValue;
+    return structuredClone(this.relationshipAuthorizationValues.get(peerTetiId) ?? {
+      schemaVersion: 1,
+      peerTetiId,
+      relationshipId: null,
+      relationshipRevision: null,
+      decision: "deny",
+      reason: "not_found",
+      evaluatedAt: new Date(0).toISOString()
+    });
+  }
+
+  async getRelationshipSnapshot(
+    query: TetiNetworkRelationshipSnapshotQuery = {},
+    _authentication: TetiNetworkAuthenticatedSigner,
+    signal?: AbortSignal
+  ): Promise<TetiNetworkRelationshipSnapshotPage> {
+    assertNotAborted(signal);
+    this.relationshipSnapshotCalls.push(structuredClone(query));
+    if (this.errorValue !== null) throw this.errorValue;
+    return structuredClone(this.relationshipSnapshotValue);
+  }
+
+  async getRelationshipChanges(
+    query: TetiNetworkRelationshipChangesQuery,
+    _authentication: TetiNetworkAuthenticatedSigner,
+    signal?: AbortSignal
+  ): Promise<TetiNetworkRelationshipChangesPage> {
+    assertNotAborted(signal);
+    this.relationshipChangesCalls.push(structuredClone(query));
+    if (this.errorValue !== null) throw this.errorValue;
+    return structuredClone(this.relationshipChangesValue);
+  }
+
   async requestRelationship(
     input: TetiNetworkRequestRelationshipRequest,
     _authentication: TetiNetworkAuthenticatedSigner,
@@ -344,6 +507,14 @@ export class FakeTetiNetworkClient implements TetiNetworkClient {
     if (this.errorValue !== null) throw this.errorValue;
     if (!this.identitySessionValue) throw new Error("Fake Network identity session is not configured.");
     return structuredClone(this.identitySessionValue);
+  }
+
+  private requireRelayBindingResult(): TetiNetworkRelayBindingResult {
+    if (this.errorValue !== null) throw this.errorValue;
+    if (!this.relayBindingResultValue) {
+      throw new Error("Fake Network RelayBinding result is not configured.");
+    }
+    return structuredClone(this.relayBindingResultValue);
   }
 
   private requireClientMutation(): TetiNetworkClientInstanceDocument {

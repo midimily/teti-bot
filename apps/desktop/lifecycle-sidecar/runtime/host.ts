@@ -36,7 +36,7 @@ export interface TetiRuntimeHostOptions {
 /**
  * Process-local lifecycle and scheduling owner for the existing Node sidecar.
  * Task 1 introduced the isolated skeleton; Task 2 connects the characterized
- * Registry, Chatmail, and Codex background jobs.
+ * Teti Network, Chatmail, and Codex background jobs.
  */
 export class TetiRuntimeHost {
   private readonly jobs: readonly TetiRuntimeScheduledJob[];

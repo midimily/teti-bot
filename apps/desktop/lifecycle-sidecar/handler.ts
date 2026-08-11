@@ -51,8 +51,7 @@ export interface LifecycleSidecarDependencies {
   loadTetiAccount(): Promise<TetiAccount | null>;
   createTetiAccount(input: { name: string }): Promise<TetiAccount>;
   getTetiStatus(): Promise<TetiStatus>;
-  registerDiscovery(account: TetiAccount): Promise<unknown>;
-  heartbeatDiscovery(): Promise<TetiAccount>;
+  synchronizeNetworkIdentity(): Promise<TetiAccount>;
   onNetworkIdentitySynchronized?(account: TetiAccount): Promise<void>;
   getPeerConnectionService(): Promise<PeerConnectionService>;
   getLocalReleaseStatus?(): Promise<LocalReleaseStatus> | LocalReleaseStatus;
@@ -90,15 +89,10 @@ export const defaultLifecycleSidecarDependencies: LifecycleSidecarDependencies =
   },
   createTetiAccount: async (input) => createGuardedRealTetiAccount(input),
   getTetiStatus: async () => (await getDefaultAccountManager()).getTetiStatus(),
-  registerDiscovery: async () => {
-    throw new Error("Network identity synchronization is owned by Teti Runtime.");
+  synchronizeNetworkIdentity: async () => {
+    throw new Error("Network identity synchronization is unavailable before Runtime startup.");
   },
-  heartbeatDiscovery: async () => {
-    const account = await (await getDefaultAccountManager()).loadTetiAccount();
-    if (!account) throw new Error("A local Teti account is required.");
-    return account;
-  },
-  onNetworkIdentitySynchronized: markDiscoveryRegistrationComplete,
+  onNetworkIdentitySynchronized: markNetworkIdentitySynchronizationComplete,
   getPeerConnectionService: async () => {
     throw new Error("Peer Network composition is unavailable before Runtime startup.");
   }
@@ -227,18 +221,10 @@ async function dispatchLifecycleRequest(
       return publicAccount(await dependencies.createTetiAccount({ name }));
     }
 
-    case "discovery.register":
-    case "discovery.retry": {
-      const account = await dependencies.loadTetiAccount();
-      if (!account) {
-        throw new Error("Cannot register discovery without a local Teti account.");
-      }
-      await dependencies.registerDiscovery(account);
+    case "network.identity.retry": {
+      const account = await dependencies.synchronizeNetworkIdentity();
       return statusToDto(await dependencies.getTetiStatus(), account);
     }
-
-    case "discovery.heartbeat":
-      return publicAccount(await dependencies.heartbeatDiscovery());
 
     case "connection.resolve":
       return (await dependencies.getPeerConnectionService()).resolve(validateConnectionQuery(request.params?.query));
@@ -742,7 +728,7 @@ function validateExplicitMemoryConfirmation(value: unknown): true {
 function statusToDto(status: TetiStatus, account: TetiAccount | null): LifecycleStatusResult {
   const result: LifecycleStatusResult = {
     exists: status.exists,
-    registry: { ...status.registry },
+    networkIdentity: { ...status.networkIdentity },
     onlineStatus: status.onlineStatus
   };
 
@@ -789,11 +775,8 @@ function fallbackCodeForMethod(method: LifecycleRequest["method"]) {
     case "presence.get":
     case "presence.signal.set":
       return "INTERNAL_ERROR";
-    case "discovery.register":
-    case "discovery.retry":
-      return "DISCOVERY_REGISTRATION_FAILED";
-    case "discovery.heartbeat":
-      return "DISCOVERY_HEARTBEAT_FAILED";
+    case "network.identity.retry":
+      return "NETWORK_IDENTITY_FAILED";
     case "connection.resolve":
       return "CONNECTION_RESOLVE_FAILED";
     case "connection.request":
@@ -860,9 +843,19 @@ function failure(id: string | null, error: ReturnType<typeof createLifecycleErro
 
 let accountCreationInFlight: Promise<TetiAccount> | null = null;
 
-async function createGuardedRealTetiAccount(input: { name: string }): Promise<TetiAccount> {
+export interface GuardedTetiAccountCreationOptions {
+  resolveAccountProvisioning?(): Promise<{
+    accountQr: string;
+    expectedAddressSuffix: string;
+  }>;
+}
+
+export async function createGuardedRealTetiAccount(
+  input: { name: string },
+  options: GuardedTetiAccountCreationOptions = {}
+): Promise<TetiAccount> {
   if (accountCreationInFlight) return accountCreationInFlight;
-  const creation = performGuardedRealTetiAccountCreation(input);
+  const creation = performGuardedRealTetiAccountCreation(input, options);
   accountCreationInFlight = creation;
   try {
     return await creation;
@@ -871,7 +864,10 @@ async function createGuardedRealTetiAccount(input: { name: string }): Promise<Te
   }
 }
 
-async function performGuardedRealTetiAccountCreation(input: { name: string }): Promise<TetiAccount> {
+async function performGuardedRealTetiAccountCreation(
+  input: { name: string },
+  options: GuardedTetiAccountCreationOptions
+): Promise<TetiAccount> {
   const report = await validateAuthorizedProvisioningProfile();
   if (!report.ok || !report.profile) {
     throw new Error(report.errors.map((error) => error.message).join(" "));
@@ -879,12 +875,21 @@ async function performGuardedRealTetiAccountCreation(input: { name: string }): P
 
   const profile = report.profile;
   await ensureProfileDirectories(profile);
+  const existing = await createProfiledAccountManager(profile).loadTetiAccount();
+  if (existing) {
+    throw new Error("A Teti account already exists locally. Refusing duplicate creation.");
+  }
+  if (!options.resolveAccountProvisioning) {
+    throw new Error("Teti Network Relay provisioning authority is unavailable.");
+  }
+  const accountProvisioning = await options.resolveAccountProvisioning();
   const startedAt = new Date().toISOString();
   const transaction: {
     stage: "provisioning" | "identity_created" | "persisting" | "persisted" | "complete";
     account?: TetiAccount;
   } = { stage: "provisioning" };
   const manager = createProfiledAccountManager(profile, {
+    accountProvisioning,
     onCreationStage: async (stage, account) => {
       transaction.stage = stage;
       transaction.account = account;
@@ -905,11 +910,6 @@ async function performGuardedRealTetiAccountCreation(input: { name: string }): P
       }
     }
   });
-  const existing = await manager.loadTetiAccount();
-  if (existing) {
-    throw new Error("A Teti account already exists locally. Refusing duplicate creation.");
-  }
-
   const marker = await readCreationMarker(profile);
   if (isUnsafeIncompleteMarker(marker)) {
     throw new Error(`Unsafe incomplete creation marker found at stage ${marker?.stage}.`);
@@ -921,7 +921,10 @@ async function performGuardedRealTetiAccountCreation(input: { name: string }): P
   });
 
   try {
-    const account = await manager.createTetiAccount(input);
+    const account = await manager.createTetiAccount({
+      ...input,
+      chatmailQr: accountProvisioning.accountQr
+    });
     try {
       await writeCreationMarker(profile, {
         stage: "complete",
@@ -971,7 +974,7 @@ function readProvisioningDiagnostic(error: unknown): { code?: string; stage?: st
   return { code, stage };
 }
 
-async function markDiscoveryRegistrationComplete(account: TetiAccount): Promise<void> {
+async function markNetworkIdentitySynchronizationComplete(account: TetiAccount): Promise<void> {
   const profile = await resolveTetiProfile();
   await ensureProfileDirectories(profile);
   const marker = await readCreationMarker(profile);

@@ -16,6 +16,7 @@ import { parseConnectionEnvelope, TetiConnectionProtocolError } from "../../../c
 import type { TetiConnectionStorage } from "../../../core/connection/storage.ts";
 import { FileTetiConnectionStorage } from "../../../core/connection/storage.ts";
 import {
+  isNetworkRelationshipConfirmed,
   isTetiConnectionConfirmed,
   TetiConnectionState,
   type TetiConnectionAccept,
@@ -72,10 +73,11 @@ import type {
   ChatmailAdapter,
   ChatmailReceivedMessage
 } from "../../../integrations/chatmail/types.ts";
-import { toTetiIdentity, type TetiRegistryReader } from "../../../services/discovery/client.ts";
+import { toTetiIdentity, type TetiPublicDirectoryReader } from "../../../services/discovery/client.ts";
 import type { TetiIdentity } from "../../../services/discovery/types.ts";
 import type { TetiNetworkRelationshipDocument } from "../../../services/network/types.ts";
 import type { TetiNetworkRelationshipService } from "../../../services/network/relationship-service.ts";
+import { TetiNetworkClientError } from "../../../services/network/errors.ts";
 import type {
   PeerConnectionDto,
   PeerConnectionRequestOutcome,
@@ -96,6 +98,7 @@ import {
 } from "./runtime/passport/peer-capabilities.ts";
 import {
   isArchivedNetworkRelationship,
+  networkRelationshipDocumentFingerprint,
   projectNetworkRelationshipRecovery
 } from "./runtime/network/relationship.ts";
 import { getDefaultCodexUsageService } from "./codex-usage/runtime.ts";
@@ -117,12 +120,34 @@ import type {
   DelegationTargetOption,
   DelegationTargetSelection
 } from "../../../core/delegation/types.ts";
+import { writeRuntimeDiagnostic } from "./diagnostics.ts";
+import { redactSecretLikeText } from "./security.ts";
 
 const HEARTBEAT_INTERVAL_MS = 5_000;
+export const CHATMAIL_HEARTBEAT_RETRY_DELAYS_MS = [
+  5_000,
+  15_000,
+  30_000,
+  60_000,
+  5 * 60_000
+] as const;
 const AI_STATUS_SYNC_INTERVAL_MS = 10 * 60 * 1_000;
 const AI_STATUS_TTL_MS = 30 * 60 * 1_000;
 const PEER_PROFILE_CACHE_TTL_MS = 15 * 60 * 1_000;
 const TETI_TASK_ATTACHMENT_FILENAME_PATTERN = /^(?:teti-task-)?[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}\.(?:png|jpe?g)$/i;
+
+export class RelationshipAuthorizationDeniedError extends Error {
+  readonly code = "RELATIONSHIP_AUTHORIZATION_DENIED";
+  readonly peerTetiId: string;
+  readonly reason: string;
+
+  constructor(peerTetiId: string, reason: string) {
+    super(`Teti Network denied collaboration with ${peerTetiId}: ${reason}.`);
+    this.name = "RelationshipAuthorizationDeniedError";
+    this.peerTetiId = peerTetiId;
+    this.reason = reason;
+  }
+}
 
 export interface PeerConnectionService {
   resolve(query: string): Promise<PublicTetiIdentity>;
@@ -168,7 +193,7 @@ interface PeerConnectionRuntimeOptions {
   accountStorage: TetiAccountStorage;
   connectionStorage: TetiConnectionStorage;
   chatmailAdapter: ChatmailAdapter;
-  registry: TetiRegistryReader;
+  directory: TetiPublicDirectoryReader;
   startIo?: (accountId: number) => Promise<void>;
   now?: () => Date;
   passportSharing?: PassportSharingStore;
@@ -182,13 +207,29 @@ interface PeerConnectionRuntimeOptions {
   workspaceStore?: CollaborationWorkspaceStore;
   taskExecutor?: TaskExecutionBridge;
   relationshipService?: TetiNetworkRelationshipService;
+  allowLegacyRelationshipAuthorityForTests?: true;
+  onHeartbeatDeliveryDiagnostic?: (diagnostic: ChatmailHeartbeatDeliveryDiagnostic) => void;
+}
+
+export interface ChatmailHeartbeatDeliveryDiagnostic {
+  result: "failed" | "recovered";
+  peerTetiId: string;
+  attempt: number;
+  nextRetryMs?: number;
+  code?: string;
+  message?: string;
+}
+
+interface ChatmailHeartbeatRetryState {
+  attempt: number;
+  nextAttemptAt: number;
 }
 
 export class PeerConnectionRuntime implements PeerConnectionService {
   private readonly accountStorage: TetiAccountStorage;
   private readonly connectionStorage: TetiConnectionStorage;
   private readonly chatmailAdapter: ChatmailAdapter;
-  private readonly registry: TetiRegistryReader;
+  private readonly directory: TetiPublicDirectoryReader;
   private readonly connectionManager: TetiConnectionManager;
   private readonly applicationManager: TetiApplicationManager;
   private readonly messagingAdapter: ChatmailConnectionMessagingAdapter;
@@ -201,8 +242,12 @@ export class PeerConnectionRuntime implements PeerConnectionService {
   private readonly getLocalComputeOffers: () => AgentComputeOffer[];
   private readonly peerProtocolCapabilities: PeerProtocolCapabilityStore;
   private readonly relationshipService?: TetiNetworkRelationshipService;
+  private readonly onHeartbeatDeliveryDiagnostic: (
+    diagnostic: ChatmailHeartbeatDeliveryDiagnostic
+  ) => void;
   private readonly heartbeatSent = new Map<string, string>();
   private readonly heartbeatReceived = new Map<string, string>();
+  private readonly heartbeatRetries = new Map<string, ChatmailHeartbeatRetryState>();
   private readonly aiStatusSent = new Map<string, { at: string; signature: string }>();
   private readonly remoteAiStatus = new Map<string, RemoteAiStatusSnapshot>();
   private readonly identityCache = new Map<string, TetiIdentity>();
@@ -216,10 +261,13 @@ export class PeerConnectionRuntime implements PeerConnectionService {
   private aiStatusBroadcastQueued = false;
 
   constructor(options: PeerConnectionRuntimeOptions) {
+    if (!options.relationshipService && options.allowLegacyRelationshipAuthorityForTests !== true) {
+      throw new Error("Teti Network Relationship service is required by Beta 0.3.8 Runtime.");
+    }
     this.accountStorage = options.accountStorage;
     this.connectionStorage = options.connectionStorage;
     this.chatmailAdapter = options.chatmailAdapter;
-    this.registry = options.registry;
+    this.directory = options.directory;
     this.startIo = options.startIo;
     this.now = options.now ?? (() => new Date());
     this.passportSharing = options.passportSharing ?? new MemoryPassportSharingStore();
@@ -229,6 +277,8 @@ export class PeerConnectionRuntime implements PeerConnectionService {
     this.peerProtocolCapabilities = options.peerProtocolCapabilities
       ?? new MemoryPeerProtocolCapabilityStore();
     this.relationshipService = options.relationshipService;
+    this.onHeartbeatDeliveryDiagnostic = options.onHeartbeatDeliveryDiagnostic
+      ?? ((diagnostic) => writeRuntimeDiagnostic("chatmail.presence-delivery", { ...diagnostic }));
     this.messagingAdapter = new ChatmailConnectionMessagingAdapter(this.chatmailAdapter);
     this.connectionManager = new TetiConnectionManager({
       accountStorage: this.accountStorage,
@@ -239,7 +289,8 @@ export class PeerConnectionRuntime implements PeerConnectionService {
       accountStorage: this.accountStorage,
       connectionStorage: this.connectionStorage,
       chatmailAdapter: this.chatmailAdapter,
-      now: () => this.now().toISOString()
+      now: () => this.now().toISOString(),
+      authorizePeer: (peerTetiId) => this.requireNetworkAuthorization(peerTetiId)
     });
     this.taskTransport = new TaskTransportRuntime({
       accountStorage: this.accountStorage,
@@ -251,6 +302,7 @@ export class PeerConnectionRuntime implements PeerConnectionService {
       attachmentStore: options.taskAttachmentStore,
       workspaceStore: options.workspaceStore,
       executor: options.taskExecutor,
+      authorizePeer: (peerTetiId) => this.requireNetworkAuthorization(peerTetiId),
       enqueueOperation: (operation) => this.serial(operation)
     });
   }
@@ -274,18 +326,7 @@ export class PeerConnectionRuntime implements PeerConnectionService {
           remote.id
         );
         const result = await this.relationshipService.request(remote.id);
-        if (prior?.state === TetiConnectionState.PendingApproval) {
-          await acceptConnection(prior.requestId, this.handshakeOptions()).catch(() => undefined);
-        }
-        const connection = await this.applyNetworkRelationship(result.document, remote);
-        if (!prior && result.document.state === "requested") {
-          await this.messagingAdapter.sendConnectionRequest({
-            accountId: local.chatmailAccountId,
-            toAddress: remote.address,
-            toPublicKey: remote.publicKey,
-            request: connection.request
-          }).catch(() => undefined);
-        }
+        await this.applyNetworkRelationship(result.document, remote);
         if (result.document.state === "confirmed") {
           await this.sendDueHeartbeats();
           await this.sendDueAiStatus(true);
@@ -338,7 +379,7 @@ export class PeerConnectionRuntime implements PeerConnectionService {
         if (this.identityCache.has(connection.remoteTetiId)
           && nowMs - refreshedAt < PEER_PROFILE_CACHE_TTL_MS) continue;
         try {
-          const discovered = await this.registry.getIdentity(connection.remoteTetiId);
+          const discovered = await this.directory.getIdentity(connection.remoteTetiId);
           if (!discovered) {
             throw new Error("The peer Network profile is not available yet.");
           }
@@ -348,6 +389,16 @@ export class PeerConnectionRuntime implements PeerConnectionService {
           }
           this.identityCache.set(identity.id, identity);
           this.identityRefreshedAt.set(identity.id, nowMs);
+          if (identity.publicKey && identity.publicKey !== connection.remotePublicKey) {
+            await this.connectionStorage.update(connection.requestId, {
+              remotePublicKey: identity.publicKey
+            });
+            this.forceHeartbeatAfterTransportBootstrap(
+              connection.requestId,
+              connection.remotePublicKey,
+              identity.publicKey
+            );
+          }
         } catch (error) {
           failures.push(error);
         }
@@ -401,19 +452,29 @@ export class PeerConnectionRuntime implements PeerConnectionService {
             processed = true;
           }
         } catch (error) {
-          if (isPendingTaskMessageError(error)) {
+          if (error instanceof RelationshipAuthorizationDeniedError) {
+            // A fresh authoritative deny permanently rejects this in-flight
+            // collaboration message at its current Relationship revision.
+            processed = true;
+          } else if (error instanceof TetiNetworkClientError) {
+            // Authorization could not be evaluated. Keep the Chatmail message
+            // unacknowledged so a later healthy Network read can decide it.
+            this.messageProcessingFailures.delete(message.messageId);
+            continue;
+          } else if (isPendingTaskMessageError(error)) {
             // Waiting for a Task dependency or an asynchronous DeltaChat
             // attachment download is not a processing failure. Keep the
             // message fresh until it can be persisted or its envelope expires.
             this.messageProcessingFailures.delete(message.messageId);
             continue;
+          } else {
+            const failures = (this.messageProcessingFailures.get(message.messageId) ?? 0) + 1;
+            this.messageProcessingFailures.set(message.messageId, failures);
+            // A dependent Task envelope is deliberately left fresh until the
+            // corresponding immutable Task record arrives. Other malformed or
+            // persistently failing messages are isolated after bounded retries.
+            processed = failures >= 5;
           }
-          const failures = (this.messageProcessingFailures.get(message.messageId) ?? 0) + 1;
-          this.messageProcessingFailures.set(message.messageId, failures);
-          // A dependent Task envelope is deliberately left fresh until the
-          // corresponding immutable Task record arrives. Other malformed or
-          // persistently failing messages are isolated after bounded retries.
-          processed = failures >= 5;
         }
         if (processed) {
           try {
@@ -477,11 +538,7 @@ export class PeerConnectionRuntime implements PeerConnectionService {
       await this.ensureReady();
       if (this.relationshipService) {
         const id = requireRequestId(requestId);
-        const existing = await findConnection(this.connectionStorage, id);
         const result = await this.relationshipService.accept(id);
-        if (existing?.state === TetiConnectionState.PendingApproval) {
-          await acceptConnection(id, this.handshakeOptions()).catch(() => undefined);
-        }
         await this.applyNetworkRelationship(result.document);
         await this.sendDueHeartbeats();
         await this.sendDueAiStatus(true);
@@ -499,11 +556,7 @@ export class PeerConnectionRuntime implements PeerConnectionService {
       await this.ensureReady();
       if (this.relationshipService) {
         const id = requireRequestId(requestId);
-        const existing = await findConnection(this.connectionStorage, id);
         const result = await this.relationshipService.reject(id);
-        if (existing) {
-          await rejectConnection(id, this.handshakeOptions(), "declined").catch(() => undefined);
-        }
         await this.applyNetworkRelationship(result.document);
         return this.snapshot();
       }
@@ -652,7 +705,7 @@ export class PeerConnectionRuntime implements PeerConnectionService {
   }
 
   private async resolveRemote(query: string): Promise<TetiIdentity> {
-    const identity = await resolveIdentityQuery(query, this.registry);
+    const identity = await resolveIdentityQuery(query, this.directory);
     this.identityCache.set(identity.id, identity);
     this.identityRefreshedAt.set(identity.id, this.now().getTime());
     return identity;
@@ -660,9 +713,10 @@ export class PeerConnectionRuntime implements PeerConnectionService {
 
   private async synchronizeNetworkRelationships(): Promise<void> {
     if (!this.relationshipService) return;
-    for (const document of await this.relationshipService.synchronize()) {
-      await this.applyNetworkRelationship(document);
-    }
+    await this.relationshipService.reconcile(
+      (document) => this.applyNetworkRelationship(document).then(() => undefined)
+    );
+    await this.backfillConfirmedTransportBootstrap();
   }
 
   private async applyNetworkRelationship(
@@ -675,10 +729,30 @@ export class PeerConnectionRuntime implements PeerConnectionService {
     const peerRecovery = exact ?? connections.find(
       (connection) => connection.remoteTetiId === document.peerTetiId
     );
+    const recoveryRelationship = peerRecovery?.networkRelationship;
+    const incomingFingerprint = networkRelationshipDocumentFingerprint(document);
+    if (recoveryRelationship && recoveryRelationship.revision > document.revision) {
+      return peerRecovery!;
+    }
+    if (recoveryRelationship && recoveryRelationship.revision === document.revision) {
+      if (recoveryRelationship.documentFingerprint
+        && recoveryRelationship.documentFingerprint !== incomingFingerprint) {
+        throw new TetiNetworkClientError({
+          code: "NETWORK_CONFLICT",
+          operation: "relationship_reconciliation_changes",
+          message: "Teti Network returned divergent Relationship content at the same revision.",
+          retryable: false
+        });
+      }
+      const transportBootstrapComplete = Boolean(exact?.remotePublicKey);
+      if (exact
+        && recoveryRelationship.documentFingerprint === incomingFingerprint
+        && transportBootstrapComplete) return exact;
+    }
     const cached = this.identityCache.get(document.peerTetiId);
     let remote = knownRemote ?? cached;
     if (!remote) {
-      const discovered = await this.registry.getIdentity(document.peerTetiId).catch(() => null);
+      const discovered = await this.directory.getIdentity(document.peerTetiId).catch(() => null);
       if (discovered) remote = toTetiIdentity(discovered);
     }
     remote ??= peerRecovery ? identityFromRecovery(peerRecovery) : undefined;
@@ -721,7 +795,53 @@ export class PeerConnectionRuntime implements PeerConnectionService {
       throw new Error(`Network Relationship ${document.id} could not be archived locally.`);
     }
     await this.connectionStorage.upsert(projected);
+    this.forceHeartbeatAfterTransportBootstrap(
+      projected.requestId,
+      exact?.remotePublicKey ?? peerRecovery?.remotePublicKey,
+      projected.remotePublicKey
+    );
     return projected;
+  }
+
+  private async backfillConfirmedTransportBootstrap(): Promise<void> {
+    const failures: unknown[] = [];
+    for (const connection of await this.connectionStorage.loadAll()) {
+      if (!isNetworkRelationshipConfirmed(connection) || connection.remotePublicKey) continue;
+      try {
+        const discovered = await this.directory.getIdentity(connection.remoteTetiId);
+        if (!discovered) throw new Error("The peer Network delivery identity is unavailable.");
+        const identity = toTetiIdentity(discovered);
+        if (identity.address.toLowerCase() !== connection.remoteAddress.toLowerCase()) {
+          throw new Error("The peer Network delivery address does not match Relationship recovery state.");
+        }
+        if (!identity.publicKey) {
+          throw new Error("The peer Network delivery public key is unavailable.");
+        }
+        await this.connectionStorage.update(connection.requestId, {
+          remotePublicKey: identity.publicKey
+        });
+        this.identityCache.set(identity.id, identity);
+        this.identityRefreshedAt.set(identity.id, this.now().getTime());
+        this.forceHeartbeatAfterTransportBootstrap(
+          connection.requestId,
+          connection.remotePublicKey,
+          identity.publicKey
+        );
+      } catch (error) {
+        failures.push(error);
+      }
+    }
+    if (failures.length > 0) throw failures[0];
+  }
+
+  private forceHeartbeatAfterTransportBootstrap(
+    requestId: string,
+    previousPublicKey: string | undefined,
+    currentPublicKey: string | undefined
+  ): void {
+    if (!currentPublicKey || currentPublicKey === previousPublicKey) return;
+    this.heartbeatRetries.delete(requestId);
+    this.heartbeatSent.delete(requestId);
   }
 
   private mutateNetworkRelationship(
@@ -742,8 +862,17 @@ export class PeerConnectionRuntime implements PeerConnectionService {
   }
 
   private isAuthorizedConnection(connection: TetiConnectionRecord): boolean {
-    return isTetiConnectionConfirmed(connection)
-      && (!this.relationshipService || Boolean(connection.networkRelationship));
+    return this.relationshipService
+      ? isNetworkRelationshipConfirmed(connection)
+      : isTetiConnectionConfirmed(connection);
+  }
+
+  private async requireNetworkAuthorization(peerTetiId: string): Promise<void> {
+    if (!this.relationshipService) return;
+    const authorization = await this.relationshipService.authorizePeer(peerTetiId);
+    if (authorization.decision !== "allow" || authorization.reason !== "confirmed") {
+      throw new RelationshipAuthorizationDeniedError(peerTetiId, authorization.reason);
+    }
   }
 
   private async ensureReady(): Promise<void> {
@@ -772,6 +901,11 @@ export class PeerConnectionRuntime implements PeerConnectionService {
       if (error instanceof TetiConnectionProtocolError) return false;
       throw error;
     }
+
+    // Revision 7 makes Network the sole Relationship authority. Legacy
+    // Chatmail handshake envelopes remain transport-compatible but cannot
+    // create, accept, reject, or otherwise promote local permission.
+    if (this.relationshipService) return true;
 
     const options = this.handshakeOptions(receivedAt);
     if (envelope.type === "teti.connection.request") {
@@ -821,6 +955,7 @@ export class PeerConnectionRuntime implements PeerConnectionService {
         (!fromAddress || item.remoteAddress.toLowerCase() === fromAddress.toLowerCase())
     );
     if (!connection) return false;
+    await this.requireNetworkAuthorization(connection.remoteTetiId);
 
     if (envelope.type === "teti.presence") {
       const payload = envelope.payload as TetiPresencePayload;
@@ -998,6 +1133,7 @@ export class PeerConnectionRuntime implements PeerConnectionService {
       && (!fromAddress || item.remoteAddress.toLowerCase() === fromAddress.toLowerCase())
     );
     if (!connection) return false;
+    await this.requireNetworkAuthorization(connection.remoteTetiId);
     const observedAt = validReceivedHeartbeatTimestamp(receivedAt, this.now());
     const previous = this.heartbeatReceived.get(connection.requestId);
     if (!previous || Date.parse(observedAt) > Date.parse(previous)) {
@@ -1016,22 +1152,56 @@ export class PeerConnectionRuntime implements PeerConnectionService {
     const now = this.now();
     for (const connection of await this.connectionStorage.loadAll()) {
       if (!this.isAuthorizedConnection(connection)) continue;
+      const retry = this.heartbeatRetries.get(connection.requestId);
+      if (retry && now.getTime() < retry.nextAttemptAt) continue;
       const previous = this.heartbeatSent.get(connection.requestId);
       if (previous && now.getTime() - Date.parse(previous) < HEARTBEAT_INTERVAL_MS) continue;
       const timestamp = now.toISOString();
       try {
-        await this.applicationManager.sendPresence(connection.requestId, {
+        const delivery = await this.applicationManager.sendPresence(connection.requestId, {
           status: "alpha-heartbeat",
           timestamp,
           collaborationProtocolEpoch: TETI_COLLABORATION_PROTOCOL_EPOCH,
           taskProtocolVersions: [...TETI_SUPPORTED_TASK_PROTOCOL_VERSIONS],
           passportSchemaVersions: [...TETI_SUPPORTED_PASSPORT_SCHEMA_VERSIONS]
         });
+        const account = await this.requireAccount();
+        await this.chatmailAdapter.waitForDelivery?.({
+          accountId: account.chatmailAccountId,
+          messageId: delivery.messageId
+        });
         this.heartbeatSent.set(connection.requestId, timestamp);
+        const recovered = this.heartbeatRetries.get(connection.requestId);
+        this.heartbeatRetries.delete(connection.requestId);
+        if (recovered) {
+          this.onHeartbeatDeliveryDiagnostic({
+            result: "recovered",
+            peerTetiId: connection.remoteTetiId,
+            attempt: recovered.attempt
+          });
+        }
         sent += 1;
-      } catch {
+      } catch (error) {
+        const attempt = (retry?.attempt ?? 0) + 1;
+        const nextRetryMs = CHATMAIL_HEARTBEAT_RETRY_DELAYS_MS[
+          Math.min(attempt - 1, CHATMAIL_HEARTBEAT_RETRY_DELAYS_MS.length - 1)
+        ];
+        this.heartbeatRetries.set(connection.requestId, {
+          attempt,
+          nextAttemptAt: now.getTime() + nextRetryMs
+        });
+        const code = readErrorCode(error);
+        this.onHeartbeatDeliveryDiagnostic({
+          result: "failed",
+          peerTetiId: connection.remoteTetiId,
+          attempt,
+          nextRetryMs,
+          ...(code ? { code } : {}),
+          message: redactSecretLikeText(error instanceof Error ? error.message : String(error))
+        });
         // One unavailable peer must not delay heartbeats for the remaining
-        // confirmed connections. The next Runtime poll retries this peer.
+        // confirmed connections. Bounded backoff prevents a failed Relay from
+        // creating one permanently failed DeltaChat row on every Runtime poll.
       }
     }
     return sent;
@@ -1241,6 +1411,11 @@ function validReceivedHeartbeatTimestamp(receivedAt: string | undefined, now: Da
   return new Date(timestamp).toISOString();
 }
 
+function readErrorCode(error: unknown): string | undefined {
+  if (typeof error !== "object" || error === null || !("code" in error)) return undefined;
+  return typeof error.code === "string" ? error.code : undefined;
+}
+
 function canonicalPeerConnections(
   connections: readonly TetiConnectionRecord[]
 ): TetiConnectionRecord[] {
@@ -1273,8 +1448,8 @@ let defaultRpcClient: RuntimeChatmailRpcClient | undefined;
 let defaultPassportSharingStorePromise: Promise<FilePassportSharingStore> | undefined;
 
 export interface DefaultPeerConnectionServiceOptions {
-  registry: TetiRegistryReader;
-  relationshipService?: TetiNetworkRelationshipService;
+  directory: TetiPublicDirectoryReader;
+  relationshipService: TetiNetworkRelationshipService;
   getLocalCallableAgents?: () => CallableAgent[];
   getLocalComputeOffers?: () => AgentComputeOffer[];
   taskExecutor?: TaskExecutionBridge;
@@ -1321,7 +1496,7 @@ async function createDefaultPeerConnectionService(
     accountStorage,
     connectionStorage,
     chatmailAdapter,
-    registry: options.registry,
+    directory: options.directory,
     startIo: (accountId) => defaultRpcClient!.startIo(accountId),
     passportSharing: await getDefaultPassportSharingStore(),
     getLocalAiTools: () => [createShareableCodexStatus(getDefaultCodexUsageService().getCurrentState())],
@@ -1341,10 +1516,10 @@ async function createDefaultPeerConnectionService(
 
 export async function resolveIdentityQuery(
   rawQuery: string,
-  registry: TetiRegistryReader
+  directory: TetiPublicDirectoryReader
 ): Promise<TetiIdentity> {
   const publicId = normalizePublicTetiId(rawQuery);
-  const identity = await registry.getIdentity(`teti_${publicId}`);
+  const identity = await directory.getIdentity(`teti_${publicId}`);
   if (!identity) {
     throw new Error("No public Teti identity matched this ID.");
   }
@@ -1369,7 +1544,8 @@ function identityFromRecovery(connection: TetiConnectionRecord): TetiIdentity {
   return {
     id: connection.remoteTetiId,
     address: connection.remoteAddress,
-    publicKey: connection.direction === "incoming" ? connection.request.publicKey : undefined,
+    publicKey: connection.remotePublicKey
+      ?? (connection.direction === "incoming" ? connection.request.publicKey : undefined),
     publicProfile: {
       platform: connection.request.profile.platform,
       category: [...connection.request.profile.category],
