@@ -16,10 +16,16 @@ import {
   MAX_TASK_IMAGE_DIMENSION,
   MAX_TASK_IMAGE_PARTS,
   MAX_TASK_IMAGE_TOTAL_BYTES,
+  MAX_TASK_ARTIFACT_BYTES,
+  type CollaborationTaskArtifact,
   type TaskImageMimeType,
   type TaskImagePart
 } from "../../../../../core/task/types.ts";
-import { validateTaskImagePart } from "../../../../../core/task/validation.ts";
+import {
+  validateTaskArtifact,
+  validateTaskImagePart
+} from "../../../../../core/task/validation.ts";
+import type { TetiTaskArtifactFilePayload } from "../../../../../core/task/transport.ts";
 
 const PNG_SIGNATURE = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
 const SAFE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
@@ -31,6 +37,13 @@ export interface StagedTaskImage {
   part: TaskImagePart;
   path: string;
   safeFileName: string;
+}
+
+export interface StagedTaskArtifactDocument {
+  path: string;
+  safeFileName: string;
+  byteLength: number;
+  sha256: string;
 }
 
 export type StoredTaskAttachmentPurpose = "input" | "artifact";
@@ -51,6 +64,14 @@ export interface TaskAttachmentStore {
     purpose: StoredTaskAttachmentPurpose;
     part: TaskImagePart;
   }): Promise<string | null>;
+  stageArtifactDocument(
+    taskId: string,
+    artifact: CollaborationTaskArtifact
+  ): Promise<StagedTaskArtifactDocument>;
+  readArtifactDocument(
+    sourcePath: string,
+    descriptor: TetiTaskArtifactFilePayload
+  ): Promise<CollaborationTaskArtifact>;
   removeTask(taskId: string): Promise<void>;
   cleanup(now?: Date): Promise<void>;
 }
@@ -139,11 +160,65 @@ export class FileTaskAttachmentStore implements TaskAttachmentStore {
     }
   }
 
+  async stageArtifactDocument(
+    taskId: string,
+    artifact: CollaborationTaskArtifact
+  ): Promise<StagedTaskArtifactDocument> {
+    requireSafeTaskId(taskId);
+    validateTaskArtifact(artifact);
+    if (artifact.taskId !== taskId) throw new Error("TASK_ARTIFACT_IDENTITY_MISMATCH");
+    const bytes = Buffer.from(JSON.stringify(artifact), "utf8");
+    if (bytes.byteLength <= 0 || bytes.byteLength > MAX_TASK_ARTIFACT_BYTES) {
+      throw new Error("TASK_ARTIFACT_SIZE_INVALID");
+    }
+    const safeFileName = `${artifact.artifactId}.teti-artifact.json`;
+    const path = join(this.root, "artifact-document", taskId, safeFileName);
+    await requireGlobalStoreQuota(this.root, path, bytes.byteLength);
+    await atomicPrivateWrite(path, bytes);
+    return {
+      path,
+      safeFileName,
+      byteLength: bytes.byteLength,
+      sha256: digest(bytes)
+    };
+  }
+
+  async readArtifactDocument(
+    sourcePath: string,
+    descriptor: TetiTaskArtifactFilePayload
+  ): Promise<CollaborationTaskArtifact> {
+    const canonical = await requireRegularArtifactFile(sourcePath);
+    const info = await stat(canonical);
+    if (info.size !== descriptor.byteLength
+      || info.size <= 0
+      || info.size > MAX_TASK_ARTIFACT_BYTES) {
+      throw new Error("TASK_ARTIFACT_FILE_SIZE_MISMATCH");
+    }
+    const bytes = await readFile(canonical);
+    if (digest(bytes) !== descriptor.sha256) {
+      throw new Error("TASK_ARTIFACT_FILE_DIGEST_MISMATCH");
+    }
+    let artifact: unknown;
+    try {
+      artifact = JSON.parse(bytes.toString("utf8"));
+    } catch {
+      throw new Error("TASK_ARTIFACT_FILE_INVALID");
+    }
+    validateTaskArtifact(artifact);
+    if (artifact.taskId !== descriptor.taskId
+      || artifact.artifactId !== descriptor.artifactId
+      || artifact.createdAt !== descriptor.createdAt) {
+      throw new Error("TASK_ARTIFACT_FILE_IDENTITY_MISMATCH");
+    }
+    return structuredClone(artifact);
+  }
+
   async removeTask(taskId: string): Promise<void> {
     requireSafeTaskId(taskId);
     await Promise.all([
       rm(join(this.root, "input", taskId), { recursive: true, force: true }),
-      rm(join(this.root, "artifact", taskId), { recursive: true, force: true })
+      rm(join(this.root, "artifact", taskId), { recursive: true, force: true }),
+      rm(join(this.root, "artifact-document", taskId), { recursive: true, force: true })
     ]);
   }
 
@@ -152,6 +227,7 @@ export class FileTaskAttachmentStore implements TaskAttachmentStore {
     for (const purpose of ["input", "artifact"] as const) {
       await cleanupTree(join(this.root, purpose), now.getTime() - TASK_ATTACHMENT_RETENTION_MS);
     }
+    await cleanupTree(join(this.root, "artifact-document"), now.getTime() - TASK_ATTACHMENT_RETENTION_MS);
   }
 
   private stagedPath(part: TaskImagePart): string {
@@ -334,6 +410,16 @@ async function requireRegularSourceFile(sourcePath: string): Promise<string> {
   if (!info.isFile()) throw new Error("TASK_IMAGE_PATH_INVALID");
   const extension = extname(canonical).toLowerCase();
   if (![".png", ".jpg", ".jpeg"].includes(extension)) throw new Error("TASK_IMAGE_TYPE_UNSUPPORTED");
+  return canonical;
+}
+
+async function requireRegularArtifactFile(sourcePath: string): Promise<string> {
+  if (typeof sourcePath !== "string" || !sourcePath.startsWith("/") || sourcePath.includes("\0")) {
+    throw new Error("TASK_ARTIFACT_FILE_PATH_INVALID");
+  }
+  const canonical = await realpath(sourcePath);
+  const info = await stat(canonical);
+  if (!info.isFile()) throw new Error("TASK_ARTIFACT_FILE_PATH_INVALID");
   return canonical;
 }
 

@@ -2032,6 +2032,7 @@ input {
 }
 
 .teti-network-environment {
+  margin-top: 10px;
   display: grid;
   gap: 8px;
 }
@@ -2051,19 +2052,19 @@ input {
 .teti-network-environment-meta small,
 .teti-network-environment-meta code {
   overflow: hidden;
-  color: rgba(235, 244, 255, 0.66);
+  color: var(--teti-text-secondary);
   font-size: 10px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .teti-network-environment-meta small.is-ok {
-  color: #80e6b8;
+  color: #3f8f69;
 }
 
 .teti-network-environment-meta small.is-error,
 .teti-network-environment-restart {
-  color: #ffc079 !important;
+  color: #a46f19 !important;
 }
 
 .teti-island--processing::before,

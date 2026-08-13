@@ -42,7 +42,7 @@ test("Task transport store migrates the 0.2.8 schema without importing a remote 
       peers: []
     }), "utf8");
     const migrated = await store.load();
-    assert.equal(migrated.schemaVersion, 4);
+    assert.equal(migrated.schemaVersion, 5);
     assert.deepEqual(migrated.records, []);
 
     await writeFile(path, JSON.stringify({

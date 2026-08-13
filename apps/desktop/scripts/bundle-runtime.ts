@@ -2,6 +2,7 @@ import { chmod, copyFile, mkdir, readFile, rm, stat } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
+import { resolveTetiBuildType } from "./build-flavor.ts";
 
 const desktopRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repoRoot = resolve(desktopRoot, "..", "..");
@@ -11,9 +12,11 @@ const codexImageRunnerOutput = join(resourcesRoot, "lifecycle-sidecar", "codex-i
 const runtimeRoot = join(resourcesRoot, "runtime");
 const packageVersion = await readPackageVersion();
 const buildTimestamp = resolveBuildTimestamp();
+const buildType = resolveTetiBuildType();
 const buildDefines = {
   __TETI_APP_VERSION__: JSON.stringify(packageVersion),
-  __TETI_BUILD_TIMESTAMP__: JSON.stringify(buildTimestamp)
+  __TETI_BUILD_TIMESTAMP__: JSON.stringify(buildTimestamp),
+  __TETI_BUILD_TYPE__: JSON.stringify(buildType)
 };
 const rpcSource = join(
   repoRoot,

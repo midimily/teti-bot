@@ -260,7 +260,7 @@ test("AI status is opt-in, sent only to confirmed peers, and revoked independent
   );
   assert.deepEqual(
     confirmed.connections[0]?.remoteProtocolCapabilities?.taskProtocolVersions,
-    [6]
+    [7]
   );
   assert.deepEqual(await runtimeA.getPassportSharing(), resourceSharingPolicy(false));
 
@@ -518,7 +518,7 @@ test("Chatmail keeps a Task offline, receiver stores it once, and returns a rece
   const acknowledged = await runtimeA.listTasks();
   assert.equal(acknowledged.records.length, 1);
   assert.equal(acknowledged.records[0]?.delivery, "acknowledged");
-  assert.deepEqual(acknowledged.peers[0]?.supportedVersions, [6]);
+  assert.deepEqual(acknowledged.peers[0]?.supportedVersions, [7]);
 });
 
 test("Task ID retry is idempotent and conflicting immutable content is rejected", async () => {
@@ -641,7 +641,7 @@ test("a confirmed 0.1 peer is reachable but explicitly requires upgrade and cann
     connectionRequestId: result.connections[0]!.requestId,
     capabilityId: "code-analysis",
     text: "Do not deliver this to 0.1."
-  }), /must upgrade to Beta 0.2/);
+  }), /must upgrade to Beta 0.3.9/);
   assert.equal(relay.peek(accountB.address).filter(isTaskRequestMessage).length, 0);
 });
 
@@ -680,6 +680,68 @@ test("two peers execute an abstract receiver-local Compute Offer without sharing
   const result = (await runtimeA.listTasks()).records[0];
   assert.equal(result?.state, "completed");
   assert.match(JSON.stringify(result?.artifacts), /receiver-local answer/);
+});
+
+test("Task v7 delivers an 11 KB result as a verified file and clears outbox only after peer ACK", async () => {
+  const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
+  const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
+  const directory = new StaticDirectory([toIdentity(accountA), toIdentity(accountB)]);
+  const relay = new MemoryChatmailRelay();
+  let hostNowMs = Date.now();
+  const resultText = `verified-large-result:${"结果安全传输".repeat(900)}`;
+  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), directory);
+  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), directory, undefined, {
+    taskExecutor: new LargeTextTaskExecutor(resultText),
+    now: () => new Date(hostNowMs)
+  });
+  const connection = await confirmPeers(runtimeA, runtimeB, "beta00002");
+  const sent = await runtimeA.sendTask({
+    connectionRequestId: connection.requestId,
+    capabilityId: "code-analysis",
+    text: "Return a result larger than the Chatmail text normalization boundary."
+  });
+
+  await runtimeB.poll();
+  await runtimeB.approveTask(sent.request.taskId);
+  await flushBackgroundWork();
+  await flushBackgroundWork();
+  const artifactMessage = relay.peek(accountA.address).find((message) =>
+    applicationType(message) === "teti.task.artifact.file"
+  );
+  assert.ok(artifactMessage?.text);
+  assert.ok(Buffer.byteLength(artifactMessage.text, "utf8") < 3_000);
+  assert.ok(artifactMessage.filePath);
+  assert.ok((await readFile(artifactMessage.filePath)).byteLength > 11_000);
+
+  await runtimeA.poll();
+  const requester = await runtimeA.getTask(sent.request.taskId);
+  assert.equal(requester.state, "completed");
+  assert.equal(requester.artifacts?.[0]?.schemaVersion, 2);
+  assert.equal(
+    requester.artifacts?.[0]?.schemaVersion === 2
+      ? requester.artifacts[0].parts.find((part) => part.kind === "text")?.text
+      : undefined,
+    resultText
+  );
+
+  const beforeAck = await runtimeB.getTask(sent.request.taskId);
+  assert.equal(beforeAck.artifactPending, true);
+  assert.equal(
+    relay.dropFirstApplicationMessage(accountB.address, "teti.task.artifact.receipt"),
+    true
+  );
+
+  hostNowMs += 16_000;
+  await runtimeB.poll();
+  assert.ok(relay.peek(accountA.address).some((message) =>
+    applicationType(message) === "teti.task.artifact.file"
+  ));
+  await runtimeA.poll();
+  await runtimeB.poll();
+  const afterAck = await runtimeB.getTask(sent.request.taskId);
+  assert.equal(afterAck.artifactPending, false);
+  assert.deepEqual(afterAck.acknowledgedArtifactIds, [requester.artifacts?.[0]?.artifactId]);
+  assert.equal(afterAck.artifactDeliveryAttempts, undefined);
 });
 
 test("long-horizon collaboration survives Host restart, accepts input, and switches Child only explicitly", async () => {
@@ -1020,7 +1082,7 @@ test("two peers deliver a verified image Task, approve once, execute, and return
       text: "Read the attached pixel.",
       attachments: [staged.part]
     });
-    assert.equal(sent.protocolVersion, 6);
+    assert.equal(sent.protocolVersion, 7);
 
     await runtimeB.poll();
     const inbox = await runtimeB.listTasks();
@@ -1074,7 +1136,7 @@ test("two-image editing returns a verified image Artifact after completed status
       text: "Merge these two reference images and return the edited image.",
       attachments: [first.part, second.part]
     });
-    assert.equal(sent.protocolVersion, 6);
+    assert.equal(sent.protocolVersion, 7);
 
     await runtimeB.poll();
     await runtimeB.approveTask(sent.request.taskId);
@@ -1085,7 +1147,7 @@ test("two-image editing returns a verified image Artifact after completed status
     }));
     const held = relay.takeApplicationMessages(accountA.address, [
       "teti.task.attachment",
-      "teti.task.artifact"
+      "teti.task.artifact.file"
     ]);
     assert.equal(held.length, 2);
 
@@ -1111,7 +1173,7 @@ test("two-image editing returns a verified image Artifact after completed status
   }
 });
 
-test("Task v6 resends only missing images until a four-image request is complete", async () => {
+test("Task v7 resends only missing images until a four-image request is complete", async () => {
   const root = await mkdtemp(join(tmpdir(), "teti-task-v4-image-retry-"));
   try {
     const source = join(root, "source.png");
@@ -1143,7 +1205,7 @@ test("Task v6 resends only missing images until a four-image request is complete
       text: "Use all four reference images.",
       attachments
     });
-    assert.equal(sent.protocolVersion, 6);
+    assert.equal(sent.protocolVersion, 7);
     assert.equal(relay.dropFirstApplicationMessage(accountB.address, "teti.task.attachment"), true);
     assert.equal(relay.dropFirstApplicationMessage(accountB.address, "teti.task.attachment"), true);
 
@@ -1295,11 +1357,11 @@ test("a deferred generated image Artifact reaches the requester after slow downl
     await runtimeA.poll();
     const waiting = await runtimeA.getTask(sent.request.taskId);
     assert.equal(waiting.state, "completed");
-    assert.equal(waiting.artifactAttachmentsReady, false);
-    assert.equal(relay.attachmentDownloadRequestCount(accountA.address), 1);
+    assert.equal(waiting.artifacts?.length ?? 0, 0);
+    assert.equal(relay.attachmentDownloadRequestCount(accountA.address), 2);
 
     for (let attempt = 0; attempt < 6; attempt += 1) await runtimeA.poll();
-    assert.equal(relay.attachmentDownloadRequestCount(accountA.address), 1);
+    assert.equal(relay.attachmentDownloadRequestCount(accountA.address), 2);
     relay.completeAttachmentDownloads(accountA.address);
     await runtimeA.poll();
 
@@ -1457,12 +1519,17 @@ test("rejection and requester cancellation converge on both peers without execut
   assert.equal(canceledAtA.cancelPending, false);
 });
 
-test("a completed status may safely skip a missing working update", async () => {
+test("a verified Task v7 result completes the requester even when every status update is lost", async () => {
   const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
   const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
   const directory = new StaticDirectory([toIdentity(accountA), toIdentity(accountB)]);
   const relay = new MemoryChatmailRelay();
-  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), directory);
+  const requesterStore = new MemoryTaskTransportStore();
+  let requesterNowMs = Date.now();
+  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), directory, undefined, {
+    now: () => new Date(requesterNowMs),
+    taskTransportStore: requesterStore
+  });
   const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), directory, undefined, {
     taskExecutor: new FakeTaskExecutor()
   });
@@ -1477,12 +1544,36 @@ test("a completed status may safely skip a missing working update", async () => 
   await flushBackgroundWork();
   await flushBackgroundWork();
   assert.equal(relay.dropFirstApplicationMessage(accountA.address, "teti.task.status", "working"), true);
+  assert.equal(relay.dropFirstApplicationMessage(accountA.address, "teti.task.status", "completed"), true);
 
   await runtimeA.poll();
   const completed = await runtimeA.getTask(sent.request.taskId);
   assert.equal(completed.state, "completed");
   assert.equal(completed.approval, "approved_once");
+  assert.equal(completed.delivery, "acknowledged");
   assert.equal(completed.artifacts?.length, 1);
+  assert.equal(completed.safeErrorCode, undefined);
+
+  // Repair the exact persisted split observed in production: the verified
+  // result exists locally, but an older Beta 0.3.9 requester later expired its
+  // still-submitted projection because the completed status had been missed.
+  const persisted = await requesterStore.load();
+  const split = persisted.records.find((record) => record.request.taskId === sent.request.taskId);
+  assert.ok(split);
+  split.state = "rejected";
+  split.approval = "expired";
+  split.delivery = "expired";
+  split.safeErrorCode = "TASK_EXPIRED";
+  requesterNowMs += 2 * 60 * 60 * 1_000;
+  split.updatedAt = new Date(requesterNowMs).toISOString();
+  await requesterStore.save(persisted);
+
+  const repaired = await runtimeA.getTask(sent.request.taskId);
+  assert.equal(repaired.state, "completed");
+  assert.equal(repaired.approval, "approved_once");
+  assert.equal(repaired.delivery, "acknowledged");
+  assert.equal(repaired.safeErrorCode, undefined);
+  assert.equal(repaired.artifacts?.length, 1);
 });
 
 test("Artifact persistence failure leaves Chatmail fresh and succeeds on the next poll", async () => {
@@ -1512,7 +1603,7 @@ test("Artifact persistence failure leaves Chatmail fresh and succeeds on the nex
   await runtimeA.poll();
   assert.equal((await runtimeA.getTask(sent.request.taskId)).artifacts?.length ?? 0, 0);
   assert.equal(relay.peek(accountA.address).some((message) =>
-    applicationType(message) === "teti.task.artifact"
+    applicationType(message) === "teti.task.artifact.file"
   ), true);
 
   await runtimeA.poll();
@@ -1520,7 +1611,7 @@ test("Artifact persistence failure leaves Chatmail fresh and succeeds on the nex
   assert.equal(retried.state, "completed");
   assert.equal(retried.artifacts?.length, 1);
   assert.equal(relay.peek(accountA.address).some((message) =>
-    applicationType(message) === "teti.task.artifact"
+    applicationType(message) === "teti.task.artifact.file"
   ), false);
 });
 
@@ -1688,6 +1779,45 @@ test("Runtime restart durably fails interrupted work and reports recovery to the
   assert.equal(reported.safeErrorCode, "TASK_EXECUTION_INTERRUPTED");
 });
 
+test("Runtime poll preserves a terminal local execution while its Task result is queued for commit", async () => {
+  const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
+  const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
+  const directory = new StaticDirectory([toIdentity(accountA), toIdentity(accountB)]);
+  const relay = new MemoryChatmailRelay();
+  const executor = new DeferredSingleStageTaskExecutor();
+  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), directory);
+  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), directory, undefined, {
+    taskExecutor: executor
+  });
+  const connection = await confirmPeers(runtimeA, runtimeB, "beta00002");
+  const sent = await runtimeA.sendTask({
+    connectionRequestId: connection.requestId,
+    taskId: "task-terminal-commit-race-001",
+    capabilityId: "code-analysis",
+    text: "Return a result while Runtime polling is already queued."
+  });
+  await runtimeB.poll();
+  await runtimeB.approveTask(sent.request.taskId);
+
+  // Queue polling first, then make the local execution terminal in the same
+  // turn. The execution completion callback is serialized behind this poll,
+  // reproducing the production window that used to synthesize an interruption.
+  const concurrentPoll = runtimeB.poll();
+  executor.finish("safe:terminal-result");
+  await concurrentPoll;
+  await flushBackgroundWork();
+
+  const receiver = await runtimeB.getTask(sent.request.taskId);
+  assert.equal(receiver.state, "completed");
+  assert.equal(receiver.safeErrorCode, undefined);
+  assert.match(JSON.stringify(receiver.artifacts), /safe:terminal-result/);
+  await runtimeA.poll();
+  const requester = await runtimeA.getTask(sent.request.taskId);
+  assert.equal(requester.state, "completed");
+  assert.equal(requester.safeErrorCode, undefined);
+  assert.match(JSON.stringify(requester.artifacts), /safe:terminal-result/);
+});
+
 test("expired Agent authentication returns to explicit allow-once after local login", async () => {
   const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
   const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
@@ -1760,7 +1890,7 @@ test("an auth-required Task still expires instead of remaining actionable foreve
   assert.equal(expired.safeErrorCode, "TASK_EXPIRED");
 });
 
-test("Beta 0.2 refuses Task delivery to a peer advertising only v1", async () => {
+test("Beta 0.3.9 refuses Task delivery to a peer advertising only v1", async () => {
   const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
   const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
   const directory = new StaticDirectory([toIdentity(accountA), toIdentity(accountB)]);
@@ -1815,7 +1945,7 @@ test("an oversized malicious envelope is isolated without blocking the next vali
       status: "alpha-heartbeat",
       timestamp: new Date().toISOString(),
       collaborationProtocolEpoch: 2,
-      taskProtocolVersions: [6],
+      taskProtocolVersions: [7],
       passportSchemaVersions: [4]
     }
   });
@@ -1846,6 +1976,8 @@ async function makeRuntime(
 ): Promise<PeerConnectionRuntime> {
   const accountStorage = new MemoryTetiAccountStorage();
   await accountStorage.save(account);
+  const taskAttachmentStore = aiStatus.taskAttachmentStore
+    ?? new FileTaskAttachmentStore(await mkdtemp(join(tmpdir(), "teti-peer-task-artifacts-")));
   return new PeerConnectionRuntime({
     accountStorage,
     connectionStorage,
@@ -1853,7 +1985,8 @@ async function makeRuntime(
     directory: directory,
     startIo: async () => undefined,
     allowLegacyRelationshipAuthorityForTests: true,
-    ...aiStatus
+    ...aiStatus,
+    taskAttachmentStore
   });
 }
 
@@ -1930,7 +2063,9 @@ function onePixelPng(): Buffer {
 }
 
 async function flushBackgroundWork(): Promise<void> {
-  await new Promise<void>((resolve) => setImmediate(resolve));
+  // Task v7 writes a digest-bound Artifact document before queuing Chatmail.
+  // Yield through one filesystem completion turn rather than only microtasks.
+  await new Promise<void>((resolve) => setTimeout(resolve, 10));
 }
 
 async function waitUntil(read: () => boolean, timeoutMs = 1_000): Promise<void> {
@@ -2275,6 +2410,23 @@ class FakeTaskExecutor implements TaskExecutionBridge {
   }
 }
 
+class LargeTextTaskExecutor extends FakeTaskExecutor {
+  private readonly resultText: string;
+
+  constructor(resultText: string) {
+    super();
+    this.resultText = resultText;
+  }
+
+  override async execute(request: CallableAdapterTaskRequest): Promise<CallableAdapterTaskSnapshot> {
+    const completed = await super.execute(request);
+    return {
+      ...completed,
+      artifact: { kind: "text", text: this.resultText }
+    };
+  }
+}
+
 class LongHorizonTaskExecutor implements TaskExecutionBridge {
   readonly requests: CallableAdapterTaskRequest[] = [];
   availableSuffixes: Array<"a" | "b"> = ["a", "b"];
@@ -2575,6 +2727,49 @@ class HangingTaskExecutor implements TaskExecutionBridge {
 
   cancel(taskId: string): boolean {
     return this.tasks.delete(taskId);
+  }
+}
+
+class DeferredSingleStageTaskExecutor implements TaskExecutionBridge {
+  private task: CallableAdapterTaskSnapshot | null = null;
+  private resolveExecution?: (snapshot: CallableAdapterTaskSnapshot) => void;
+
+  resolveTarget(_offerId: string, capabilityId: string) {
+    return { connectorId: "fake.adapter", childAgentId: "fake-agent", capabilityId };
+  }
+
+  execute(request: CallableAdapterTaskRequest): Promise<CallableAdapterTaskSnapshot> {
+    this.task = workingSnapshot(request);
+    return new Promise<CallableAdapterTaskSnapshot>((resolve) => {
+      this.resolveExecution = resolve;
+    });
+  }
+
+  getTask(taskId: string): CallableAdapterTaskSnapshot | null {
+    return this.task?.taskId === taskId ? structuredClone(this.task) : null;
+  }
+
+  cancel(taskId: string): boolean {
+    if (this.task?.taskId !== taskId) return false;
+    this.task = null;
+    this.resolveExecution = undefined;
+    return true;
+  }
+
+  finish(text: string): void {
+    if (!this.task || !this.resolveExecution) throw new Error("No deferred Task is active.");
+    const completedAt = new Date().toISOString();
+    const completed: CallableAdapterTaskSnapshot = {
+      ...this.task,
+      state: "completed",
+      artifact: { kind: "text", text },
+      updatedAt: completedAt,
+      completedAt
+    };
+    this.task = completed;
+    const resolve = this.resolveExecution;
+    this.resolveExecution = undefined;
+    resolve(structuredClone(completed));
   }
 }
 

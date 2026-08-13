@@ -12,6 +12,7 @@ import {
   type LifecycleStatusResult,
   type OsaurusNativeChildSettingsDto,
   type TetiNetworkEnvironmentSettingsDto,
+  type RuntimeNetworkContractStatusDto,
   type RuntimePresenceStatusDto,
   type PublicTetiAccount
 } from "../src/lifecycle-bridge/protocol.ts";
@@ -73,6 +74,7 @@ export interface LifecycleSidecarDependencies {
   getOsaurusNativeChildSettings?(): Promise<OsaurusNativeChildSettingsDto>;
   setOsaurusNativeChildAgentId?(agentId: string | null): Promise<OsaurusNativeChildSettingsDto>;
   getNetworkEnvironmentSettings?(): Promise<TetiNetworkEnvironmentSettingsDto> | TetiNetworkEnvironmentSettingsDto;
+  getNetworkContractStatus?(): RuntimeNetworkContractStatusDto;
   setLocalDevelopmentNetwork?(enabled: boolean): Promise<TetiNetworkEnvironmentSettingsDto>;
   getPresenceStatus?(): RuntimePresenceStatusDto | undefined;
   setPresenceSignal?(input: {
@@ -180,6 +182,9 @@ async function dispatchLifecycleRequest(
             source: "none",
             diagnosticCode: "RELEASE_POLICY_UNAVAILABLE"
           };
+
+    case "network.contract.get":
+      return dependencies.getNetworkContractStatus?.() ?? { state: "checking" };
 
     case "network.environment.get":
       if (!dependencies.getNetworkEnvironmentSettings) {
@@ -771,6 +776,7 @@ function fallbackCodeForMethod(method: LifecycleRequest["method"]) {
     case "account.create":
       return "ACCOUNT_CREATE_FAILED";
     case "network.environment.get":
+    case "network.contract.get":
     case "network.environment.set":
     case "presence.get":
     case "presence.signal.set":

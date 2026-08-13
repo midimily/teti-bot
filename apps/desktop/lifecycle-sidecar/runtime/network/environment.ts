@@ -59,21 +59,32 @@ export class TetiNetworkEnvironmentSettingsService {
   private configured: TetiNetworkEnvironmentPreference;
   private readonly store: FileTetiNetworkEnvironmentPreferenceStore;
   private readonly active: TetiNetworkEnvironmentPreference;
+  private readonly allowLocalDevelopmentNetwork: boolean;
 
   constructor(
     store: FileTetiNetworkEnvironmentPreferenceStore,
-    active: TetiNetworkEnvironmentPreference
+    active: TetiNetworkEnvironmentPreference,
+    allowLocalDevelopmentNetwork = true
   ) {
     this.store = store;
-    this.active = active;
-    this.configured = { ...active };
+    this.allowLocalDevelopmentNetwork = allowLocalDevelopmentNetwork;
+    this.active = allowLocalDevelopmentNetwork ? active : { ...DEFAULT_PREFERENCE };
+    this.configured = { ...this.active };
   }
 
   static async create(
-    store: FileTetiNetworkEnvironmentPreferenceStore
+    store: FileTetiNetworkEnvironmentPreferenceStore,
+    options: { allowLocalDevelopmentNetwork?: boolean } = {}
   ): Promise<TetiNetworkEnvironmentSettingsService> {
-    const preference = await store.load();
-    return new TetiNetworkEnvironmentSettingsService(store, preference);
+    const allowLocalDevelopmentNetwork = options.allowLocalDevelopmentNetwork ?? true;
+    const preference = allowLocalDevelopmentNetwork
+      ? await store.load()
+      : { ...DEFAULT_PREFERENCE };
+    return new TetiNetworkEnvironmentSettingsService(
+      store,
+      preference,
+      allowLocalDevelopmentNetwork
+    );
   }
 
   get settings(): TetiNetworkEnvironmentSettings {
@@ -92,6 +103,9 @@ export class TetiNetworkEnvironmentSettingsService {
 
   async setUseLocalDevelopmentNetwork(enabled: boolean): Promise<TetiNetworkEnvironmentSettings> {
     if (typeof enabled !== "boolean") throw new Error("Network development setting is invalid.");
+    if (!this.allowLocalDevelopmentNetwork && enabled) {
+      throw new Error("Local Network development is disabled in release builds.");
+    }
     const previous = this.configured;
     const configured = { schemaVersion: 1 as const, useLocalDevelopmentNetwork: enabled };
     this.configured = configured;

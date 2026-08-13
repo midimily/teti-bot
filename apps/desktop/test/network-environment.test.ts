@@ -54,6 +54,20 @@ test("Network environment rejects malformed or widened configuration", async () 
   );
 });
 
+test("release build policy ignores persisted development opt-in and rejects enabling it", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "teti-network-environment-release-"));
+  const store = new FileTetiNetworkEnvironmentPreferenceStore(join(directory, "environment.json"));
+  await store.save({ schemaVersion: 1, useLocalDevelopmentNetwork: true });
+
+  const service = await TetiNetworkEnvironmentSettingsService.create(store, {
+    allowLocalDevelopmentNetwork: false
+  });
+  assert.equal(service.settings.activeEnvironment, "production");
+  assert.equal(service.settings.configuredEnvironment, "production");
+  assert.equal(service.settings.useLocalDevelopmentNetwork, false);
+  await assert.rejects(() => service.setUseLocalDevelopmentNetwork(true), /disabled in release builds/);
+});
+
 test("0.3.8 upgrade preserves local account/Chatmail and scoped Network state while discarding unscoped credentials", async () => {
   const root = await mkdtemp(join(tmpdir(), "teti-network-state-isolation-"));
   try {

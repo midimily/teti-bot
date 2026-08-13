@@ -13,6 +13,8 @@ import { validateCollaborationTaskRequest } from "../task/validation.ts";
 import {
   validateTaskProtocolVersions,
   validateTaskArtifactPayload,
+  validateTaskArtifactFilePayload,
+  validateTaskArtifactReceiptPayload,
   validateTaskAttachmentPayload,
   validateTaskAttachmentReceiptPayload,
   validateTaskCancelPayload,
@@ -114,8 +116,8 @@ function validatePayload(type: TetiApplicationMessageType, payload: Record<strin
     }
     try {
       validateTaskProtocolVersions(payload.taskProtocolVersions);
-      if (payload.taskProtocolVersions.length !== 1 || payload.taskProtocolVersions[0] !== 6) {
-        throw new Error("0.2 requires Task protocol v5.");
+      if (payload.taskProtocolVersions.length !== 1 || payload.taskProtocolVersions[0] !== 7) {
+        throw new Error("Beta 0.3.9 requires Task protocol v7.");
       }
     } catch {
       throw new TetiApplicationProtocolError("Presence task protocol versions are invalid.");
@@ -145,8 +147,8 @@ function validatePayload(type: TetiApplicationMessageType, payload: Record<strin
 
   if (type === "teti.task.request") {
     try {
-      if (payload.schemaVersion !== 6) {
-        throw new Error("0.2.8 requires Task protocol v6.");
+      if (payload.schemaVersion !== 7) {
+        throw new Error("Beta 0.3.9 requires Task protocol v7.");
       }
       validateCollaborationTaskRequest(payload);
     } catch {
@@ -171,6 +173,8 @@ function validatePayload(type: TetiApplicationMessageType, payload: Record<strin
     else if (type === "teti.task.cancel") validateTaskCancelPayload(payload);
     else if (type === "teti.task.input") validateTaskInputPayload(payload);
     else if (type === "teti.task.artifact") validateTaskArtifactPayload(payload);
+    else if (type === "teti.task.artifact.file") validateTaskArtifactFilePayload(payload);
+    else if (type === "teti.task.artifact.receipt") validateTaskArtifactReceiptPayload(payload);
   } catch {
     throw new TetiApplicationProtocolError("Task application payload is invalid.");
   }
@@ -240,7 +244,9 @@ function isSupportedApplicationType(value: string): value is TetiApplicationMess
     "teti.task.status",
     "teti.task.cancel",
     "teti.task.input",
-    "teti.task.artifact"
+    "teti.task.artifact",
+    "teti.task.artifact.file",
+    "teti.task.artifact.receipt"
   ].includes(value);
 }
 

@@ -246,7 +246,7 @@ function createComposer(
     const warning = document.createElement("p");
     warning.className = "teti-task-known-defect";
     warning.setAttribute("role", "status");
-    warning.textContent = "0.3.8 延续已知限制：多图送达仍在实机复盘；若图片不完整，对方无法授权或执行任务。";
+    warning.textContent = "0.3.9 延续已知限制：多图送达仍在实机复盘；若图片不完整，对方无法授权或执行任务。";
     form.append(warning);
   }
   if (snapshot.error) form.append(errorText(snapshot.error));

@@ -52,7 +52,7 @@ interface CommandResult {
 }
 
 await main().catch((error) => {
-  console.error(`macOS ad-hoc Alpha packaging failed: ${error instanceof Error ? error.message : String(error)}`);
+  console.error(`macOS ad-hoc Beta packaging failed: ${error instanceof Error ? error.message : String(error)}`);
   process.exitCode = 1;
 });
 
@@ -65,7 +65,7 @@ async function main(): Promise<void> {
   if (gitStatus) console.warn("Warning: the release manifest will record gitDirty=true.");
 
   await mkdir(releaseRoot, { recursive: true });
-  await cleanOldAlphaOutputs();
+  await cleanOldAdHocOutputs();
   await rm(appPath, { recursive: true, force: true });
 
   const tauriBinary = join(desktopRoot, "node_modules", ".bin", "tauri");
@@ -88,7 +88,7 @@ async function main(): Promise<void> {
   const runtimeSmoke = await runRuntimeSmoke(appPath);
   await verifyCodeSignature(appPath);
 
-  const artifactBase = `${EXPECTED_PRODUCT}-${metadata.version}-arm64-macos15-adhoc-alpha`;
+  const artifactBase = `${EXPECTED_PRODUCT}-${metadata.version}-arm64-macos15-adhoc-beta`;
   const dmgFileName = `${artifactBase}.dmg`;
   const readmeFileName = `${artifactBase}-README.txt`;
   const manifestFileName = `${artifactBase}.release.json`;
@@ -98,7 +98,7 @@ async function main(): Promise<void> {
   const manifestPath = join(releaseRoot, manifestFileName);
   const shaPath = join(releaseRoot, shaFileName);
 
-  await writeFile(readmePath, alphaReadme(dmgFileName), "utf8");
+  await writeFile(readmePath, betaReadme(dmgFileName), "utf8");
   await createAndValidateDmg({ appPath, dmgPath, readmePath, nativeArtifacts });
 
   const sha256 = await sha256File(dmgPath);
@@ -114,7 +114,7 @@ async function main(): Promise<void> {
     productName: EXPECTED_PRODUCT,
     version: metadata.version,
     bundleIdentifier: EXPECTED_BUNDLE_ID,
-    releaseChannel: "alpha",
+    releaseChannel: "beta",
     distribution: "adhoc",
     architecture: EXPECTED_ARCH,
     minimumMacOS: EXPECTED_MINIMUM_MACOS,
@@ -139,7 +139,7 @@ async function main(): Promise<void> {
 
   console.log(JSON.stringify({
     ok: true,
-    distribution: "ad-hoc controlled Alpha (not notarized)",
+    distribution: "ad-hoc controlled Beta (not notarized)",
     appPath,
     dmgPath,
     shaPath,
@@ -151,7 +151,7 @@ async function main(): Promise<void> {
 
 function assertHost(): void {
   if (process.platform !== "darwin") throw new Error("This package can only be built on macOS.");
-  if (process.arch !== "arm64") throw new Error("This Alpha package must be built on an arm64 Mac.");
+  if (process.arch !== "arm64") throw new Error("This Beta package must be built on an arm64 Mac.");
 }
 
 async function readAndValidateMetadata(): Promise<{ version: string }> {
@@ -176,9 +176,10 @@ async function readAndValidateMetadata(): Promise<{ version: string }> {
   return { version: versions[0] };
 }
 
-async function cleanOldAlphaOutputs(): Promise<void> {
+async function cleanOldAdHocOutputs(): Promise<void> {
   for (const entry of await readdir(releaseRoot, { withFileTypes: true })) {
-    if (entry.name.startsWith("Teti-") && entry.name.includes("-adhoc-alpha")) {
+    if (entry.name.startsWith("Teti-")
+      && (entry.name.includes("-adhoc-alpha") || entry.name.includes("-adhoc-beta"))) {
       await rm(join(releaseRoot, entry.name), { recursive: entry.isDirectory(), force: true });
     }
   }
@@ -239,7 +240,7 @@ async function verifyAdHocSignature(path: string): Promise<{ signature: "adhoc";
   const combined = `${details.stdout}\n${details.stderr}`;
   assert(combined.includes("Signature=adhoc"), "Expected Signature=adhoc.");
   assert(combined.includes("TeamIdentifier=not set"), "Expected TeamIdentifier=not set.");
-  assert(!/flags=.*\bruntime\b/.test(combined), "Hardened Runtime was not requested for this ad-hoc Alpha.");
+  assert(!/flags=.*\bruntime\b/.test(combined), "Hardened Runtime was not requested for this ad-hoc Beta.");
   return { signature: "adhoc", teamIdentifier: "not set", hardenedRuntime: false, notarized: false };
 }
 
@@ -341,7 +342,7 @@ async function createAndValidateDmg(input: {
       "-ov",
       "-format", "UDZO",
       "-fs", "HFS+",
-      "-volname", "Teti Ad-hoc Alpha",
+      "-volname", "Teti Ad-hoc Beta",
       "-srcfolder", stagingRoot,
       input.dmgPath
     ]);
@@ -370,8 +371,8 @@ async function createAndValidateDmg(input: {
   }
 }
 
-function alphaReadme(dmgFileName: string): string {
-  return `Teti macOS Ad-hoc Alpha
+function betaReadme(dmgFileName: string): string {
+  return `Teti macOS Ad-hoc Beta
 This build is for controlled testing only.
 
 Requirements:
@@ -399,7 +400,7 @@ Do not:
 - share this build publicly
 
 中文说明
-这是仅用于小范围受控测试的 Teti macOS Alpha 安装包。
+这是仅用于小范围受控测试的 Teti macOS Beta 安装包。
 要求：Apple Silicon Mac、macOS 15.0 或更高版本。
 本安装包仅使用 ad-hoc 签名，没有 Apple Developer ID，也没有经过 Apple 公证。
 首次启动可能被 Gatekeeper 拦截。请前往“系统设置 -> 隐私与安全性”，找到 Teti 提示并点击“仍要打开”。

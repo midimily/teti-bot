@@ -6,6 +6,8 @@ import {
   TaskTransportContractError,
   validateTaskAttachmentPayload,
   validateTaskAttachmentReceiptPayload,
+  validateTaskArtifactFilePayload,
+  validateTaskArtifactReceiptPayload,
   validateTaskProtocolVersions,
   validateTaskReceiptPayload
 } from "./transport-validation.ts";
@@ -21,7 +23,7 @@ test("Task receipt is strict, identity-bound metadata with advertised versions",
     targetTetiId: "teti_target001",
     status: "received",
     receivedAt,
-    supportedTaskVersions: [6]
+    supportedTaskVersions: [7]
   };
   assert.doesNotThrow(() => validateTaskReceiptPayload(receipt));
   assert.throws(
@@ -34,15 +36,16 @@ test("Task receipt is strict, identity-bound metadata with advertised versions",
   );
 });
 
-test("Beta 0.2.8 Task negotiation requires an explicit v6 advertisement and never downgrades", () => {
+test("Beta 0.3.9 Task negotiation requires an explicit v7 advertisement and never downgrades", () => {
   assert.equal(selectTaskProtocolVersion(), null);
   assert.equal(selectTaskProtocolVersion([2, 1]), null);
   assert.equal(selectTaskProtocolVersion([2]), null);
   assert.equal(selectTaskProtocolVersion([3]), null);
   assert.equal(selectTaskProtocolVersion([4]), null);
   assert.equal(selectTaskProtocolVersion([5]), null);
-  assert.equal(selectTaskProtocolVersion([6]), 6);
-  assert.doesNotThrow(() => validateTaskProtocolVersions([1, 2, 3, 4, 5, 6]));
+  assert.equal(selectTaskProtocolVersion([6]), null);
+  assert.equal(selectTaskProtocolVersion([7]), 7);
+  assert.doesNotThrow(() => validateTaskProtocolVersions([1, 2, 3, 4, 5, 6, 7]));
 });
 
 test("Task v6 attachment receipts are explicit, strict, and bound to one attachment", () => {
@@ -88,6 +91,45 @@ test("Task v6 attachment receipts are explicit, strict, and bound to one attachm
   );
   assert.throws(
     () => validateTaskAttachmentReceiptPayload({ ...receipt, localPath: "/private/result.png" }),
+    /unsupported field/
+  );
+});
+
+test("Task v7 Artifact file descriptor and durable receipt are digest-bound", () => {
+  const descriptor = {
+    schemaVersion: 1,
+    taskId: "task-001",
+    requesterTetiId: "teti_sender001",
+    targetTetiId: "teti_target001",
+    artifactId: "artifact-001",
+    byteLength: 11_625,
+    sha256: `sha256:${"c".repeat(64)}`,
+    createdAt: "2026-07-26T01:00:00.000Z",
+    expiresAt: "2026-07-26T02:00:00.000Z",
+    deliveryReceiptRequested: true
+  };
+  assert.doesNotThrow(() => validateTaskArtifactFilePayload(descriptor));
+  assert.throws(
+    () => validateTaskArtifactFilePayload({ ...descriptor, byteLength: 65 * 1024 }),
+    /integrity metadata/
+  );
+  assert.throws(
+    () => validateTaskArtifactFilePayload({ ...descriptor, sha256: "sha256:truncated" }),
+    /integrity metadata/
+  );
+
+  const receipt = {
+    schemaVersion: 1,
+    taskId: descriptor.taskId,
+    requesterTetiId: descriptor.requesterTetiId,
+    targetTetiId: descriptor.targetTetiId,
+    artifactId: descriptor.artifactId,
+    sha256: descriptor.sha256,
+    receivedAt
+  };
+  assert.doesNotThrow(() => validateTaskArtifactReceiptPayload(receipt));
+  assert.throws(
+    () => validateTaskArtifactReceiptPayload({ ...receipt, byteLength: descriptor.byteLength }),
     /unsupported field/
   );
 });

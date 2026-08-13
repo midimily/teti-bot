@@ -5,6 +5,8 @@ import {
   TETI_SUPPORTED_TASK_PROTOCOL_VERSIONS,
   type TetiTaskProtocolVersion,
   type TetiTaskArtifactPayload,
+  type TetiTaskArtifactFilePayload,
+  type TetiTaskArtifactReceiptPayload,
   type TetiTaskAttachmentReceiptPayload,
   type TetiTaskAttachmentPayload,
   type TetiTaskCancelPayload,
@@ -17,6 +19,7 @@ import type { CollaborationTaskRequest, TaskImagePart, TaskTextPart } from "./ty
 import { validateTaskArtifact, validateTaskImagePart } from "./validation.ts";
 
 const SAFE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const SHA256_PATTERN = /^sha256:[a-f0-9]{64}$/;
 const RECEIPT_STATUSES = ["received", "duplicate", "expired", "conflict", "rejected"] as const;
 const TASK_UPDATE_STATES = [
   "working",
@@ -231,7 +234,70 @@ export function validateTaskArtifactPayload(
   }
 }
 
-/** Beta 0.2.8 never speculatively downgrades or sends before a v6 advertisement. */
+export function validateTaskArtifactFilePayload(
+  value: unknown
+): asserts value is TetiTaskArtifactFilePayload {
+  const schemaVersion = isRecord(value) ? value.schemaVersion : undefined;
+  const payload = exactOptionalRecord(value, [
+    "schemaVersion",
+    "taskId",
+    "requesterTetiId",
+    "targetTetiId",
+    "artifactId",
+    "byteLength",
+    "sha256",
+    "createdAt",
+    "expiresAt",
+    "deliveryReceiptRequested"
+  ], schemaVersion === 2 ? ["stageIndex", "role"] : [], "Task Artifact file");
+  if (payload.schemaVersion !== 1 && payload.schemaVersion !== 2) {
+    throw new TaskTransportContractError("Unsupported Task Artifact file version.");
+  }
+  taskIdentity(payload);
+  safeId(payload.artifactId, "artifactId");
+  if (!Number.isSafeInteger(payload.byteLength)
+    || Number(payload.byteLength) <= 0
+    || Number(payload.byteLength) > 64 * 1024
+    || typeof payload.sha256 !== "string"
+    || !SHA256_PATTERN.test(payload.sha256)
+    || payload.deliveryReceiptRequested !== true) {
+    throw new TaskTransportContractError("Task Artifact file integrity metadata is invalid.");
+  }
+  const createdAt = timestamp(payload.createdAt, "createdAt");
+  const expiresAt = timestamp(payload.expiresAt, "expiresAt");
+  if (expiresAt <= createdAt) throw new TaskTransportContractError("Task Artifact file expiry is invalid.");
+  if (payload.schemaVersion === 2
+    && (!Number.isSafeInteger(payload.stageIndex)
+      || Number(payload.stageIndex) < 1
+      || (payload.role !== "intermediate" && payload.role !== "final"))) {
+    throw new TaskTransportContractError("Task Artifact file stage metadata is invalid.");
+  }
+}
+
+export function validateTaskArtifactReceiptPayload(
+  value: unknown
+): asserts value is TetiTaskArtifactReceiptPayload {
+  const payload = exactRecord(value, [
+    "schemaVersion",
+    "taskId",
+    "requesterTetiId",
+    "targetTetiId",
+    "artifactId",
+    "sha256",
+    "receivedAt"
+  ], "Task Artifact receipt");
+  if (payload.schemaVersion !== 1) {
+    throw new TaskTransportContractError("Unsupported Task Artifact receipt version.");
+  }
+  taskIdentity(payload);
+  safeId(payload.artifactId, "artifactId");
+  if (typeof payload.sha256 !== "string" || !SHA256_PATTERN.test(payload.sha256)) {
+    throw new TaskTransportContractError("Task Artifact receipt digest is invalid.");
+  }
+  timestamp(payload.receivedAt, "receivedAt");
+}
+
+/** Beta 0.3.9 never speculatively downgrades or sends before a v7 advertisement. */
 export function selectTaskProtocolVersion(
   remoteVersions?: readonly number[]
 ): TetiTaskProtocolVersion | null {

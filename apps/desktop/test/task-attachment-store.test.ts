@@ -58,6 +58,39 @@ test("Task attachment ingestion is digest-bound and idempotent", async () => {
   }), /TASK_ATTACHMENT_MISMATCH/);
 });
 
+test("Task v7 Artifact document is private, bounded, and rejected after byte tampering", async () => {
+  const root = await mkdtemp(join(tmpdir(), "teti-task-artifact-document-"));
+  const store = new FileTaskAttachmentStore(join(root, "private"));
+  const artifact = {
+    schemaVersion: 2 as const,
+    taskId: "task-artifact-001",
+    artifactId: "artifact-001",
+    parts: [{ kind: "text" as const, text: `large-result:${"结果".repeat(2_000)}` }],
+    createdAt: "2026-08-13T02:11:19.201Z"
+  };
+  const staged = await store.stageArtifactDocument(artifact.taskId, artifact);
+  const descriptor = {
+    schemaVersion: 1 as const,
+    taskId: artifact.taskId,
+    requesterTetiId: "teti_sender001",
+    targetTetiId: "teti_target001",
+    artifactId: artifact.artifactId,
+    byteLength: staged.byteLength,
+    sha256: staged.sha256,
+    createdAt: artifact.createdAt,
+    expiresAt: "2026-08-13T03:11:19.201Z",
+    deliveryReceiptRequested: true as const
+  };
+
+  assert.equal((await stat(staged.path)).mode & 0o777, 0o600);
+  assert.deepEqual(await store.readArtifactDocument(staged.path, descriptor), artifact);
+  await writeFile(staged.path, Buffer.from("tampered", "utf8"));
+  await assert.rejects(
+    () => store.readArtifactDocument(staged.path, descriptor),
+    /SIZE_MISMATCH|DIGEST_MISMATCH/
+  );
+});
+
 test("Task attachment ingestion enforces the four-image per-task quota", async () => {
   const root = await mkdtemp(join(tmpdir(), "teti-task-quota-"));
   const source = join(root, "selected.png");

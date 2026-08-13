@@ -43,7 +43,7 @@ const SELF = "teti_aaaaaaaaa";
 const PEER = "teti_bbbbbbbbb";
 const RELATIONSHIP_ID = "rel_AAAAAAAAAAAAAAAAAAAAAA";
 
-test("Beta 0.3.8 Runtime cannot start without Network Relationship authority", async () => {
+test("Beta 0.3.9 Runtime cannot start without Network Relationship authority", async () => {
   const accountStorage = new MemoryTetiAccountStorage();
   await accountStorage.save(account());
   assert.throws(
@@ -196,7 +196,7 @@ test("Runtime keeps collaboration messages unacknowledged while Network authoriz
         status: "online",
         timestamp: "2026-08-09T00:03:00.000Z",
         collaborationProtocolEpoch: 2,
-        taskProtocolVersions: [6],
+        taskProtocolVersions: [7],
         passportSchemaVersions: [4]
       }
     }))
@@ -256,7 +256,7 @@ test("Runtime drops an in-flight collaboration message after an authoritative bl
         status: "online",
         timestamp: "2026-08-09T00:04:00.000Z",
         collaborationProtocolEpoch: 2,
-        taskProtocolVersions: [6],
+        taskProtocolVersions: [7],
         passportSchemaVersions: [4]
       }
     }))

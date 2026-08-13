@@ -684,6 +684,7 @@ fn is_allowed_method(method: &str) -> bool {
         method,
         "lifecycle.health"
             | "release.status"
+            | "network.contract.get"
             | "network.environment.get"
             | "network.environment.set"
             | "presence.get"

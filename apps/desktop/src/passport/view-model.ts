@@ -147,6 +147,8 @@ export interface PassportSettingsViewModel {
   networkEnvironmentActiveLabel: "生产环境" | "本机开发环境";
   networkEnvironmentRestartRequired: boolean;
   networkEnvironmentError?: string;
+  showLocalDevelopmentNetworkSwitch: boolean;
+  networkVersionLabel: string;
   presenceLabel: string;
   presenceTone: "ok" | "pending" | "error";
   localLogoutConfirmationRequired: boolean;
@@ -254,6 +256,8 @@ export function toPassportViewModel(
       ...(snapshot.networkEnvironmentError
         ? { networkEnvironmentError: snapshot.networkEnvironmentError }
         : {}),
+      showLocalDevelopmentNetworkSwitch: TETI_BUILD_INFO.localDevelopmentNetworkSwitchEnabled,
+      networkVersionLabel: formatNetworkVersion(snapshot.networkContract),
       ...formatPresenceStatus(snapshot.presence),
       localLogoutConfirmationRequired: snapshot.localLogoutConfirmationRequired ?? false,
       localLogoutBusy: snapshot.localLogoutBusy ?? false,
@@ -263,6 +267,14 @@ export function toPassportViewModel(
     },
     connections: snapshot.passport.connections.map((connection) => toConnectionCardViewModel(connection, now))
   };
+}
+
+function formatNetworkVersion(
+  status: PassportControllerSnapshot["networkContract"]
+): string {
+  if (!status || status.state === "checking" || status.state === "disabled") return "检测中";
+  if (status.state !== "compatible") return "暂不可用";
+  return `Protocol ${status.protocolVersion} · Service ${status.serviceVersion}`;
 }
 
 function formatPresenceStatus(

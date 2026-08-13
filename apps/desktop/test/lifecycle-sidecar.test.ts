@@ -94,6 +94,13 @@ test("Network environment and Presence signals cross the sidecar boundary as nor
     return deps.getNetworkEnvironmentSettings!();
   };
   deps.setPresenceSignal = (signal) => { signals.push(signal); };
+  deps.getNetworkContractStatus = () => ({
+    state: "compatible",
+    checkedAt: "2026-08-13T09:30:00.000Z",
+    protocolVersion: 1,
+    contractRevision: 8,
+    serviceVersion: "0.1.8"
+  });
   deps.getPresenceStatus = () => ({
     schemaVersion: 1,
     state: "checking",
@@ -112,9 +119,12 @@ test("Network environment and Presence signals cross the sidecar boundary as nor
     signal: "panel_visible",
     active: true
   }), deps);
+  const contract = await handleLifecycleRequest(request("network.contract.get"), deps);
 
   assert.equal(environment.ok && environment.result.configuredEnvironment, "local_development");
   assert.equal(presence.ok && presence.result.state, "checking");
+  assert.equal(contract.ok && contract.result.serviceVersion, "0.1.8");
+  assert.equal(contract.ok && contract.result.protocolVersion, 1);
   assert.deepEqual(signals, [{ signal: "panel_visible", active: true }]);
 });
 

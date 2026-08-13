@@ -1,16 +1,18 @@
 import { spawn } from "node:child_process";
+import { resolveTetiBuildType } from "./build-flavor.ts";
 
 const requestedTimestamp = process.env.TETI_BUILD_TIMESTAMP ?? new Date().toISOString();
 if (!Number.isFinite(Date.parse(requestedTimestamp))) {
   throw new Error("TETI_BUILD_TIMESTAMP must be an ISO timestamp.");
 }
 const buildTimestamp = new Date(requestedTimestamp).toISOString();
-const env = { ...process.env, TETI_BUILD_TIMESTAMP: buildTimestamp };
+const buildType = resolveTetiBuildType();
+const env = { ...process.env, TETI_BUILD_TIMESTAMP: buildTimestamp, TETI_BUILD_TYPE: buildType };
 
 await runNpm(["run", "runtime:bundle"]);
 await runNpm(["exec", "vite", "build"]);
 
-console.log(`Built Teti Desktop with timestamp ${buildTimestamp}`);
+console.log(`Built Teti Desktop ${buildType} flavor with timestamp ${buildTimestamp}`);
 
 async function runNpm(args: string[]): Promise<void> {
   const npmExecPath = process.env.npm_execpath;

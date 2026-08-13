@@ -22,6 +22,7 @@ export const LIFECYCLE_MAX_LINE_BYTES = 64 * 1024;
 export type LifecycleMethod =
   | "lifecycle.health"
   | "release.status"
+  | "network.contract.get"
   | "network.environment.get"
   | "network.environment.set"
   | "presence.get"
@@ -68,6 +69,7 @@ export type LifecycleMethod =
 export const LIFECYCLE_METHODS: readonly LifecycleMethod[] = [
   "lifecycle.health",
   "release.status",
+  "network.contract.get",
   "network.environment.get",
   "network.environment.set",
   "presence.get",
@@ -153,6 +155,7 @@ export type LifecycleResult =
   | MemoryExportResult
   | OsaurusNativeChildSettingsDto
   | TetiNetworkEnvironmentSettingsDto
+  | RuntimeNetworkContractStatusDto
   | RuntimePresenceStatusDto
   | boolean
   | null;
@@ -173,6 +176,23 @@ export interface TetiNetworkEnvironmentSettingsDto {
   configuredBaseUrl: string;
   restartRequired: boolean;
 }
+
+export type RuntimeNetworkContractStatusDto =
+  | { state: "disabled" | "checking" }
+  | {
+      state: "compatible";
+      checkedAt: string;
+      protocolVersion: number;
+      contractRevision: number;
+      serviceVersion: string;
+    }
+  | {
+      state: "unavailable" | "incompatible";
+      checkedAt: string;
+      errorCode: string;
+      retryable: boolean;
+      requestId?: string;
+    };
 
 export interface RuntimePresenceStatusDto {
   schemaVersion: 1;
@@ -305,6 +325,7 @@ export type LifecycleErrorCode =
 export const LIFECYCLE_TIMEOUT_MS: Record<LifecycleMethod, number> = {
   "lifecycle.health": 2_000,
   "release.status": 2_000,
+  "network.contract.get": 2_000,
   "network.environment.get": 2_000,
   "network.environment.set": 5_000,
   "presence.get": 2_000,

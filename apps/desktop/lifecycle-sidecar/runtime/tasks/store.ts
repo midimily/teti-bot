@@ -85,7 +85,8 @@ export class MemoryTaskTransportStore implements TaskTransportStore {
 }
 
 function migrateTaskStoreState(value: unknown): unknown {
-  if (!isRecord(value) || (value.schemaVersion !== 2 && value.schemaVersion !== 3)) return value;
+  if (!isRecord(value)
+    || (value.schemaVersion !== 2 && value.schemaVersion !== 3 && value.schemaVersion !== 4)) return value;
   return { ...value, schemaVersion: TETI_TASK_TRANSPORT_STORE_SCHEMA_VERSION };
 }
 
@@ -154,6 +155,8 @@ function validateRecord(value: unknown): asserts value is CollaborationTaskTrans
     "cancelSentAt",
     "artifactPending",
     "sentArtifactIds",
+    "acknowledgedArtifactIds",
+    "artifactDeliveryAttempts",
     "artifactAttachmentsReady",
     "attachmentsReady",
     "artifacts",
@@ -174,7 +177,8 @@ function validateRecord(value: unknown): asserts value is CollaborationTaskTrans
       && value.protocolVersion !== 3
       && value.protocolVersion !== 4
       && value.protocolVersion !== 5
-      && value.protocolVersion !== 6)) {
+      && value.protocolVersion !== 6
+      && value.protocolVersion !== 7)) {
     throw new Error("Teti Task transport record peer is invalid.");
   }
   if (value.envelopeMessageId !== undefined
@@ -243,6 +247,8 @@ function validateRecord(value: unknown): asserts value is CollaborationTaskTrans
     throw new Error("Teti Task Artifact outbox state is invalid.");
   }
   validateStringArray(value.sentArtifactIds, "Teti Task sent Artifact IDs");
+  validateStringArray(value.acknowledgedArtifactIds, "Teti Task acknowledged Artifact IDs");
+  validateArtifactDeliveryAttempts(value.artifactDeliveryAttempts);
   if (value.artifactAttachmentsReady !== undefined && typeof value.artifactAttachmentsReady !== "boolean") {
     throw new Error("Teti Task Artifact attachment readiness is invalid.");
   }
@@ -326,6 +332,12 @@ function validateRecord(value: unknown): asserts value is CollaborationTaskTrans
         ?.some((artifact) => artifact.artifactId === artifactId))) {
     throw new Error("Teti Task sent Artifact identity is invalid.");
   }
+  if (Array.isArray(value.acknowledgedArtifactIds)
+    && value.acknowledgedArtifactIds.some((artifactId) =>
+      !(value.artifacts as CollaborationTaskTransportRecord["artifacts"] | undefined)
+        ?.some((artifact) => artifact.artifactId === artifactId))) {
+    throw new Error("Teti Task acknowledged Artifact identity is invalid.");
+  }
 }
 
 function validateAttachmentDiagnostics(value: unknown): void {
@@ -400,6 +412,32 @@ function validateDeliveryAttempts(value: unknown, label: string): void {
     attachmentIds.add(item.attachmentId);
     requireTimestamp(item.lastSentAt, `${label} lastSentAt`);
     requireTimestamp(item.nextRetryAt, `${label} nextRetryAt`);
+  }
+}
+
+function validateArtifactDeliveryAttempts(value: unknown): void {
+  if (value === undefined) return;
+  if (!Array.isArray(value) || value.length > 32) {
+    throw new Error("Teti Task Artifact delivery attempts are invalid.");
+  }
+  const artifactIds = new Set<string>();
+  for (const item of value) {
+    if (!isRecord(item)) throw new Error("Teti Task Artifact delivery attempts are invalid.");
+    rejectUnknownKeys(
+      item,
+      ["artifactId", "attempts", "lastSentAt", "nextRetryAt"],
+      "Teti Task Artifact delivery attempt"
+    );
+    if (typeof item.artifactId !== "string"
+      || !item.artifactId.trim()
+      || artifactIds.has(item.artifactId)
+      || !Number.isSafeInteger(item.attempts)
+      || Number(item.attempts) < 1) {
+      throw new Error("Teti Task Artifact delivery attempts are invalid.");
+    }
+    artifactIds.add(item.artifactId);
+    requireTimestamp(item.lastSentAt, "Teti Task Artifact attempt lastSentAt");
+    requireTimestamp(item.nextRetryAt, "Teti Task Artifact attempt nextRetryAt");
   }
 }
 

@@ -71,6 +71,19 @@ test("Codex JSONL uses the last completed agent message as final output", () => 
   assert.equal(decodeCodexArtifact(output), "Final");
 });
 
+test("Codex JSONL accepts the legacy documented assistant message shape", () => {
+  const output = jsonl([
+    { type: "thread.started", thread_id: "thread" },
+    { type: "turn.started" },
+    {
+      type: "item.completed",
+      item: { item_type: "assistant_message", text: "Legacy compatible final" }
+    },
+    { type: "turn.completed" }
+  ]);
+  assert.equal(decodeCodexArtifact(output), "Legacy compatible final");
+});
+
 test("Codex JSONL turns failed and error events into a safe upstream failure", () => {
   for (const terminal of ["turn.failed", "error"]) {
     const output = jsonl([

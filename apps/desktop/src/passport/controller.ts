@@ -3,6 +3,7 @@ import type { PassportSharingPolicy } from "../../../../core/passport/types.ts";
 import type { LifecycleBridgeClient } from "../provisioning/bridge-lifecycle.ts";
 import type {
   OsaurusNativeChildSettingsDto,
+  RuntimeNetworkContractStatusDto,
   RuntimePresenceStatusDto,
   TetiNetworkEnvironmentSettingsDto
 } from "../lifecycle-bridge/protocol.ts";
@@ -27,6 +28,7 @@ export interface PassportClient {
   getOsaurusNativeChildSettings?(): Promise<OsaurusNativeChildSettingsDto>;
   setOsaurusNativeChildAgentId?(agentId: string | null): Promise<OsaurusNativeChildSettingsDto>;
   getNetworkEnvironmentSettings?(): Promise<TetiNetworkEnvironmentSettingsDto>;
+  getNetworkContractStatus?(): Promise<RuntimeNetworkContractStatusDto>;
   setLocalDevelopmentNetwork?(enabled: boolean): Promise<TetiNetworkEnvironmentSettingsDto>;
   getPresenceStatus?(): Promise<RuntimePresenceStatusDto | null>;
   logoutLocalProfile?(): Promise<never>;
@@ -45,6 +47,7 @@ export interface PassportControllerSnapshot {
   agentError?: string;
   osaurusNativeError?: string;
   networkEnvironment?: TetiNetworkEnvironmentSettingsDto;
+  networkContract?: RuntimeNetworkContractStatusDto;
   presence?: RuntimePresenceStatusDto;
   networkEnvironmentBusy?: boolean;
   networkEnvironmentError?: string;
@@ -316,8 +319,9 @@ export class PassportController {
       this.client.getAgentManagement(),
       this.client.getOsaurusNativeChildSettings?.() ?? Promise.resolve(nativeFallback),
       this.client.getNetworkEnvironmentSettings?.() ?? Promise.resolve(undefined),
+      this.client.getNetworkContractStatus?.() ?? Promise.resolve(undefined),
       this.client.getPresenceStatus?.() ?? Promise.resolve(null)
-    ]).then(([agentManagement, osaurusNative, networkEnvironment, presence]) => {
+    ]).then(([agentManagement, osaurusNative, networkEnvironment, networkContract, presence]) => {
       if (!this.active) return;
       if (agentManagement.status === "fulfilled" && !this.snapshotValue.agentBusy) {
         this.snapshotValue.agentManagement = agentManagement.value;
@@ -331,6 +335,9 @@ export class PassportController {
         && !this.snapshotValue.networkEnvironmentBusy) {
         this.snapshotValue.networkEnvironment = networkEnvironment.value;
         this.snapshotValue.networkEnvironmentError = undefined;
+      }
+      if (networkContract.status === "fulfilled" && networkContract.value) {
+        this.snapshotValue.networkContract = networkContract.value;
       }
       if (presence.status === "fulfilled" && presence.value) {
         this.snapshotValue.presence = presence.value;
@@ -432,6 +439,10 @@ export class BridgePassportClient implements PassportClient {
     return this.bridge.request("network.environment.get") as Promise<TetiNetworkEnvironmentSettingsDto>;
   }
 
+  getNetworkContractStatus(): Promise<RuntimeNetworkContractStatusDto> {
+    return this.bridge.request("network.contract.get") as Promise<RuntimeNetworkContractStatusDto>;
+  }
+
   setLocalDevelopmentNetwork(enabled: boolean): Promise<TetiNetworkEnvironmentSettingsDto> {
     return this.bridge.request("network.environment.set", { enabled }) as Promise<TetiNetworkEnvironmentSettingsDto>;
   }
@@ -468,6 +479,7 @@ export class MockPassportClient implements PassportClient {
     configuredBaseUrl: DEFAULT_TETI_NETWORK_BASE_URL,
     restartRequired: false
   };
+  private networkContract: RuntimeNetworkContractStatusDto = { state: "checking" };
 
   async getSnapshot(): Promise<RuntimePassportSnapshot> {
     return structuredClone(this.passport);
@@ -512,6 +524,10 @@ export class MockPassportClient implements PassportClient {
 
   async getNetworkEnvironmentSettings(): Promise<TetiNetworkEnvironmentSettingsDto> {
     return structuredClone(this.networkEnvironment);
+  }
+
+  async getNetworkContractStatus(): Promise<RuntimeNetworkContractStatusDto> {
+    return structuredClone(this.networkContract);
   }
 
   async setLocalDevelopmentNetwork(enabled: boolean): Promise<TetiNetworkEnvironmentSettingsDto> {

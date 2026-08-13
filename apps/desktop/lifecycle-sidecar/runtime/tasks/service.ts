@@ -22,6 +22,8 @@ import {
   type LongHorizonTaskState,
   type SendCollaborationTaskInput,
   type TetiTaskArtifactPayload,
+  type TetiTaskArtifactFilePayload,
+  type TetiTaskArtifactReceiptPayload,
   type TetiTaskAttachmentPayload,
   type TetiTaskAttachmentReceiptPayload,
   type TetiTaskCancelPayload,
@@ -743,6 +745,115 @@ export class TaskTransportRuntime {
     }
     initializeAttachmentDiagnostics(record, "artifact", imageParts);
     record.artifactAttachmentsReady = await this.areArtifactAttachmentsReady(record);
+    const receivedAt = validTimestampOrNow(input.receivedAt, this.now()).toISOString();
+    completeOutgoingSingleStageFromVerifiedArtifact(record, receivedAt);
+    record.updatedAt = receivedAt;
+    await this.store.save(state);
+  }
+
+  async receiveArtifactFile(input: {
+    envelope: TetiApplicationEnvelope<TetiTaskArtifactFilePayload>;
+    connection: TetiConnectionRecord;
+    filePath: string;
+    receivedAt?: string;
+  }): Promise<TetiTaskArtifactReceiptPayload> {
+    const account = await this.accountStorage.load();
+    if (!account) throw new TaskTransportRuntimeError("TASK_ACCOUNT_REQUIRED", "A local Teti account is required.");
+    if (!this.attachmentStore) {
+      throw new TaskTransportRuntimeError("TASK_ATTACHMENTS_UNAVAILABLE", "Task Artifact files are unavailable.");
+    }
+    const payload = input.envelope.payload;
+    requireOutboundTaskIdentity(input.envelope, input.connection, account.id, payload);
+    const state = await this.store.load();
+    const record = findTaskRecord(state, "outgoing", account.id, payload.taskId);
+    if (!record) {
+      if (Date.parse(payload.expiresAt) <= this.now().getTime()) {
+        throw new TaskTransportRuntimeError("TASK_ARTIFACT_EXPIRED", "Task Artifact file has expired.");
+      }
+      throw new TaskTransportRuntimeError(
+        "TASK_DEPENDENCY_PENDING",
+        "Task Artifact file is waiting for its local Task record."
+      );
+    }
+    if (record.protocolVersion < 7) {
+      throw new TaskTransportRuntimeError("TASK_ARTIFACT_UNSUPPORTED", "Task Artifact files require Task v7.");
+    }
+    const artifact = await this.attachmentStore.readArtifactDocument(input.filePath, payload);
+    const existing = record.artifacts?.find((candidate) => candidate.artifactId === artifact.artifactId);
+    if (existing && JSON.stringify(existing) !== JSON.stringify(artifact)) {
+      throw new TaskTransportRuntimeError("TASK_ARTIFACT_CONFLICT", "Task Artifact conflicts with the stored result.");
+    }
+    if (!existing
+      && record.request.executionMode !== "long_horizon"
+      && (record.artifacts?.length ?? 0) > 0) {
+      throw new TaskTransportRuntimeError(
+        "TASK_ARTIFACT_CONFLICT",
+        "A single-stage Task cannot publish more than one result Artifact."
+      );
+    }
+    if (!existing) record.artifacts = [...(record.artifacts ?? []), artifact];
+    if (payload.schemaVersion === 2) {
+      const metadata = {
+        artifactId: payload.artifactId,
+        stageIndex: payload.stageIndex!,
+        role: payload.role!,
+        createdAt: payload.createdAt
+      };
+      const existingMetadata = record.peerArtifactMetadata?.find(
+        (entry) => entry.artifactId === metadata.artifactId
+      );
+      if (existingMetadata && JSON.stringify(existingMetadata) !== JSON.stringify(metadata)) {
+        throw new TaskTransportRuntimeError(
+          "TASK_ARTIFACT_CONFLICT",
+          "Task Artifact stage metadata conflicts with the stored result."
+        );
+      }
+      if (!existingMetadata) {
+        record.peerArtifactMetadata = [...(record.peerArtifactMetadata ?? []), metadata];
+      }
+    }
+    const imageParts = taskArtifactImages(artifact);
+    initializeAttachmentDiagnostics(record, "artifact", imageParts);
+    record.artifactAttachmentsReady = await this.areArtifactAttachmentsReady(record);
+    const receivedAt = validTimestampOrNow(input.receivedAt, this.now()).toISOString();
+    completeOutgoingSingleStageFromVerifiedArtifact(record, receivedAt);
+    record.updatedAt = receivedAt;
+    await this.store.save(state);
+    return {
+      schemaVersion: 1,
+      taskId: payload.taskId,
+      requesterTetiId: payload.requesterTetiId,
+      targetTetiId: payload.targetTetiId,
+      artifactId: payload.artifactId,
+      sha256: payload.sha256,
+      receivedAt
+    };
+  }
+
+  async receiveArtifactReceipt(input: {
+    envelope: TetiApplicationEnvelope<TetiTaskArtifactReceiptPayload>;
+    connection: TetiConnectionRecord;
+    receivedAt?: string;
+  }): Promise<void> {
+    const account = await this.accountStorage.load();
+    if (!account) throw new TaskTransportRuntimeError("TASK_ACCOUNT_REQUIRED", "A local Teti account is required.");
+    const receipt = input.envelope.payload;
+    requireInboundTaskIdentity(input.envelope, input.connection, account.id, receipt);
+    const state = await this.store.load();
+    const record = findTaskRecord(state, "incoming", receipt.requesterTetiId, receipt.taskId);
+    if (!record || record.protocolVersion < 7) return;
+    const artifact = record.artifacts?.find((candidate) => candidate.artifactId === receipt.artifactId);
+    if (!artifact || artifactDigest(artifact) !== receipt.sha256) {
+      throw new TaskTransportRuntimeError("TASK_ARTIFACT_RECEIPT_MISMATCH", "Task Artifact receipt is invalid.");
+    }
+    record.acknowledgedArtifactIds = appendUnique(record.acknowledgedArtifactIds, receipt.artifactId);
+    record.artifactDeliveryAttempts = removeArtifactDeliveryAttempt(
+      record.artifactDeliveryAttempts,
+      receipt.artifactId
+    );
+    record.artifactPending = record.artifacts?.some(
+      (candidate) => !record.acknowledgedArtifactIds?.includes(candidate.artifactId)
+    ) ?? false;
     record.updatedAt = validTimestampOrNow(input.receivedAt, this.now()).toISOString();
     await this.store.save(state);
   }
@@ -1786,10 +1897,26 @@ export class TaskTransportRuntime {
       if (record.direction !== "incoming" || record.state !== "working") continue;
       const executionTaskId = currentExecutionTaskId(record) ?? record.request.taskId;
       const handle = await this.executor?.getExecutionHandle?.(executionTaskId);
-      if (this.executor?.getTask(executionTaskId)?.state === "working") {
+      const localExecution = this.executor?.getTask(executionTaskId);
+      if (localExecution?.state === "submitted" || localExecution?.state === "working") {
         if (record.longHorizon && handle && updateLongHorizonProgress(record, handle, this.now())) {
           changed = true;
         }
+        continue;
+      }
+      if (localExecution) {
+        if (record.longHorizon) {
+          await this.finishLongHorizonStage(state, record, localExecution, handle, executionTaskId);
+        } else {
+          await this.finishSingleStageExecution(
+            state,
+            record,
+            localExecution,
+            handle,
+            handle?.executionEpoch ?? 1
+          );
+        }
+        changed = true;
         continue;
       }
       if (record.longHorizon) {
@@ -1854,7 +1981,9 @@ export class TaskTransportRuntime {
     if (record.direction === "incoming" && record.artifacts?.length
       && (record.artifactPending || record.protocolVersion >= 4)) {
       const pendingArtifacts = record.artifacts.filter(
-        (artifact) => !record.sentArtifactIds?.includes(artifact.artifactId)
+        (artifact) => record.protocolVersion >= 7
+          ? shouldSendArtifact(record, artifact.artifactId, this.now())
+          : !record.sentArtifactIds?.includes(artifact.artifactId)
       );
       for (const artifact of pendingArtifacts) {
       for (const part of taskArtifactImages(artifact)) {
@@ -1903,6 +2032,57 @@ export class TaskTransportRuntime {
         const stageEntry = record.longHorizon?.artifacts.find(
           (entry) => entry.artifactId === artifact.artifactId
         );
+        if (record.protocolVersion >= 7) {
+          if (!this.attachmentStore) return;
+          try {
+            const document = await this.attachmentStore.stageArtifactDocument(
+              record.request.taskId,
+              artifact
+            );
+            const payload: TetiTaskArtifactFilePayload = stageEntry ? {
+              schemaVersion: 2,
+              taskId: record.request.taskId,
+              requesterTetiId: record.request.requesterTetiId,
+              targetTetiId: record.request.targetTetiId,
+              artifactId: artifact.artifactId,
+              byteLength: document.byteLength,
+              sha256: document.sha256,
+              createdAt: artifact.createdAt,
+              expiresAt: record.longHorizon
+                ? record.longHorizon.continuationExpiresAt
+                : new Date(Date.parse(artifact.createdAt) + DEFAULT_TASK_REQUEST_TTL_MS).toISOString(),
+              deliveryReceiptRequested: true,
+              stageIndex: stageEntry.stageIndex,
+              role: stageEntry.role
+            } : {
+              schemaVersion: 1,
+              taskId: record.request.taskId,
+              requesterTetiId: record.request.requesterTetiId,
+              targetTetiId: record.request.targetTetiId,
+              artifactId: artifact.artifactId,
+              byteLength: document.byteLength,
+              sha256: document.sha256,
+              createdAt: artifact.createdAt,
+              expiresAt: new Date(Date.parse(artifact.createdAt) + DEFAULT_TASK_REQUEST_TTL_MS).toISOString(),
+              deliveryReceiptRequested: true
+            };
+            await this.applicationManager.sendTaskArtifactFile(connection.requestId, payload, {
+              path: document.path,
+              filename: document.safeFileName
+            });
+            record.sentArtifactIds = appendUnique(record.sentArtifactIds, artifact.artifactId);
+            record.artifactDeliveryAttempts = recordArtifactDeliveryAttempt(
+              record.artifactDeliveryAttempts,
+              artifact.artifactId,
+              this.now()
+            );
+            record.artifactPending = true;
+            await this.store.save(state);
+          } catch {
+            return;
+          }
+          continue;
+        }
         const payload: TetiTaskArtifactPayload = stageEntry ? {
           schemaVersion: 2,
           taskId: record.request.taskId,
@@ -2007,6 +2187,16 @@ export class TaskTransportRuntime {
       await this.finishLongHorizonStage(state, record, result, handle, executionTaskId);
       return;
     }
+    await this.finishSingleStageExecution(state, record, result, handle, executionEpoch);
+  }
+
+  private async finishSingleStageExecution(
+    state: TetiTaskTransportStoreState,
+    record: CollaborationTaskTransportRecord,
+    result: CallableAdapterTaskSnapshot | null,
+    handle: ExecutionHandle | null | undefined,
+    executionEpoch: number
+  ): Promise<void> {
     const completedAt = this.now().toISOString();
     if (result?.state === "completed" && result.artifact) {
       const resultImages = result.artifact.kind === "parts" ? result.artifact.images : [];
@@ -2033,7 +2223,7 @@ export class TaskTransportRuntime {
       const artifact: CollaborationTaskArtifact = record.protocolVersion === 1
         ? {
             schemaVersion: 1,
-            taskId,
+            taskId: record.request.taskId,
             artifactId: randomUUID(),
             kind: "text",
             text: result.artifact.text,
@@ -2041,7 +2231,7 @@ export class TaskTransportRuntime {
           }
         : {
             schemaVersion: 2,
-            taskId,
+            taskId: record.request.taskId,
             artifactId: randomUUID(),
             parts: [
               { kind: "text", text: result.artifact.text },
@@ -2699,7 +2889,7 @@ function validateSendInput(input: SendCollaborationTaskInput): Required<Pick<
     && (attachments.length > 0 || input.capabilityId === "image-editing")) {
     throw new TaskTransportRuntimeError(
       "TASK_LONG_HORIZON_TEXT_ONLY",
-      "Long-horizon collaboration accepts text-only capabilities in Beta 0.2.8."
+      "Long-horizon collaboration accepts text-only capabilities in Beta 0.3.9."
     );
   }
   try {
@@ -2741,7 +2931,7 @@ function requireMatchingRetry(
 }
 
 function taskInputForVersion(
-  version: 1 | 2 | 3 | 4 | 5 | 6,
+  version: 1 | 2 | 3 | 4 | 5 | 6 | 7,
   text: string,
   attachments: readonly TaskImagePart[]
 ): CollaborationTaskInput {
@@ -2779,6 +2969,47 @@ function removeDeliveryAttempt(
 ): CollaborationTaskTransportRecord["attachmentDeliveryAttempts"] {
   const remaining = attempts?.filter((attempt) => attempt.attachmentId !== attachmentId) ?? [];
   return remaining.length > 0 ? remaining : undefined;
+}
+
+function removeArtifactDeliveryAttempt(
+  attempts: CollaborationTaskTransportRecord["artifactDeliveryAttempts"],
+  artifactId: string
+): CollaborationTaskTransportRecord["artifactDeliveryAttempts"] {
+  const remaining = attempts?.filter((attempt) => attempt.artifactId !== artifactId) ?? [];
+  return remaining.length > 0 ? remaining : undefined;
+}
+
+function shouldSendArtifact(
+  record: CollaborationTaskTransportRecord,
+  artifactId: string,
+  now: Date
+): boolean {
+  if (record.acknowledgedArtifactIds?.includes(artifactId)) return false;
+  const attempt = record.artifactDeliveryAttempts?.find((item) => item.artifactId === artifactId);
+  return !attempt || Date.parse(attempt.nextRetryAt) <= now.getTime();
+}
+
+function recordArtifactDeliveryAttempt(
+  attempts: CollaborationTaskTransportRecord["artifactDeliveryAttempts"],
+  artifactId: string,
+  now: Date
+): NonNullable<CollaborationTaskTransportRecord["artifactDeliveryAttempts"]> {
+  const current = attempts?.find((attempt) => attempt.artifactId === artifactId);
+  const nextAttempt = (current?.attempts ?? 0) + 1;
+  const delay = ATTACHMENT_RETRY_DELAYS_MS[
+    Math.min(nextAttempt - 1, ATTACHMENT_RETRY_DELAYS_MS.length - 1)
+  ];
+  const updated = {
+    artifactId,
+    attempts: nextAttempt,
+    lastSentAt: now.toISOString(),
+    nextRetryAt: new Date(now.getTime() + delay).toISOString()
+  };
+  return [...(attempts ?? []).filter((attempt) => attempt.artifactId !== artifactId), updated];
+}
+
+function artifactDigest(artifact: CollaborationTaskArtifact): string {
+  return `sha256:${createHash("sha256").update(JSON.stringify(artifact), "utf8").digest("hex")}`;
 }
 
 function shouldSendAttachment(
@@ -2951,7 +3182,13 @@ function rememberPeerVersions(
 }
 
 function expireDueRecords(state: TetiTaskTransportStoreState, now: Date): boolean {
-  let changed = false;
+  // Task v7 Artifact documents are digest-verified and durably persisted before
+  // this state is reached. For a single-stage Task, that is stronger evidence
+  // of remote completion than the best-effort status envelope. Reconcile first
+  // so a missed/reordered completed status can never turn an accepted result
+  // into a local TASK_EXPIRED record. This also repairs persisted Beta 0.3.9
+  // records that already contain the result but retained the submitted state.
+  let changed = reconcileVerifiedSingleStageCompletions(state, now.toISOString());
   for (const record of state.records) {
     if ((!isTerminalTaskState(record.state)
       || record.delivery === "queued"
@@ -2962,6 +3199,52 @@ function expireDueRecords(state: TetiTaskTransportStoreState, now: Date): boolea
     }
   }
   return changed;
+}
+
+function reconcileVerifiedSingleStageCompletions(
+  state: TetiTaskTransportStoreState,
+  observedAt: string
+): boolean {
+  let changed = false;
+  for (const record of state.records) {
+    changed = completeOutgoingSingleStageFromVerifiedArtifact(record, observedAt) || changed;
+  }
+  return changed;
+}
+
+function completeOutgoingSingleStageFromVerifiedArtifact(
+  record: CollaborationTaskTransportRecord,
+  observedAt: string
+): boolean {
+  if (record.direction !== "outgoing"
+    || record.protocolVersion < 7
+    || record.request.executionMode === "long_horizon"
+    || !record.artifacts?.length) return false;
+
+  const recoversLocalExpiry = record.state === "rejected"
+    && record.safeErrorCode === "TASK_EXPIRED";
+  if (record.state !== "completed"
+    && !recoversLocalExpiry
+    && !["submitted", "working", "auth_required", "input_required"].includes(record.state)) {
+    return false;
+  }
+
+  const changed = record.state !== "completed"
+    || record.approval !== "approved_once"
+    || record.delivery !== "acknowledged"
+    || record.cancelPending === true
+    || record.cancelSentAt !== undefined
+    || record.safeErrorCode !== undefined;
+  if (!changed) return false;
+
+  record.state = "completed";
+  record.approval = "approved_once";
+  record.delivery = "acknowledged";
+  record.cancelPending = false;
+  delete record.cancelSentAt;
+  delete record.safeErrorCode;
+  record.updatedAt = observedAt;
+  return true;
 }
 
 function expireRecord(record: CollaborationTaskTransportRecord, timestamp: string): void {

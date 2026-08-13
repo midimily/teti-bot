@@ -43,6 +43,25 @@ test("Passport settings show the local Teti name and nine-character ID", () => {
   assert.ok(viewModel.settings.buildTimestamp.length > 0);
 });
 
+test("Passport settings show the Runtime-observed Network protocol and service versions", () => {
+  const passport = emptyPassportSnapshot();
+  const viewModel = toPassportViewModel({
+    passport,
+    sharingBusy: false,
+    openPanel: "sharing",
+    networkContract: {
+      state: "compatible",
+      checkedAt: "2026-08-13T09:30:00.000Z",
+      protocolVersion: 1,
+      contractRevision: 8,
+      serviceVersion: "0.1.8"
+    }
+  });
+
+  assert.equal(viewModel.settings.showLocalDevelopmentNetworkSwitch, true);
+  assert.equal(viewModel.settings.networkVersionLabel, "Protocol 1 · Service 0.1.8");
+});
+
 test("Passport settings distinguish Network recovery from an unbound identity", () => {
   const passport = emptyPassportSnapshot();
   passport.networkIdentity = {

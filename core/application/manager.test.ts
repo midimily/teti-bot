@@ -59,7 +59,7 @@ test("pending connection is rejected before sending", async () => {
         status: "online",
         timestamp: fixedNow,
         collaborationProtocolEpoch: 2,
-        taskProtocolVersions: [6],
+        taskProtocolVersions: [7],
         passportSchemaVersions: [4]
       }),
     /Confirmed connection/
@@ -89,7 +89,7 @@ test("fresh Network authorization fails closed before Chatmail send", async () =
       status: "online",
       timestamp: fixedNow,
       collaborationProtocolEpoch: 2,
-      taskProtocolVersions: [6],
+      taskProtocolVersions: [7],
       passportSchemaVersions: [4]
     }),
     /authorization unavailable/
@@ -118,7 +118,7 @@ test("Chatmail failure remains distinct after fresh Network authorization succee
       status: "online",
       timestamp: fixedNow,
       collaborationProtocolEpoch: 2,
-      taskProtocolVersions: [6],
+      taskProtocolVersions: [7],
       passportSchemaVersions: [4]
     }),
     /Chatmail unavailable/
@@ -203,7 +203,7 @@ test("Presence accepts explicit Passport capability and rejects malformed versio
       status: "online",
       timestamp: fixedNow,
       collaborationProtocolEpoch: 2,
-      taskProtocolVersions: [6],
+      taskProtocolVersions: [7],
       passportSchemaVersions: [4]
     }
   }));
@@ -218,7 +218,7 @@ test("Presence accepts explicit Passport capability and rejects malformed versio
         status: "online",
         timestamp: fixedNow,
         collaborationProtocolEpoch: 2,
-        taskProtocolVersions: [6],
+        taskProtocolVersions: [7],
         passportSchemaVersions
       }
     }), /Passport schema versions/);
@@ -269,7 +269,7 @@ test("duplicate message is ignored after first processing", async () => {
       status: "online",
       timestamp: fixedNow,
       collaborationProtocolEpoch: 2,
-      taskProtocolVersions: [6],
+      taskProtocolVersions: [7],
       passportSchemaVersions: [4]
     }
   });
@@ -335,7 +335,7 @@ test("Task request and receipt use the existing Application Envelope", async () 
     messageId: "task-envelope"
   });
   const request = {
-    schemaVersion: 6 as const,
+    schemaVersion: 7 as const,
     taskId: "task-001",
     requesterTetiId: "teti_local0001",
     targetTetiId: "teti_remote001",

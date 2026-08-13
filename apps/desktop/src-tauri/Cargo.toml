@@ -1,6 +1,6 @@
 [package]
 name = "teti-desktop"
-version = "0.3.8"
+version = "0.3.9"
 description = "Teti macOS Desktop"
 authors = ["Teti"]
 edition = "2021"

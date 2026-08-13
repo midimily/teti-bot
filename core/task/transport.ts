@@ -13,14 +13,14 @@ import type { ExecutionProgress } from "../callability/execution.ts";
 import type { DelegationPlanState } from "../delegation/types.ts";
 
 export const TETI_TASK_TRANSPORT_SCHEMA_VERSION = 1;
-export const TETI_TASK_TRANSPORT_STORE_SCHEMA_VERSION = 4;
-export const TETI_SUPPORTED_TASK_PROTOCOL_VERSIONS = [6] as const;
+export const TETI_TASK_TRANSPORT_STORE_SCHEMA_VERSION = 5;
+export const TETI_SUPPORTED_TASK_PROTOCOL_VERSIONS = [7] as const;
 export const DEFAULT_TASK_REQUEST_TTL_MS = 60 * 60 * 1_000;
 export const MAX_TASK_CLOCK_SKEW_MS = 5 * 60 * 1_000;
 export const MAX_TASK_PROTOCOL_VERSIONS = 8;
 export const MAX_TASK_TRANSPORT_RECORDS = 512;
 
-export type TetiTaskProtocolVersion = 1 | 2 | 3 | 4 | 5 | 6;
+export type TetiTaskProtocolVersion = 1 | 2 | 3 | 4 | 5 | 6 | 7;
 
 export const LONG_HORIZON_LIMITS = {
   maximumStages: 16,
@@ -304,6 +304,44 @@ export interface TetiTaskArtifactPayload {
   role?: "intermediate" | "final";
 }
 
+/**
+ * Task v7 moves every Artifact document into a Chatmail file attachment. The
+ * caption stays comfortably below Delta Chat's text normalization boundary;
+ * the receiver verifies the immutable byte length and digest before parsing.
+ */
+export interface TetiTaskArtifactFilePayload {
+  schemaVersion: 1 | 2;
+  taskId: string;
+  requesterTetiId: string;
+  targetTetiId: string;
+  artifactId: string;
+  byteLength: number;
+  sha256: string;
+  createdAt: string;
+  expiresAt: string;
+  deliveryReceiptRequested: true;
+  stageIndex?: number;
+  role?: "intermediate" | "final";
+}
+
+/** Application-level proof that an Artifact was validated and durably stored. */
+export interface TetiTaskArtifactReceiptPayload {
+  schemaVersion: 1;
+  taskId: string;
+  requesterTetiId: string;
+  targetTetiId: string;
+  artifactId: string;
+  sha256: string;
+  receivedAt: string;
+}
+
+export interface TaskArtifactDeliveryAttempt {
+  artifactId: string;
+  attempts: number;
+  lastSentAt: string;
+  nextRetryAt: string;
+}
+
 export interface SendCollaborationTaskInput {
   connectionRequestId: string;
   taskId?: string;
@@ -361,6 +399,8 @@ export interface CollaborationTaskTransportRecord {
   cancelSentAt?: string;
   artifactPending?: boolean;
   sentArtifactIds?: string[];
+  acknowledgedArtifactIds?: string[];
+  artifactDeliveryAttempts?: TaskArtifactDeliveryAttempt[];
   artifactAttachmentsReady?: boolean;
   attachmentsReady?: boolean;
   artifacts?: CollaborationTaskArtifact[];
@@ -418,7 +458,7 @@ export interface CollaborationTaskTransportSnapshot {
 }
 
 export interface TetiTaskTransportStoreState {
-  schemaVersion: 4;
+  schemaVersion: 5;
   records: CollaborationTaskTransportRecord[];
   peers: TetiTaskPeerProtocolCapability[];
 }

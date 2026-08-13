@@ -32,6 +32,8 @@ import type { AiStatusSyncPayload } from "../ai-status/types.ts";
 import type { CollaborationTaskRequest } from "../task/types.ts";
 import type {
   TetiTaskArtifactPayload,
+  TetiTaskArtifactFilePayload,
+  TetiTaskArtifactReceiptPayload,
   TetiTaskAttachmentPayload,
   TetiTaskAttachmentReceiptPayload,
   TetiTaskCancelPayload,
@@ -216,6 +218,30 @@ export class TetiApplicationManager {
     payload: TetiTaskArtifactPayload
   ): Promise<SentApplicationEnvelope> {
     return this.sendApplicationEnvelope({ connectionRequestId, type: "teti.task.artifact", payload });
+  }
+
+  async sendTaskArtifactFile(
+    connectionRequestId: string,
+    payload: TetiTaskArtifactFilePayload,
+    attachment: ChatmailFileAttachment
+  ): Promise<SentApplicationEnvelope> {
+    return this.sendApplicationEnvelope({
+      connectionRequestId,
+      type: "teti.task.artifact.file",
+      payload,
+      attachment
+    });
+  }
+
+  async sendTaskArtifactReceipt(
+    connectionRequestId: string,
+    payload: TetiTaskArtifactReceiptPayload
+  ): Promise<SentApplicationEnvelope> {
+    return this.sendApplicationEnvelope({
+      connectionRequestId,
+      type: "teti.task.artifact.receipt",
+      payload
+    });
   }
 
   async sendApplicationEnvelope<TPayload>(

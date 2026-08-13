@@ -1,6 +1,6 @@
 {
   "name": "teti-bot",
-  "version": "0.3.8",
+  "version": "0.3.9",
   "private": true,
   "type": "module",
   "scripts": {
@@ -11,6 +11,7 @@
     "desktop:dev": "npm --prefix apps/desktop run dev",
     "desktop:tauri-dev": "npm --prefix apps/desktop run tauri:dev",
     "desktop:build": "npm --prefix apps/desktop run build",
+    "desktop:build:release": "npm --prefix apps/desktop run build:release",
     "desktop:codex-adapter:smoke": "npm --prefix apps/desktop run codex-adapter:smoke",
     "desktop:codebuddy-adapter:smoke": "npm --prefix apps/desktop run codebuddy-adapter:smoke",
     "desktop:codebuddy-adapter:security-smoke": "npm --prefix apps/desktop run codebuddy-adapter:security-smoke",
@@ -27,7 +28,10 @@
     "desktop:rust-fmt": "cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml",
     "desktop:tauri-build": "npm --prefix apps/desktop run tauri:build",
     "desktop:tauri-build-app": "npm --prefix apps/desktop run tauri:build:app",
+    "desktop:tauri-build:release": "npm --prefix apps/desktop run tauri:build:release",
+    "desktop:tauri-build-app:release": "npm --prefix apps/desktop run tauri:build:app:release",
     "desktop:package:mac:adhoc": "npm --prefix apps/desktop run package:mac:adhoc",
+    "desktop:package:mac:adhoc:release": "npm --prefix apps/desktop run package:mac:adhoc:release",
     "desktop:profile:create": "npm --prefix apps/desktop run profile:create --",
     "desktop:profile:status": "npm --prefix apps/desktop run profile:status --",
     "desktop:profile:preflight": "npm --prefix apps/desktop run profile:preflight --",

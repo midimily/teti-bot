@@ -3,7 +3,7 @@ import type {
   WorkspaceAccess
 } from "../workspace/types.ts";
 
-export const TETI_COLLABORATION_TASK_SCHEMA_VERSION = 6;
+export const TETI_COLLABORATION_TASK_SCHEMA_VERSION = 7;
 export const TETI_TASK_ARTIFACT_SCHEMA_VERSION = 2;
 export const TETI_EXECUTION_GRANT_SCHEMA_VERSION = 2;
 
@@ -78,7 +78,7 @@ export type CollaborationTaskInput = TaskTextPart | TaskMultipartInput;
  * Adapter, path, command, or host filesystem location.
  */
 export interface CollaborationTaskRequest {
-  schemaVersion: 1 | 2 | 3 | 4 | 5 | 6;
+  schemaVersion: 1 | 2 | 3 | 4 | 5 | 6 | 7;
   taskId: string;
   requesterTetiId: string;
   targetTetiId: string;
@@ -86,7 +86,7 @@ export interface CollaborationTaskRequest {
   capabilityId: string;
   input: CollaborationTaskInput;
   workspace?: TaskWorkspaceRequest;
-  /** Required by Task v6. Older schemas are parsed only for local rejection. */
+  /** Required by Task v6+. Older schemas are parsed only for local rejection. */
   executionMode?: CollaborationExecutionMode;
   createdAt: string;
   expiresAt: string;

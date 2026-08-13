@@ -2,10 +2,12 @@ import { defineConfig } from "vite";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { resolveTetiBuildType } from "./scripts/build-flavor.ts";
 
 const desktopRoot = resolve(dirname(fileURLToPath(import.meta.url)));
 const packageVersion = readPackageVersion();
 const buildTimestamp = resolveBuildTimestamp();
+const buildType = resolveTetiBuildType();
 
 export default defineConfig({
   clearScreen: false,
@@ -17,7 +19,8 @@ export default defineConfig({
   envPrefix: ["VITE_"],
   define: {
     __TETI_APP_VERSION__: JSON.stringify(packageVersion),
-    __TETI_BUILD_TIMESTAMP__: JSON.stringify(buildTimestamp)
+    __TETI_BUILD_TIMESTAMP__: JSON.stringify(buildTimestamp),
+    __TETI_BUILD_TYPE__: JSON.stringify(buildType)
   },
   build: {
     target: "es2022",

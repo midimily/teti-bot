@@ -64,7 +64,7 @@ export class LoopbackHttpTransport implements ExecutionTransport {
 
   constructor(options: LoopbackHttpTransportOptions) {
     this.identityVerifier = options.identityVerifier;
-    this.userAgent = options.userAgent ?? "Teti/0.3.8";
+    this.userAgent = options.userAgent ?? "Teti/0.3.9";
   }
 
   start(input: { spec: ExecutionSpec; workspacePath: string | null }): ExecutionTransportHandle {
@@ -93,7 +93,7 @@ export class OsaurusAgentTransport implements ExecutionTransport {
   }) {
     this.identityVerifier = options.identityVerifier;
     this.authorityVerifier = options.authorityVerifier;
-    this.userAgent = options.userAgent ?? "Teti/0.3.8";
+    this.userAgent = options.userAgent ?? "Teti/0.3.9";
   }
 
   start(input: { spec: ExecutionSpec; workspacePath: string | null }): ExecutionTransportHandle {

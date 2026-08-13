@@ -49,7 +49,7 @@ export function validateCollaborationTaskRequest(
     "capabilityId",
     "input",
     ...(Number(schemaVersion) >= 5 ? ["workspace"] : []),
-    ...(schemaVersion === TETI_COLLABORATION_TASK_SCHEMA_VERSION ? ["executionMode"] : []),
+    ...(Number(schemaVersion) >= 6 ? ["executionMode"] : []),
     "createdAt",
     "expiresAt"
   ], "Task request");
@@ -58,6 +58,7 @@ export function validateCollaborationTaskRequest(
     && request.schemaVersion !== 3
     && request.schemaVersion !== 4
     && request.schemaVersion !== 5
+    && request.schemaVersion !== 6
     && request.schemaVersion !== TETI_COLLABORATION_TASK_SCHEMA_VERSION) {
     throw new TaskContractError("Unsupported Task request schema version.");
   }
@@ -77,7 +78,7 @@ export function validateCollaborationTaskRequest(
   if (Number(request.schemaVersion) >= 5) {
     validateTaskWorkspaceRequest(request.workspace);
   }
-  if (request.schemaVersion === TETI_COLLABORATION_TASK_SCHEMA_VERSION
+  if (Number(request.schemaVersion) >= 6
     && request.executionMode !== "single_stage"
     && request.executionMode !== "long_horizon") {
     throw new TaskContractError("Task execution mode is invalid.");

@@ -140,7 +140,10 @@ async function startSidecar(): Promise<void> {
   profileLock = await acquireTetiRuntimeProfileLock(profile);
   await ensureProfileDirectories(profile);
   const networkEnvironmentSettings = await TetiNetworkEnvironmentSettingsService.create(
-    new FileTetiNetworkEnvironmentPreferenceStore(profile.networkEnvironmentPath)
+    new FileTetiNetworkEnvironmentPreferenceStore(profile.networkEnvironmentPath),
+    {
+      allowLocalDevelopmentNetwork: TETI_BUILD_INFO.localDevelopmentNetworkSwitchEnabled
+    }
   );
   const networkBaseUrl = networkEnvironmentSettings.settings.activeBaseUrl;
   const networkEnvironment = networkEnvironmentSettings.settings.activeEnvironment;

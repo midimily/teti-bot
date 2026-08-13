@@ -188,6 +188,7 @@ test("Settings exposes an explicit restart-bound local Network opt-in", async ()
   await flushPromises();
 
   assert.equal(controller.snapshot.networkEnvironment?.useLocalDevelopmentNetwork, false);
+  assert.equal(controller.snapshot.networkContract?.state, "compatible");
   assert.equal(controller.snapshot.presence?.state, "online");
   await controller.setLocalDevelopmentNetwork(true);
   assert.equal(controller.snapshot.networkEnvironment?.configuredBaseUrl, "http://127.0.0.1:8788");
@@ -292,6 +293,17 @@ class FakePassportClient implements PassportClient {
   async getNetworkEnvironmentSettings() {
     if (!this.provideNetworkSettings) throw new Error("Network settings unavailable");
     return structuredClone(this.networkEnvironment);
+  }
+
+  async getNetworkContractStatus() {
+    if (!this.provideNetworkSettings) throw new Error("Network contract unavailable");
+    return {
+      state: "compatible" as const,
+      checkedAt: "2026-08-13T09:30:00.000Z",
+      protocolVersion: 1,
+      contractRevision: 8,
+      serviceVersion: "0.1.8"
+    };
   }
 
   async setLocalDevelopmentNetwork(enabled: boolean) {

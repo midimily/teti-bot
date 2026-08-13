@@ -35,6 +35,7 @@ import {
 import type { TetiApplicationEnvelope } from "../../../core/protocol/types.ts";
 import {
   MAX_TASK_IMAGE_BYTES,
+  MAX_TASK_ARTIFACT_BYTES,
   type CollaborationTaskRequest
 } from "../../../core/task/types.ts";
 import {
@@ -44,6 +45,8 @@ import {
   type CollaborationTaskSummarySnapshot,
   type SendCollaborationTaskInput,
   type TetiTaskArtifactPayload,
+  type TetiTaskArtifactFilePayload,
+  type TetiTaskArtifactReceiptPayload,
   type TetiTaskAttachmentPayload,
   type TetiTaskAttachmentReceiptPayload,
   type TetiTaskCancelPayload,
@@ -135,6 +138,7 @@ const AI_STATUS_SYNC_INTERVAL_MS = 10 * 60 * 1_000;
 const AI_STATUS_TTL_MS = 30 * 60 * 1_000;
 const PEER_PROFILE_CACHE_TTL_MS = 15 * 60 * 1_000;
 const TETI_TASK_ATTACHMENT_FILENAME_PATTERN = /^(?:teti-task-)?[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}\.(?:png|jpe?g)$/i;
+const TETI_TASK_ARTIFACT_FILENAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\.teti-artifact\.json$/;
 
 export class RelationshipAuthorizationDeniedError extends Error {
   readonly code = "RELATIONSHIP_AUTHORIZATION_DENIED";
@@ -262,7 +266,7 @@ export class PeerConnectionRuntime implements PeerConnectionService {
 
   constructor(options: PeerConnectionRuntimeOptions) {
     if (!options.relationshipService && options.allowLegacyRelationshipAuthorityForTests !== true) {
-      throw new Error("Teti Network Relationship service is required by Beta 0.3.8 Runtime.");
+      throw new Error("Teti Network Relationship service is required by Beta 0.3.9 Runtime.");
     }
     this.accountStorage = options.accountStorage;
     this.connectionStorage = options.connectionStorage;
@@ -606,8 +610,8 @@ export class PeerConnectionRuntime implements PeerConnectionService {
             ? "TASK_PEER_UPGRADE_REQUIRED"
             : "TASK_PEER_COMPATIBILITY_UNKNOWN",
           knownIncompatible
-            ? "The confirmed Teti must upgrade to Beta 0.2 before receiving tasks."
-            : "Wait until the confirmed Teti proves Beta 0.2 compatibility."
+            ? "The confirmed Teti must upgrade to Beta 0.3.9 before receiving tasks."
+            : "Wait until the confirmed Teti proves Beta 0.3.9 compatibility."
         );
       }
       return this.taskTransport.send(input);
@@ -1068,6 +1072,46 @@ export class PeerConnectionRuntime implements PeerConnectionService {
     if (envelope.type === "teti.task.attachment.receipt") {
       await this.taskTransport.receiveAttachmentReceipt({
         envelope: envelope as TetiApplicationEnvelope<TetiTaskAttachmentReceiptPayload>,
+        connection,
+        receivedAt
+      });
+      return true;
+    }
+
+    if (envelope.type === "teti.task.artifact.file") {
+      const typedEnvelope = envelope as TetiApplicationEnvelope<TetiTaskArtifactFilePayload>;
+      let artifactMessage = message;
+      if (!artifactMessage.filePath
+        && (artifactMessage.downloadState === "Available" || artifactMessage.downloadState === "Failure")) {
+        const account = await this.requireAccount();
+        if (!this.chatmailAdapter.downloadMessageAttachment) {
+          throw new Error("Chatmail Artifact download is unavailable.");
+        }
+        artifactMessage = await this.chatmailAdapter.downloadMessageAttachment(
+          account.chatmailAccountId,
+          message.messageId
+        );
+      }
+      if (!artifactMessage.filePath) {
+        if (Date.parse(typedEnvelope.payload.expiresAt) <= this.now().getTime()) return true;
+        throw new TaskTransportRuntimeError(
+          "TASK_ATTACHMENT_PENDING",
+          "Task Artifact file download is still pending."
+        );
+      }
+      const receipt = await this.taskTransport.receiveArtifactFile({
+        envelope: typedEnvelope,
+        connection,
+        filePath: artifactMessage.filePath,
+        receivedAt
+      });
+      await this.applicationManager.sendTaskArtifactReceipt(connection.requestId, receipt);
+      return true;
+    }
+
+    if (envelope.type === "teti.task.artifact.receipt") {
+      await this.taskTransport.receiveArtifactReceipt({
+        envelope: envelope as TetiApplicationEnvelope<TetiTaskArtifactReceiptPayload>,
         connection,
         receivedAt
       });
@@ -1618,11 +1662,19 @@ function isCandidateTaskAttachment(
   if (message.fileBytes !== undefined
     && (!Number.isSafeInteger(message.fileBytes)
       || message.fileBytes <= 0
-      || message.fileBytes > MAX_TASK_IMAGE_BYTES)) {
+      || message.fileBytes > Math.max(MAX_TASK_IMAGE_BYTES, MAX_TASK_ARTIFACT_BYTES))) {
     return false;
   }
   if (message.fileName !== undefined) {
-    return TETI_TASK_ATTACHMENT_FILENAME_PATTERN.test(message.fileName);
+    return TETI_TASK_ATTACHMENT_FILENAME_PATTERN.test(message.fileName)
+      || TETI_TASK_ARTIFACT_FILENAME_PATTERN.test(message.fileName);
+  }
+  try {
+    if (message.text && parseApplicationEnvelope(message.text).type === "teti.task.artifact.file") {
+      return true;
+    }
+  } catch {
+    // Continue to the bounded image MIME fallback.
   }
   // DeltaChat can know the MIME type before the original filename becomes
   // available. At least one bounded Teti image signal is required before an

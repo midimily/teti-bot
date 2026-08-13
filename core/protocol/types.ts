@@ -2,6 +2,8 @@ import type { AiStatusSyncPayload } from "../ai-status/types.ts";
 import type { CollaborationTaskRequest } from "../task/types.ts";
 import type {
   TetiTaskArtifactPayload,
+  TetiTaskArtifactFilePayload,
+  TetiTaskArtifactReceiptPayload,
   TetiTaskAttachmentReceiptPayload,
   TetiTaskAttachmentPayload,
   TetiTaskCancelPayload,
@@ -28,7 +30,9 @@ export type TetiApplicationMessageType =
   | "teti.task.status"
   | "teti.task.cancel"
   | "teti.task.input"
-  | "teti.task.artifact";
+  | "teti.task.artifact"
+  | "teti.task.artifact.file"
+  | "teti.task.artifact.receipt";
 
 export interface TetiApplicationEnvelope<TPayload = unknown> {
   version: 2;
@@ -53,7 +57,7 @@ export interface TetiPresencePayload {
   status: string;
   timestamp: string;
   collaborationProtocolEpoch: 2;
-  taskProtocolVersions: [6];
+  taskProtocolVersions: [7];
   /** Explicit Passport capability; independent from the latest shared snapshot. */
   passportSchemaVersions: [4];
 }
@@ -70,7 +74,9 @@ export type TetiKnownApplicationEnvelope =
   | TetiApplicationEnvelope<TetiTaskStatusPayload>
   | TetiApplicationEnvelope<TetiTaskCancelPayload>
   | TetiApplicationEnvelope<TetiTaskInputPayload>
-  | TetiApplicationEnvelope<TetiTaskArtifactPayload>;
+  | TetiApplicationEnvelope<TetiTaskArtifactPayload>
+  | TetiApplicationEnvelope<TetiTaskArtifactFilePayload>
+  | TetiApplicationEnvelope<TetiTaskArtifactReceiptPayload>;
 
 export interface TetiProcessedMessageStore {
   version: 2;

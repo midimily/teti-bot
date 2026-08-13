@@ -41,6 +41,7 @@ export function createRuntimeOwnedLifecycleDependencies(
       return synchronized;
     },
     getPresenceStatus: () => runtime.getPresenceSnapshot(),
+    getNetworkContractStatus: () => runtime.getNetworkContractStatus(),
     setPresenceSignal: ({ signal, active }) => {
       if (signal === "sleeping") runtime.setPresenceSleeping(active);
       if (signal === "foreground") runtime.setPresenceForeground(active);

@@ -150,13 +150,7 @@ export function createPassportSettingsPanel(
   toggle.checked = viewModel.enabled;
   toggle.addEventListener("change", () => void controller?.setResourceSharing(toggle.checked));
   label.append(toggleCopy, toggle);
-  panel.append(panelHeading, overview, networkEnvironment, label);
-  if (viewModel.networkEnvironmentError) {
-    const error = document.createElement("small");
-    error.className = "teti-sharing-error";
-    error.textContent = viewModel.networkEnvironmentError;
-    panel.append(error);
-  }
+  panel.append(panelHeading, overview, label);
   if (viewModel.error) {
     const error = document.createElement("small");
     error.className = "teti-sharing-error";
@@ -168,6 +162,15 @@ export function createPassportSettingsPanel(
     panel.append(createOsaurusNativeChildSection(viewModel, controller));
   }
   if (memoryController) panel.append(createChildMemorySection(memoryController, childAgents));
+  if (viewModel.showLocalDevelopmentNetworkSwitch) {
+    panel.append(networkEnvironment);
+    if (viewModel.networkEnvironmentError) {
+      const error = document.createElement("small");
+      error.className = "teti-sharing-error";
+      error.textContent = viewModel.networkEnvironmentError;
+      panel.append(error);
+    }
+  }
   panel.append(createBuildInformation(viewModel, controller));
   return panel;
 }
@@ -216,7 +219,26 @@ function createBuildInformation(
     timestamp.dateTime = viewModel.buildTimestamp;
   }
 
-  footer.append(versionLabel, version, logout, timestampLabel, timestamp);
+  const networkVersionLabel = document.createElement("span");
+  networkVersionLabel.textContent = "teti-network 版本";
+  const networkVersion = document.createElement("code");
+  networkVersion.textContent = viewModel.networkVersionLabel;
+  const networkVersionSpacer = document.createElement("span");
+  networkVersionSpacer.setAttribute("aria-hidden", "true");
+  const timestampSpacer = document.createElement("span");
+  timestampSpacer.setAttribute("aria-hidden", "true");
+
+  footer.append(
+    versionLabel,
+    version,
+    logout,
+    networkVersionLabel,
+    networkVersion,
+    networkVersionSpacer,
+    timestampLabel,
+    timestamp,
+    timestampSpacer
+  );
   if (viewModel.localLogoutConfirmationRequired) {
     const confirmation = document.createElement("div");
     confirmation.className = "teti-local-logout-confirmation";

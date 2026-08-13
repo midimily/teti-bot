@@ -1,95 +1,45 @@
-# teti-bot
+# Teti
 
-Teti is an open-source AI identity companion for the agent era.
+Teti is a personal AI identity companion for the agent era.
 
-Teti is not a chatbot, an assistant replacement, a social media application, or a centralized AI platform. It is designed as a personal AI identity node that runs on the user's own device and represents the user's AI identity, AI environment, AI capabilities, and trusted connections.
+It gives your local AI environment a recognizable identity, a clear Passport, and a trusted way to connect and collaborate with other Tetis. Teti is designed to feel personal, calm, and useful while keeping the user in control.
 
-## Architecture
+## What Teti Can Do
 
-Beta 0.3 migrates the official control plane behind the versioned Teti Network contract. Beta 0.3.8
-closes the local migration: the App has no legacy Worker/KV runtime, configuration, or admin path.
+- Create a personal Teti identity.
+- Present an AI Passport with available agents, resources, and capabilities.
+- Discover public Tetis and view the information they choose to share.
+- Build trusted one-to-one connections.
+- Show whether connected Tetis are online and ready to collaborate.
+- Request programming and other supported AI assistance from a connected Teti.
+- Review, approve, follow, and receive collaboration results.
+- Support text and image collaboration workflows.
+- Connect local AI tools such as Codex, CodeBuddy, and Osaurus.
+- Keep local profiles, preferences, and task history on the Mac.
 
-- Network contract: `Runtime -> NetworkClient -> network.teti.bot` (or local
-  `http://127.0.0.1:8788`).
-- Public Read, Release Policy, Identity and ClientInstance state:
-  `Runtime -> NetworkClient -> teti-network -> SQLite`.
-- Presence report/read: `Runtime -> NetworkClient -> teti-network -> Redis`; Presence never writes
-  SQLite and never carries full Passport/Profile data.
-- PublicProfile read/update: `Runtime -> NetworkClient -> teti-network -> SQLite`, using strong ETag,
-  durable idempotency, and full-replacement conflict recovery.
-- Private Relationship read/commands: `Runtime -> NetworkClient -> teti-network -> SQLite`, using
-  one canonical unordered-pair ID, revision/ETag guards, and durable exact-command recovery.
-- Relationship permission and recovery use fresh confirmed-only authorization plus stable snapshot
-  and incremental-change reconciliation. `connections.json` is display/delivery recovery only.
-- Relay bootstrap/catalog select Chatmail provisioning dynamically; signed RelayBinding state keeps
-  the delivery address bound to the Network identity without coupling the Teti ID to a Relay.
-- Signed HTTP authentication: separate Ed25519 Identity Root and ClientInstance keys, with Redis
-  nonce/replay state. Chatmail/OpenPGP keys remain transport-only.
-- Secure communication: Chatmail relays encrypted Teti-to-Teti messages.
+## Why Teti
 
-Private keys, Chatmail credentials, private AI state, task content, and conversation history stay on
-the user's device. Relationship is now Network-authoritative; the local Chatmail connection record
-remains recovery state only. RelayBinding is Network-authoritative and cached separately for each
-Network environment; Relay still owns message transport rather than Teti identity.
+AI is becoming more capable, but identity and trust still matter. Teti helps people understand whose AI they are interacting with, what it can offer, and whether a connection has been explicitly approved.
 
-The App defaults to `https://network.teti.bot`. Settings has an explicit, default-off “本机 Network
-开发环境” switch for `http://127.0.0.1:8788`; the fixed environment selection is persisted locally
-and takes effect after restart so one Runtime never mixes credential domains. Existing local
-identity adoption uses `TETI_NETWORK_ADOPTION_GRANT` outside loopback development. Network private
-seeds are stored separately from `account.json` in the profile credentials directory with
-owner-only permissions.
+Teti is not another social feed or a replacement for your favorite AI tools. It is the identity and collaboration layer that helps those tools work together in a more human, intentional way.
 
-## Public ID Rule
+## Our Principles
 
-Teti has one canonical public-ID format: `teti_[a-z0-9]{9}`. The card and desktop UI show only the 9-character suffix. Human input is case-insensitive, but local storage and Network protocol messages must contain the lowercase canonical form. Invalid characters are rejected, never removed silently. Network identity and Chatmail delivery address are intentionally independent; adoption preserves both without creating a new Chatmail account.
+- Personal by default.
+- Explicit trust before collaboration.
+- Clear sharing choices.
+- Local ownership of private AI activity.
+- Open development and reusable protocols.
+- A simple experience that hides unnecessary infrastructure.
 
-See [`docs/teti-public-id.md`](docs/teti-public-id.md) for the complete boundary rules.
+## Beta 0.3.9
 
-Runtime owns the Presence scheduler: collaboration and visible connection-panel modes report every
-5 seconds, foreground online every 15 seconds, and background every 30 seconds. State changes and
-system wake report immediately; system sleep stops reports. Chatmail peer heartbeats remain a
-separate message-transport mechanism.
+Beta 0.3.9 strengthens reliable task-result delivery, improves build separation for development and release use, and makes Network version information visible inside the app.
 
-## Repository Layout
+Teti for Mac is currently in active beta development. Features and compatibility may continue to evolve as we prepare for a broader release.
 
-```text
-teti-bot/
-├── apps/desktop/
-├── core/
-│   ├── identity/
-│   ├── profile/
-│   └── crypto/
-├── integrations/
-│   ├── chatmail/
-│   └── agents/
-├── services/discovery/
-├── services/network/
-├── protocol/
-└── docs/
-```
+## Project Status
 
-## Current Network Migration Boundary
+Teti is an open-source project under active development. Feedback, testing, and thoughtful contributions are welcome.
 
-`services/network` contains the thin, backend-independent Network v1 client. Beta 0.3.8 requires
-protocol 1, minimum contract revision 8, `identity`, `clientAuthentication`, `publicDirectory`,
-`publicProfile`, `presence`, `relationships`, and `relayBindings`. The App consumes OpenAPI/JSON rather than Hono types. Runtime owns
-bootstrap, registration/adoption, signed `/self`, ClientInstance enrollment/revocation, Presence,
-revisioned PublicProfile, canonical Relationship commands, confirmed-only authorization, and
-snapshot/change recovery. It also confirms bootstrap Relay selection against `/v1/relays`, passes
-the dynamic provisioning URI to Chatmail, and validates signed RelayBinding state after identity
-synchronization. Confirmed-peer Passport remains Runtime/Chatmail-owned. All
-official Network business crosses the Runtime-owned `NetworkClient`; Chatmail remains a separate
-message transport.
-
-## Beta MVP 1.0 Architecture
-
-The accepted Beta boundary and staged Runtime convergence are documented in
-[`docs/TETI_BETA_MVP_1_0_ARCHITECTURE_FREEZE.md`](docs/TETI_BETA_MVP_1_0_ARCHITECTURE_FREEZE.md).
-Task 1 froze the Capability Passport model and introduced the Runtime Host. The lifecycle sidecar now
-owns Network synchronization, Chatmail polling, peer transport presence, AI-status sync, and Codex
-refresh. Desktop is a Runtime consumer: periodic reads update UI snapshots and never drive background
-Network or Chatmail work.
-
-To regression-test first launch on a development Mac while preserving the
-local Chatmail account store, follow
-[`docs/testing/TETI_FIRST_LAUNCH_REGRESSION.md`](docs/testing/TETI_FIRST_LAUNCH_REGRESSION.md).
+The goal is simple: give every personal AI a trusted identity, a useful Passport, and a safe way to collaborate.

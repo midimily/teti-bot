@@ -8,6 +8,8 @@ import type { AiStatusSyncPayload } from "../ai-status/types.ts";
 import type { CollaborationTaskRequest } from "../task/types.ts";
 import type {
   TetiTaskArtifactPayload,
+  TetiTaskArtifactFilePayload,
+  TetiTaskArtifactReceiptPayload,
   TetiTaskAttachmentPayload,
   TetiTaskAttachmentReceiptPayload,
   TetiTaskCancelPayload,
@@ -88,6 +90,18 @@ export type TetiApplicationHandlerResult =
       messageId: string;
       fromTetiId: string;
       artifact: TetiTaskArtifactPayload;
+    }
+  | {
+      type: "task.artifact.file";
+      messageId: string;
+      fromTetiId: string;
+      artifact: TetiTaskArtifactFilePayload;
+    }
+  | {
+      type: "task.artifact.receipt";
+      messageId: string;
+      fromTetiId: string;
+      receipt: TetiTaskArtifactReceiptPayload;
     };
 
 export function handleApplicationEnvelope(
@@ -172,6 +186,20 @@ export function handleApplicationEnvelope(
     messageId: envelope.messageId,
     fromTetiId: envelope.fromTetiId,
     input: envelope.payload as TetiTaskInputPayload
+  };
+
+  if (envelope.type === "teti.task.artifact.file") return {
+    type: "task.artifact.file",
+    messageId: envelope.messageId,
+    fromTetiId: envelope.fromTetiId,
+    artifact: envelope.payload as TetiTaskArtifactFilePayload
+  };
+
+  if (envelope.type === "teti.task.artifact.receipt") return {
+    type: "task.artifact.receipt",
+    messageId: envelope.messageId,
+    fromTetiId: envelope.fromTetiId,
+    receipt: envelope.payload as TetiTaskArtifactReceiptPayload
   };
 
   return {

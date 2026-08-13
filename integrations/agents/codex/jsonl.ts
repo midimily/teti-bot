@@ -71,7 +71,15 @@ export function parseCodexJsonl(stdout: string): CodexJsonlSummary {
       case "item.completed": {
         if (!turnStarted) throw invalidOutput("Codex JSONL item arrived before turn start.");
         const item = record(event.item);
-        if (item?.type === "agent_message") {
+        const itemType = typeof item?.type === "string"
+          ? item.type
+          : typeof item?.item_type === "string"
+            ? item.item_type
+            : null;
+        // Current Codex uses `type: agent_message`. Older documented JSONL
+        // clients used `item_type: assistant_message`; both represent the same
+        // bounded final-answer surface and neither exposes tool/reasoning data.
+        if (item && (itemType === "agent_message" || itemType === "assistant_message")) {
           if (typeof item.text !== "string" || !item.text.trim()) {
             throw invalidOutput("Codex agent message is invalid.");
           }
