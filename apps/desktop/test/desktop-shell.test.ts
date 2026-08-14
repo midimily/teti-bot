@@ -6,6 +6,10 @@ import type { FirstLaunchSnapshot } from "../src/first-launch/state-machine.ts";
 import { toFirstLaunchViewModel } from "../src/first-launch/view-model.ts";
 import { RecordingTauriInvoker } from "../src/platform/tauri-api.ts";
 import { TauriNotchWindowController, visualModeForViewModel } from "../src/platform/tauri-notch-window.ts";
+import {
+  createPanelDiagnosticSink,
+  shouldPersistPanelDiagnostic
+} from "../src/platform/panel-diagnostics.ts";
 import { createDesktopAccountLifecycle } from "../src/provisioning/index.ts";
 import { LifecycleBridgeClient } from "../src/provisioning/bridge-lifecycle.ts";
 import { MockDesktopAccountLifecycle, MOCK_ACCOUNT_STORAGE_KEY } from "../src/provisioning/mock-lifecycle.ts";
@@ -161,7 +165,11 @@ test("tauri notch controller maps shell actions to bridge commands", async () =>
 
 test("notch mode updates coalesce before native dispatch and keep the latest mode", async () => {
   const invoker = new RecordingTauriInvoker();
-  const controller = new TauriNotchWindowController(invoker);
+  const diagnostics: Array<{ level: string; event: string; fields?: object }> = [];
+  const controller = new TauriNotchWindowController(
+    invoker,
+    (entry) => diagnostics.push(entry)
+  );
 
   const collapse = controller.setMode("idle", "auto-collapse");
   const reopen = controller.setMode("onboarding", "dock-activate");
@@ -170,6 +178,80 @@ test("notch mode updates coalesce before native dispatch and keep the latest mod
   assert.deepEqual(invoker.calls, [
     { command: "set_island_mode", args: { mode: "onboarding", reason: "dock-activate" } }
   ]);
+  assert.deepEqual(diagnostics.find(({ event }) => event === "panel.mode.collapse_superseded"), {
+    level: "warn",
+    event: "panel.mode.collapse_superseded",
+    fields: {
+      mode: "idle",
+      reason: "auto-collapse",
+      revision: 1,
+      currentRevision: 2,
+      replacementMode: "onboarding",
+      replacementReason: "dock-activate"
+    }
+  });
+});
+
+test("panel diagnostics keep verbose events in development and only critical events in release", async () => {
+  assert.equal(shouldPersistPanelDiagnostic("development", "debug"), true);
+  assert.equal(shouldPersistPanelDiagnostic("development", "info"), true);
+  assert.equal(shouldPersistPanelDiagnostic("release", "debug"), false);
+  assert.equal(shouldPersistPanelDiagnostic("release", "info"), false);
+  assert.equal(shouldPersistPanelDiagnostic("release", "warn"), true);
+  assert.equal(shouldPersistPanelDiagnostic("release", "error"), true);
+
+  const calls: Array<{ command: string; args?: Record<string, unknown> }> = [];
+  const native = {
+    runtime: "native" as const,
+    async invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+      calls.push({ command, args });
+      return undefined as T;
+    }
+  };
+  const diagnostic = createPanelDiagnosticSink(native, "release");
+  diagnostic({ level: "debug", event: "panel.focus.changed" });
+  diagnostic({
+    level: "warn",
+    event: "panel.dismiss.deferred",
+    fields: { surface: "task", blocker: "busy" }
+  });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]?.command, "write_panel_diagnostic");
+  assert.deepEqual(
+    (calls[0]?.args?.entry as { level: string; event: string; fields: object }),
+    {
+      occurredAt: (calls[0]?.args?.entry as { occurredAt: string }).occurredAt,
+      level: "warn",
+      event: "panel.dismiss.deferred",
+      fields: { surface: "task", blocker: "busy" }
+    }
+  );
+});
+
+test("native panel mode failures emit a privacy-safe critical diagnostic", async () => {
+  const diagnostics: Array<{ level: string; event: string; fields?: object }> = [];
+  const controller = new TauriNotchWindowController({
+    runtime: "test",
+    async invoke(): Promise<never> {
+      const error = new Error("private transport detail");
+      error.name = "PANEL_INVOKE_FAILED";
+      throw error;
+    }
+  }, (entry) => diagnostics.push(entry));
+
+  await assert.rejects(() => controller.setMode("idle", "focus-lost"));
+
+  assert.equal(diagnostics.at(-1)?.level, "error");
+  assert.equal(diagnostics.at(-1)?.event, "panel.mode.failed");
+  assert.deepEqual(diagnostics.at(-1)?.fields, {
+    mode: "idle",
+    reason: "focus-lost",
+    revision: 1,
+    errorKind: "PANEL_INVOKE_FAILED"
+  });
+  assert.equal(JSON.stringify(diagnostics).includes("private transport detail"), false);
 });
 
 test("measured connection detail height follows its active native mode", async () => {

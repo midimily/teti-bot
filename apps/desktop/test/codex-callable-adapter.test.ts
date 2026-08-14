@@ -201,7 +201,7 @@ test("explicit Codex path override refuses an executable with a different filena
   assert.equal(await resolveCodexEntrypoint({ pathOverride: process.execPath }), null);
 });
 
-test("fake Codex CLI proves login reuse, stdin delivery, JSONL decoding, and Artifact filtering", async () => {
+test("fake Codex CLI recovers transport errors and proves stdin, JSONL, and Artifact filtering", async () => {
   const fixture = await createExecutableFakeCodex();
   try {
     assert.equal(await probeCodexLogin(fixture.path, {
@@ -222,6 +222,7 @@ test("fake Codex CLI proves login reuse, stdin delivery, JSONL decoding, and Art
     assert.equal(result.state, "completed");
     assert.equal(result.artifact?.text, "codex:Review this explicit snippet.");
     assert.equal(result.artifact?.text.includes("must-not-project"), false);
+    assert.equal(result.artifact?.text.includes("Reconnecting"), false);
     await hostAgent.shutdown();
   } finally {
     await rm(fixture.root, { recursive: true, force: true });

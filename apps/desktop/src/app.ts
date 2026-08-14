@@ -8,7 +8,9 @@ import { createDesktopAccountLifecycle } from "./provisioning/index.ts";
 import { readProvisioningMode, type ProvisioningModeConfig } from "./provisioning/modes.ts";
 import { TauriNotchWindowController, visualModeForViewModel } from "./platform/tauri-notch-window.ts";
 import type { TauriInvoker } from "./platform/tauri-api.ts";
+import { createPanelDiagnosticSink } from "./platform/panel-diagnostics.ts";
 import { DockActivationGuard } from "./platform/dock-activation-guard.ts";
+import { TETI_BUILD_INFO } from "./build-info.ts";
 import {
   LifecycleBridgeClient
 } from "./provisioning/bridge-lifecycle.ts";
@@ -71,6 +73,7 @@ import "./styles.css";
 
 const aiToolsButtonIconUrl = new URL("../assets/ai-tools-btn.png", import.meta.url).href;
 const settingsButtonIconUrl = new URL("../assets/settings.png", import.meta.url).href;
+const DOCK_FOCUS_REASSERT_SETTLE_MS = 150;
 
 export interface DesktopAppOptions {
   root: HTMLElement;
@@ -116,7 +119,8 @@ export async function createDesktopApp(options: DesktopAppOptions): Promise<Desk
   await syncScreenMetrics(options.tauri, options.root.ownerDocument.documentElement);
   installScreenMetricsSync(options.tauri, options.root.ownerDocument);
   const selection = await createDesktopAccountLifecycle(options.env, options.tauri);
-  const notchWindow = new TauriNotchWindowController(options.tauri);
+  const panelDiagnostic = createPanelDiagnosticSink(options.tauri, TETI_BUILD_INFO.buildType);
+  const notchWindow = new TauriNotchWindowController(options.tauri, panelDiagnostic);
   let app: DesktopApp;
   let disposed = false;
   let stopFocusListener: (() => void) | undefined;
@@ -126,6 +130,8 @@ export async function createDesktopApp(options: DesktopAppOptions): Promise<Desk
   let preserveStateForBrandOpen = false;
   let brandOpenGuardTimer: number | undefined;
   let localAppUpdateRequired = false;
+  let lastWindowFocused = options.root.ownerDocument.hasFocus();
+  let dockFocusRecoveryRevision = 0;
   const dockActivationGuard = new DockActivationGuard();
   const baseSchedule = options.schedule ?? ((callback: () => void, delayMs: number) => setTimeout(callback, delayMs));
   const clearBrandOpenGuard = () => {
@@ -200,7 +206,8 @@ export async function createDesktopApp(options: DesktopAppOptions): Promise<Desk
       }
       app?.render();
     },
-    refreshPassport: () => passport.refreshAfterMutation()
+    refreshPassport: () => passport.refreshAfterMutation(),
+    diagnostic: panelDiagnostic
   });
   const tasks = new TaskController({
     client: bridge ? new BridgeTaskClient(bridge) : new MockTaskClient(),
@@ -211,28 +218,111 @@ export async function createDesktopApp(options: DesktopAppOptions): Promise<Desk
       passport.closePanel(false);
       connections.open("task-back-to-island");
     },
-    schedule: baseSchedule
+    schedule: baseSchedule,
+    diagnostic: panelDiagnostic
   });
   const memory = new MemoryController({
     client: bridge ? new BridgeChildMemoryClient(bridge) : new MockChildMemoryClient(),
     onChange: () => app?.render()
   });
+  const dismissPanelsFromOutside = () => {
+    dockFocusRecoveryRevision += 1;
+    passport.closePanel();
+    tasks.dismissFromOutside();
+    connections.dismissFromOutside();
+  };
+  const reconcileDockFocusLoss = () => {
+    if (disposed || lastWindowFocused || localAppUpdateRequired) return;
+    const mode = tasks.snapshot.open
+      ? "task"
+      : connections.snapshot.open
+        ? connections.snapshot.expandedRequestId
+          ? "connection_detail"
+          : "onboarding"
+        : undefined;
+    if (!mode) return;
+
+    const revision = ++dockFocusRecoveryRevision;
+    panelDiagnostic({
+      level: "debug",
+      event: "panel.focus.reassert_requested",
+      fields: { mode, reason: "dock_activation_guard" }
+    });
+    void notchWindow.setMode(mode, "dock-focus-reconcile").then(() => {
+      baseSchedule(() => {
+        if (disposed || revision !== dockFocusRecoveryRevision || lastWindowFocused) return;
+        panelDiagnostic({
+          level: "warn",
+          event: "panel.focus.reassert_failed",
+          fields: { mode, action: "dismiss" }
+        });
+        dismissPanelsFromOutside();
+      }, DOCK_FOCUS_REASSERT_SETTLE_MS);
+    }).catch(() => undefined);
+  };
   if (options.tauri.onFocusChanged) {
     stopFocusListener = await options.tauri.onFocusChanged((focused) => {
+      lastWindowFocused = focused;
+      panelDiagnostic({
+        level: "debug",
+        event: "panel.focus.changed",
+        fields: {
+          focused,
+          taskOpen: tasks.snapshot.open,
+          connectionsOpen: connections.snapshot.open,
+          taskBusy: tasks.snapshot.busy,
+          connectState: connections.snapshot.connectPanel.state
+        }
+      });
       setPresenceSignal("foreground", focused);
+      if (focused) {
+        dockFocusRecoveryRevision += 1;
+        if (dockActivationGuard.cancelPendingFocusLoss()) {
+          panelDiagnostic({
+            level: "debug",
+            event: "panel.dismiss.cancelled",
+            fields: { reason: "dock_activation_guard", resolution: "focus_regained" }
+          });
+        }
+        tasks.cancelPendingOutsideDismiss();
+        connections.cancelPendingOutsideDismiss();
+      }
       if (localAppUpdateRequired) {
+        panelDiagnostic({
+          level: "debug",
+          event: "panel.dismiss.ignored",
+          fields: { reason: "app_update_required", focused }
+        });
         void notchWindow.setMode("error", "local-app-update-required").catch(() => undefined);
         return;
       }
       if (!focused) {
         if (preserveStateForBrandOpen) {
+          panelDiagnostic({
+            level: "debug",
+            event: "panel.dismiss.ignored",
+            fields: { reason: "brand_open_guard" }
+          });
           clearBrandOpenGuard();
           return;
         }
-        if (dockActivationGuard.shouldIgnoreFocusLoss()) return;
-        passport.closePanel();
-        tasks.dismissFromOutside();
-        connections.dismissFromOutside();
+        const dockDeferral = dockActivationGuard.deferFocusLoss(
+          baseSchedule,
+          reconcileDockFocusLoss
+        );
+        if (dockDeferral.state !== "inactive") {
+          panelDiagnostic({
+            level: "debug",
+            event: "panel.dismiss.deferred",
+            fields: {
+              reason: "dock_activation_guard",
+              delayMs: dockDeferral.delayMs,
+              alreadyPending: dockDeferral.state === "pending"
+            }
+          });
+          return;
+        }
+        dismissPanelsFromOutside();
       }
     });
   }
@@ -251,6 +341,7 @@ export async function createDesktopApp(options: DesktopAppOptions): Promise<Desk
 
   if (options.tauri.onDockActivate) {
     stopDockActivateListener = await options.tauri.onDockActivate(() => {
+      dockFocusRecoveryRevision += 1;
       if (localAppUpdateRequired) {
         void notchWindow.setMode("error", "local-app-update-required").catch(() => undefined);
         return;
@@ -313,6 +404,8 @@ export async function createDesktopApp(options: DesktopAppOptions): Promise<Desk
       stopDockActivateListener?.();
       stopSystemSleepListener?.();
       stopSystemWakeListener?.();
+      dockActivationGuard.cancelPendingFocusLoss();
+      dockFocusRecoveryRevision += 1;
       clearBrandOpenGuard();
       options.root.removeEventListener(TETI_BOT_OPENING_EVENT, handleBrandWebsiteOpening);
       options.root.removeEventListener(TETI_BOT_OPEN_SETTLED_EVENT, handleBrandWebsiteOpenSettled);

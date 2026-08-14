@@ -3,7 +3,8 @@ mod lifecycle_bridge;
 mod macos_panel;
 mod window;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 #[cfg(target_os = "macos")]
 use tauri::Emitter;
 use tauri::Manager;
@@ -13,6 +14,16 @@ use tauri::Manager;
 struct LocalProfileLogoutResult {
     cleared: bool,
     server_data_deleted: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PanelDiagnosticEntry {
+    occurred_at: String,
+    level: String,
+    event: String,
+    #[serde(default)]
+    fields: BTreeMap<String, serde_json::Value>,
 }
 
 pub fn run() {
@@ -29,6 +40,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             lifecycle_bridge::lifecycle_request,
+            write_panel_diagnostic,
             logout_local_profile,
             restart_application,
             window::set_island_mode,
@@ -59,6 +71,81 @@ pub fn run() {
             let _ = handle.emit("teti://dock-activate", ());
         }
     });
+}
+
+#[tauri::command]
+fn write_panel_diagnostic(entry: PanelDiagnosticEntry) -> Result<(), String> {
+    if !matches!(entry.level.as_str(), "debug" | "info" | "warn" | "error") {
+        return Err("Invalid panel diagnostic level.".to_string());
+    }
+    if !should_persist_panel_diagnostic(&entry.level) {
+        return Ok(());
+    }
+    let line = format_panel_diagnostic(&entry)?;
+    lifecycle_bridge::append_sanitized_log_line("desktop", &line);
+    Ok(())
+}
+
+fn should_persist_panel_diagnostic(level: &str) -> bool {
+    let release = option_env!("TETI_BUILD_TYPE") == Some("release");
+    should_persist_panel_diagnostic_for(release, level)
+}
+
+fn should_persist_panel_diagnostic_for(release: bool, level: &str) -> bool {
+    !release || matches!(level, "warn" | "error")
+}
+
+fn format_panel_diagnostic(entry: &PanelDiagnosticEntry) -> Result<String, String> {
+    validate_diagnostic_token(&entry.event, 64, "event")?;
+    if entry.occurred_at.len() > 40
+        || entry.occurred_at.is_empty()
+        || !entry.occurred_at.chars().all(|character| {
+            character.is_ascii_alphanumeric()
+                || matches!(character, '-' | ':' | '.' | '+' | 'T' | 'Z')
+        })
+    {
+        return Err("Invalid panel diagnostic timestamp.".to_string());
+    }
+    if entry.fields.len() > 12 {
+        return Err("Panel diagnostic has too many fields.".to_string());
+    }
+    let mut fields = Vec::with_capacity(entry.fields.len());
+    for (key, value) in &entry.fields {
+        validate_diagnostic_token(key, 32, "field")?;
+        let rendered = match value {
+            serde_json::Value::Bool(value) => value.to_string(),
+            serde_json::Value::Number(value) => value.to_string(),
+            serde_json::Value::String(value) => {
+                validate_diagnostic_token(value, 80, "value")?;
+                format!("\"{value}\"")
+            }
+            _ => return Err("Invalid panel diagnostic field value.".to_string()),
+        };
+        fields.push(format!("{key}={rendered}"));
+    }
+    Ok(format!(
+        "{} level={} event={}{}",
+        entry.occurred_at,
+        entry.level,
+        entry.event,
+        if fields.is_empty() {
+            String::new()
+        } else {
+            format!(" {}", fields.join(" "))
+        }
+    ))
+}
+
+fn validate_diagnostic_token(value: &str, maximum: usize, label: &str) -> Result<(), String> {
+    if value.is_empty()
+        || value.len() > maximum
+        || !value.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.' | ':')
+        })
+    {
+        return Err(format!("Invalid panel diagnostic {label}."));
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -261,5 +348,40 @@ mod local_logout_tests {
         );
         assert!(local_teti_profile_path(Path::new("/")).is_err());
         assert!(local_teti_profile_path(Path::new("relative-home")).is_err());
+    }
+
+    #[test]
+    fn release_panel_diagnostics_only_keep_critical_levels() {
+        assert!(should_persist_panel_diagnostic_for(false, "debug"));
+        assert!(!should_persist_panel_diagnostic_for(true, "debug"));
+        assert!(!should_persist_panel_diagnostic_for(true, "info"));
+        assert!(should_persist_panel_diagnostic_for(true, "warn"));
+        assert!(should_persist_panel_diagnostic_for(true, "error"));
+    }
+
+    #[test]
+    fn panel_diagnostics_accept_only_bounded_token_fields() {
+        let valid = PanelDiagnosticEntry {
+            occurred_at: "2026-08-14T10:00:00.000Z".to_string(),
+            level: "warn".to_string(),
+            event: "panel.dismiss.deferred".to_string(),
+            fields: BTreeMap::from([
+                (
+                    "surface".to_string(),
+                    serde_json::Value::String("task".to_string()),
+                ),
+                ("busy".to_string(), serde_json::Value::Bool(true)),
+            ]),
+        };
+        let line = format_panel_diagnostic(&valid).unwrap();
+        assert!(line.contains("event=panel.dismiss.deferred"));
+        assert!(line.contains("surface=\"task\""));
+
+        let mut invalid = valid;
+        invalid.fields.insert(
+            "detail".to_string(),
+            serde_json::Value::String("user supplied text is rejected".to_string()),
+        );
+        assert!(format_panel_diagnostic(&invalid).is_err());
     }
 }

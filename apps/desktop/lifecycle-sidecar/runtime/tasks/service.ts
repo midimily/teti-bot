@@ -4,7 +4,6 @@ import type { TetiApplicationManager } from "../../../../../core/application/man
 import type { TetiConnectionStorage } from "../../../../../core/connection/storage.ts";
 import {
   isTetiConnectionConfirmed,
-  TetiConnectionState,
   type TetiConnectionRecord
 } from "../../../../../core/connection/types.ts";
 import { isCanonicalTetiPublicId } from "../../../../../core/identity/public-id.ts";
@@ -92,6 +91,10 @@ import {
   validateDelegationPlanState
 } from "../../../../../core/delegation/validation.ts";
 import type { TaskTransportStore } from "./store.ts";
+import {
+  PublishingTaskTransportStore,
+  TaskReadModel
+} from "./read-model.ts";
 import type { StagedTaskImage, TaskAttachmentStore } from "./attachments.ts";
 import type { CollaborationWorkspaceStore } from "../workspaces/store.ts";
 import { TetiNetworkClientError } from "../../../../../services/network/errors.ts";
@@ -160,6 +163,7 @@ export class TaskTransportRuntime {
   private readonly connectionStorage: TetiConnectionStorage;
   private readonly applicationManager: TetiApplicationManager;
   private readonly store: TaskTransportStore;
+  private readonly readModel: TaskReadModel;
   private readonly now: () => Date;
   private readonly taskIdFactory: () => string;
   private readonly attachmentStore?: TaskAttachmentStore;
@@ -172,8 +176,9 @@ export class TaskTransportRuntime {
     this.accountStorage = options.accountStorage;
     this.connectionStorage = options.connectionStorage;
     this.applicationManager = options.applicationManager;
-    this.store = options.store;
     this.now = options.now ?? (() => new Date());
+    this.readModel = new TaskReadModel({ source: options.store, now: this.now });
+    this.store = new PublishingTaskTransportStore(options.store, this.readModel);
     this.taskIdFactory = options.taskIdFactory ?? randomUUID;
     this.attachmentStore = options.attachmentStore;
     this.workspaceStore = options.workspaceStore;
@@ -189,72 +194,36 @@ export class TaskTransportRuntime {
     return this.attachmentStore.stageImage(sourcePath);
   }
 
-  async list(): Promise<CollaborationTaskTransportSnapshot> {
+  /**
+   * Runs local-only recovery once before Peer Runtime accepts reads or writes.
+   * Network/Chatmail delivery stays pending for the normal Runtime poll.
+   */
+  async initializeReadModel(): Promise<void> {
     const state = await this.store.load();
-    let changed = await this.reconcileInterruptedExecutions(state);
-    changed = this.refreshLongHorizonTargets(state) || changed;
-    if (expireDueRecords(state, this.now()) || changed) await this.store.save(state);
-    return snapshot(state, this.now());
-  }
-
-  async listSummaries(): Promise<CollaborationTaskSummarySnapshot> {
-    const state = await this.store.load();
-    let changed = await this.reconcileInterruptedExecutions(state);
+    let changed = await this.reconcileInterruptedExecutions(state, false);
     changed = this.refreshLongHorizonTargets(state) || changed;
     changed = await this.refreshAttachmentReadiness(state) || changed;
     changed = expireDueRecords(state, this.now()) || changed;
     if (changed) await this.store.save(state);
+    else this.readModel.publish(state);
+  }
+
+  async list(): Promise<CollaborationTaskTransportSnapshot> {
+    return this.readModel.list();
+  }
+
+  async listSummaries(): Promise<CollaborationTaskSummarySnapshot> {
     const connections = await this.connectionStorage.loadAll();
-    return {
-      schemaVersion: 1,
-      generatedAt: this.now().toISOString(),
-      pendingIncomingCount: state.records.filter((record) =>
-        record.direction === "incoming"
-        && record.approval === "pending"
-        && record.state === "submitted"
-      ).length,
-      tasks: state.records
-        .map((record) => ({
-          taskId: record.request.taskId,
-          direction: record.direction,
-          peerTetiId: record.peerTetiId,
-          connectionRequestId: connections.find((connection) =>
-            connection.state === TetiConnectionState.Confirmed
-            && connection.remoteTetiId === record.peerTetiId
-          )?.requestId,
-          capabilityId: record.request.capabilityId,
-          textPreview: taskInputText(record.request.input).slice(0, 240),
-          imageCount: taskInputImages(record.request.input).length,
-          receivedImageCount: receivedInputImageCount(record),
-          artifactCount: record.artifactAttachmentsReady === false ? 0 : record.artifacts?.length ?? 0,
-          state: record.state,
-          approval: record.approval,
-          delivery: record.delivery,
-          attachmentsReady: record.attachmentsReady ?? taskInputImages(record.request.input).length === 0,
-          cancelPending: record.cancelPending ?? false,
-          createdAt: record.createdAt,
-          updatedAt: record.updatedAt,
-          expiresAt: effectiveTaskExpiry(record),
-          safeErrorCode: record.safeErrorCode
-        }))
-        .sort(compareTaskSummaries)
-        .slice(0, 100)
-    };
+    return this.readModel.listSummaries(connections);
   }
 
   async get(taskId: string): Promise<CollaborationTaskTransportRecord> {
     if (!SAFE_ID_PATTERN.test(taskId)) {
       throw new TaskTransportRuntimeError("TASK_INPUT_INVALID", "Task ID is invalid.");
     }
-    const state = await this.store.load();
-    let changed = await this.reconcileInterruptedExecutions(state);
-    changed = this.refreshLongHorizonTargets(state) || changed;
-    changed = await this.refreshAttachmentReadiness(state) || changed;
-    changed = expireDueRecords(state, this.now()) || changed;
-    if (changed) await this.store.save(state);
-    const record = state.records.find((candidate) => candidate.request.taskId === taskId);
+    const record = await this.readModel.get(taskId);
     if (!record) throw new TaskTransportRuntimeError("TASK_NOT_FOUND", "Task was not found.");
-    return structuredClone(record);
+    return record;
   }
 
   async listDelegationTargets(taskId: string): Promise<DelegationTargetOption[]> {
@@ -1876,7 +1845,10 @@ export class TaskTransportRuntime {
     }));
   }
 
-  private async reconcileInterruptedExecutions(state: TetiTaskTransportStoreState): Promise<boolean> {
+  private async reconcileInterruptedExecutions(
+    state: TetiTaskTransportStoreState,
+    deliverPending = true
+  ): Promise<boolean> {
     await this.executor?.reconcileExecutionHandles?.();
     let changed = false;
     for (const record of state.records) {
@@ -1906,21 +1878,36 @@ export class TaskTransportRuntime {
       }
       if (localExecution) {
         if (record.longHorizon) {
-          await this.finishLongHorizonStage(state, record, localExecution, handle, executionTaskId);
+          await this.finishLongHorizonStage(
+            state,
+            record,
+            localExecution,
+            handle,
+            executionTaskId,
+            deliverPending
+          );
         } else {
           await this.finishSingleStageExecution(
             state,
             record,
             localExecution,
             handle,
-            handle?.executionEpoch ?? 1
+            handle?.executionEpoch ?? 1,
+            deliverPending
           );
         }
         changed = true;
         continue;
       }
       if (record.longHorizon) {
-        await this.finishLongHorizonStage(state, record, null, handle, executionTaskId);
+        await this.finishLongHorizonStage(
+          state,
+          record,
+          null,
+          handle,
+          executionTaskId,
+          deliverPending
+        );
         changed = true;
         continue;
       }
@@ -2195,7 +2182,8 @@ export class TaskTransportRuntime {
     record: CollaborationTaskTransportRecord,
     result: CallableAdapterTaskSnapshot | null,
     handle: ExecutionHandle | null | undefined,
-    executionEpoch: number
+    executionEpoch: number,
+    deliverPending = true
   ): Promise<void> {
     const completedAt = this.now().toISOString();
     if (result?.state === "completed" && result.artifact) {
@@ -2207,7 +2195,7 @@ export class TaskTransportRuntime {
         record.statusPending = true;
         record.updatedAt = completedAt;
         await this.store.save(state);
-        await this.trySendPendingForRecord(state, record);
+        if (deliverPending) await this.trySendPendingForRecord(state, record);
         return;
       }
       if (resultImages.length > 0 && record.protocolVersion < 3) {
@@ -2217,7 +2205,7 @@ export class TaskTransportRuntime {
         record.statusPending = true;
         record.updatedAt = completedAt;
         await this.store.save(state);
-        await this.trySendPendingForRecord(state, record);
+        if (deliverPending) await this.trySendPendingForRecord(state, record);
         return;
       }
       const artifact: CollaborationTaskArtifact = record.protocolVersion === 1
@@ -2263,7 +2251,7 @@ export class TaskTransportRuntime {
     record.statusPending = true;
     record.updatedAt = completedAt;
     await this.store.save(state);
-    await this.trySendPendingForRecord(state, record);
+    if (deliverPending) await this.trySendPendingForRecord(state, record);
   }
 
   private async finishLongHorizonStage(
@@ -2271,7 +2259,8 @@ export class TaskTransportRuntime {
     record: CollaborationTaskTransportRecord,
     result: CallableAdapterTaskSnapshot | null,
     handle: ExecutionHandle | null | undefined,
-    executionTaskId: string
+    executionTaskId: string,
+    deliverPending = true
   ): Promise<void> {
     const session = record.longHorizon!;
     const stage = session.stages.find((candidate) => candidate.executionTaskId === executionTaskId);
@@ -2285,7 +2274,7 @@ export class TaskTransportRuntime {
       stage.updatedAt = completedAt;
       stage.completedAt = completedAt;
       await this.store.save(state);
-      await this.trySendPendingForRecord(state, record);
+      if (deliverPending) await this.trySendPendingForRecord(state, record);
       return;
     }
 
@@ -2372,7 +2361,7 @@ export class TaskTransportRuntime {
           record.statusPending = true;
           record.updatedAt = completedAt;
           await this.store.save(state);
-          await this.trySendPendingForRecord(state, record);
+          if (deliverPending) await this.trySendPendingForRecord(state, record);
           return;
         } else {
           record.workspaceBinding.workspaceRevision = workspace.revision;
@@ -2486,11 +2475,11 @@ export class TaskTransportRuntime {
             record.updatedAt = completedAt;
             validateDelegationPlanState(record.delegationPlan);
             await this.store.save(state);
-            await this.trySendPendingForRecord(state, record);
+            if (deliverPending) await this.trySendPendingForRecord(state, record);
           }
           return;
         }
-        await this.completeDelegation(state, record, completedAt);
+        await this.completeDelegation(state, record, completedAt, deliverPending);
         return;
       }
       session.phase = session.pauseRequested ? "paused" : "input_required";
@@ -2597,13 +2586,14 @@ export class TaskTransportRuntime {
     record.statusPending = true;
     record.updatedAt = completedAt;
     await this.store.save(state);
-    await this.trySendPendingForRecord(state, record);
+    if (deliverPending) await this.trySendPendingForRecord(state, record);
   }
 
   private async completeDelegation(
     state: TetiTaskTransportStoreState,
     record: CollaborationTaskTransportRecord,
-    completedAt: string
+    completedAt: string,
+    deliverPending = true
   ): Promise<void> {
     const plan = record.delegationPlan;
     const session = record.longHorizon;
@@ -2705,7 +2695,7 @@ export class TaskTransportRuntime {
     delete record.safeErrorCode;
     validateDelegationPlanState(plan);
     await this.store.save(state);
-    await this.trySendPendingForRecord(state, record);
+    if (deliverPending) await this.trySendPendingForRecord(state, record);
   }
 
   private async sendStoredRecord(
@@ -3399,16 +3389,6 @@ function ensureSingleAttachmentDiagnostic(
   ];
 }
 
-function receivedInputImageCount(record: CollaborationTaskTransportRecord): number {
-  const expected = taskInputImages(record.request.input);
-  if (expected.length === 0) return 0;
-  const delivered = new Set((record.attachmentDiagnostics ?? [])
-    .filter((item) => item.purpose === "input"
-      && (record.direction === "incoming" ? item.state === "stored" : item.state === "acknowledged"))
-    .map((item) => item.attachmentId));
-  return expected.filter((part) => delivered.has(part.attachmentId)).length;
-}
-
 function ensureCapacity(state: TetiTaskTransportStoreState, now: Date): boolean {
   if (state.records.length < MAX_TASK_TRANSPORT_RECORDS) return true;
   const retained = state.records
@@ -3425,34 +3405,6 @@ function validTimestampOrNow(value: string | undefined, now: Date): Date {
   return Number.isFinite(timestamp) && timestamp <= now.getTime() + MAX_TASK_CLOCK_SKEW_MS
     ? new Date(timestamp)
     : now;
-}
-
-function snapshot(
-  state: TetiTaskTransportStoreState,
-  now: Date
-): CollaborationTaskTransportSnapshot {
-  return {
-    schemaVersion: 1,
-    generatedAt: now.toISOString(),
-    records: structuredClone(state.records).sort((left, right) => right.updatedAt.localeCompare(left.updatedAt)),
-    peers: structuredClone(state.peers).sort((left, right) => left.tetiId.localeCompare(right.tetiId))
-  };
-}
-
-function compareTaskSummaries(
-  left: CollaborationTaskSummarySnapshot["tasks"][number],
-  right: CollaborationTaskSummarySnapshot["tasks"][number]
-): number {
-  const rank = (task: CollaborationTaskSummarySnapshot["tasks"][number]): number => {
-    if (task.direction === "incoming" && task.approval === "pending" && task.state === "submitted") return 0;
-    if (task.state === "working") return 1;
-    if (task.direction === "outgoing" && task.state === "submitted") return 2;
-    return 3;
-  };
-  const difference = rank(left) - rank(right);
-  if (difference !== 0) return difference;
-  if (rank(left) === 0) return left.expiresAt.localeCompare(right.expiresAt);
-  return right.updatedAt.localeCompare(left.updatedAt);
 }
 
 function findTaskRecord(

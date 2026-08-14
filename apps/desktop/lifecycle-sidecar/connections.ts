@@ -238,6 +238,7 @@ export class PeerConnectionRuntime implements PeerConnectionService {
   private readonly applicationManager: TetiApplicationManager;
   private readonly messagingAdapter: ChatmailConnectionMessagingAdapter;
   private readonly taskTransport: TaskTransportRuntime;
+  private readonly taskInitialization: Promise<void>;
   private readonly startIo?: (accountId: number) => Promise<void>;
   private readonly now: () => Date;
   private readonly passportSharing: PassportSharingStore;
@@ -309,6 +310,8 @@ export class PeerConnectionRuntime implements PeerConnectionService {
       authorizePeer: (peerTetiId) => this.requireNetworkAuthorization(peerTetiId),
       enqueueOperation: (operation) => this.serial(operation)
     });
+    this.taskInitialization = this.taskTransport.initializeReadModel();
+    void this.taskInitialization.catch(() => undefined);
   }
 
   resolve(query: string): Promise<PublicTetiIdentity> {
@@ -619,15 +622,15 @@ export class PeerConnectionRuntime implements PeerConnectionService {
   }
 
   listTasks(): Promise<CollaborationTaskTransportSnapshot> {
-    return this.serial(() => this.taskTransport.list());
+    return this.taskInitialization.then(() => this.taskTransport.list());
   }
 
   listTaskSummaries(): Promise<CollaborationTaskSummarySnapshot> {
-    return this.serial(() => this.taskTransport.listSummaries());
+    return this.taskInitialization.then(() => this.taskTransport.listSummaries());
   }
 
   getTask(taskId: string): Promise<CollaborationTaskTransportRecord> {
-    return this.serial(() => this.taskTransport.get(taskId));
+    return this.taskInitialization.then(() => this.taskTransport.get(taskId));
   }
 
   stageTaskImage(sourcePath: string): Promise<StagedTaskImage> {
@@ -635,7 +638,9 @@ export class PeerConnectionRuntime implements PeerConnectionService {
   }
 
   resolveTaskImage(taskId: string, attachmentId: string): Promise<string> {
-    return this.serial(() => this.taskTransport.resolveTaskImage(taskId, attachmentId));
+    return this.taskInitialization.then(() =>
+      this.taskTransport.resolveTaskImage(taskId, attachmentId)
+    );
   }
 
   approveTask(taskId: string): Promise<CollaborationTaskTransportRecord> {
@@ -643,7 +648,9 @@ export class PeerConnectionRuntime implements PeerConnectionService {
   }
 
   listTaskDelegationTargets(taskId: string): Promise<DelegationTargetOption[]> {
-    return this.serial(() => this.taskTransport.listDelegationTargets(taskId));
+    return this.taskInitialization.then(() =>
+      this.taskTransport.listDelegationTargets(taskId)
+    );
   }
 
   approveTaskDelegation(
@@ -662,7 +669,7 @@ export class PeerConnectionRuntime implements PeerConnectionService {
   }
 
   getTaskExecution(taskId: string): Promise<ExecutionHandle | null> {
-    return this.serial(() => this.taskTransport.getExecutionHandle(taskId));
+    return this.taskInitialization.then(() => this.taskTransport.getExecutionHandle(taskId));
   }
 
   resumeTask(taskId: string): Promise<CollaborationTaskTransportRecord> {
@@ -1428,7 +1435,11 @@ export class PeerConnectionRuntime implements PeerConnectionService {
   }
 
   private serial<T>(operation: () => Promise<T>): Promise<T> {
-    const pending = this.queue.then(operation, operation);
+    const initializedOperation = async (): Promise<T> => {
+      await this.taskInitialization;
+      return operation();
+    };
+    const pending = this.queue.then(initializedOperation, initializedOperation);
     this.queue = pending.then(() => undefined, () => undefined);
     return pending;
   }

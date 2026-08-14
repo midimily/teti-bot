@@ -34,6 +34,8 @@ const input = Buffer.concat(chunks).toString("utf8");
 
 write({ type: "thread.started", thread_id: "fake-private-thread" });
 write({ type: "turn.started" });
+write({ type: "error", message: "Reconnecting... 1/5" });
+write({ type: "error", message: "Reconnecting... 2/5" });
 write({
   type: "item.completed",
   item: {

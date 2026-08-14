@@ -67,6 +67,7 @@ function createInbox(
 ): HTMLElement {
   const content = document.createElement("div");
   content.className = "teti-task-scroll teti-task-inbox";
+  content.dataset.scrollKey = "tasks-inbox";
   if (snapshot.summary.tasks.length === 0) {
     const empty = document.createElement("div");
     empty.className = "teti-task-empty";
@@ -122,6 +123,7 @@ function createComposer(
 ): HTMLElement {
   const form = document.createElement("form");
   form.className = "teti-task-scroll teti-task-composer";
+  form.dataset.scrollKey = "tasks-compose";
   const peers = connections.filter((connection) =>
     connection.connectionState === "Confirmed"
     && connection.compatibility === "compatible"
@@ -268,6 +270,7 @@ function createTaskDetail(
   const record = snapshot.selectedTask!;
   const content = document.createElement("div");
   content.className = "teti-task-scroll teti-task-detail";
+  content.dataset.scrollKey = `task-detail:${record.request.taskId}`;
   const identity = document.createElement("div");
   identity.className = "teti-task-detail-head";
   const peer = document.createElement("div");

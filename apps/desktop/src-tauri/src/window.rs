@@ -100,7 +100,6 @@ pub fn create_island_window(app: &App) -> tauri::Result<WebviewWindow> {
 #[tauri::command]
 pub fn set_island_mode(app: AppHandle, mode: IslandMode, reason: String) -> Result<(), String> {
     validate_reason(&reason)?;
-    eprintln!("[TetiPanel] mode={mode:?} reason={reason}");
     let window = island_window(&app)?;
     #[cfg(target_os = "macos")]
     macos_panel::resize_and_pin(&app, mode)?;
@@ -134,8 +133,6 @@ pub fn set_connection_detail_height(
     if !height.is_finite() || height <= 0.0 {
         return Err("Invalid connection detail height.".to_string());
     }
-    eprintln!("[TetiPanel] connection_detail_height={height} reason={reason}");
-
     #[cfg(target_os = "macos")]
     return macos_panel::resize_connection_detail(&app, height);
 

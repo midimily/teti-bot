@@ -84,7 +84,32 @@ test("Codex JSONL accepts the legacy documented assistant message shape", () => 
   assert.equal(decodeCodexArtifact(output), "Legacy compatible final");
 });
 
-test("Codex JSONL turns failed and error events into a safe upstream failure", () => {
+test("Codex JSONL treats reconnect errors as recoverable when HTTPS fallback completes", () => {
+  const output = jsonl([
+    { type: "thread.started", thread_id: "thread" },
+    { type: "turn.started" },
+    { type: "error", message: "Reconnecting... 1/5" },
+    { type: "error", message: "Reconnecting... 2/5" },
+    {
+      type: "item.completed",
+      item: { type: "agent_message", text: "Completed after HTTPS fallback." }
+    },
+    { type: "turn.completed" }
+  ]);
+
+  assert.deepEqual(parseCodexJsonl(output), {
+    terminalState: "completed",
+    failureKind: null,
+    finalMessage: "Completed after HTTPS fallback.",
+    eventCount: 6,
+    threadStarted: true,
+    turnStarted: true
+  });
+  assert.equal(decodeCodexArtifact(output), "Completed after HTTPS fallback.");
+  assert.equal(JSON.stringify(parseCodexJsonl(output)).includes("Reconnecting"), false);
+});
+
+test("Codex JSONL turns failed and unrecovered error-only streams into safe failures", () => {
   for (const terminal of ["turn.failed", "error"]) {
     const output = jsonl([
       { type: "thread.started", thread_id: "thread" },
@@ -108,6 +133,12 @@ test("Codex JSONL fails closed for malformed, incomplete, or invalid-order strea
       { type: "thread.started", thread_id: "thread" },
       { type: "turn.started" },
       { type: "turn.completed" },
+      { type: "item.completed", item: { type: "agent_message", text: "late" } }
+    ]),
+    jsonl([
+      { type: "thread.started", thread_id: "thread" },
+      { type: "turn.started" },
+      { type: "turn.failed", message: "failed" },
       { type: "item.completed", item: { type: "agent_message", text: "late" } }
     ]),
     jsonl([

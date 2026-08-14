@@ -11,6 +11,7 @@ import {
 } from "../../../../core/identity/public-id.ts";
 import type { LifecycleBridgeClient } from "../provisioning/bridge-lifecycle.ts";
 import type { TauriNotchWindowController } from "../platform/tauri-notch-window.ts";
+import type { PanelDiagnosticSink } from "../platform/panel-diagnostics.ts";
 import {
   initialConnectPanelSnapshot,
   transitionConnectPanel,
@@ -54,6 +55,7 @@ export class PeerConnectionController {
   private readonly refreshPassport: () => Promise<void>;
   private readonly schedule: (callback: () => void, delayMs: number) => unknown;
   private readonly cancel: (handle: unknown) => void;
+  private readonly diagnostic: PanelDiagnosticSink;
   private snapshotValue: PeerConnectionSnapshot = {
     open: false,
     input: "",
@@ -65,6 +67,7 @@ export class PeerConnectionController {
   private detailModeToken = 0;
   private interactionActive = false;
   private disposed = false;
+  private outsideDismissPending = false;
   private panelTimer: unknown;
   private readonly timers = new Set<unknown>();
 
@@ -75,6 +78,7 @@ export class PeerConnectionController {
     refreshPassport?: () => Promise<void>;
     schedule?: (callback: () => void, delayMs: number) => unknown;
     cancel?: (handle: unknown) => void;
+    diagnostic?: PanelDiagnosticSink;
   }) {
     this.client = options.client;
     this.notchWindow = options.notchWindow;
@@ -82,6 +86,7 @@ export class PeerConnectionController {
     this.refreshPassport = options.refreshPassport ?? (() => Promise.resolve());
     this.schedule = options.schedule ?? ((callback, delayMs) => setTimeout(callback, delayMs));
     this.cancel = options.cancel ?? ((handle) => clearTimeout(handle as ReturnType<typeof setTimeout>));
+    this.diagnostic = options.diagnostic ?? (() => undefined);
   }
 
   get snapshot(): PeerConnectionSnapshot {
@@ -134,6 +139,7 @@ export class PeerConnectionController {
 
   close(reason = "close-peer-connections"): void {
     if (this.snapshotValue.connectPanel.state === "connecting") return;
+    this.outsideDismissPending = false;
     this.collapseToken += 1;
     this.detailModeToken += 1;
     this.snapshotValue.open = false;
@@ -145,9 +151,34 @@ export class PeerConnectionController {
   }
 
   dismissFromOutside(): void {
-    if (this.snapshotValue.open && this.snapshotValue.connectPanel.state !== "connecting") {
-      this.close("peer-panel-focus-lost");
+    if (!this.snapshotValue.open) return;
+    if (this.snapshotValue.connectPanel.state === "connecting") {
+      if (!this.outsideDismissPending) {
+        this.outsideDismissPending = true;
+        this.diagnostic({
+          level: "warn",
+          event: "panel.dismiss.deferred",
+          fields: { surface: "connections", blocker: "connecting" }
+        });
+      }
+      return;
     }
+    this.diagnostic({
+      level: "debug",
+      event: "panel.dismiss.immediate",
+      fields: { surface: "connections", connectState: this.snapshotValue.connectPanel.state }
+    });
+    this.close("peer-panel-focus-lost");
+  }
+
+  cancelPendingOutsideDismiss(): void {
+    if (!this.outsideDismissPending) return;
+    this.outsideDismissPending = false;
+    this.diagnostic({
+      level: "debug",
+      event: "panel.dismiss.cancelled",
+      fields: { surface: "connections", reason: "focus_regained" }
+    });
   }
 
   noteActivity(): void {
@@ -274,6 +305,17 @@ export class PeerConnectionController {
       if (this.disposed) return;
       this.transitionPanel({ type: "CONNECT_FAILED", message: connectionErrorMessage(error) });
       this.onChange();
+    }
+    if (this.outsideDismissPending && this.snapshotValue.open && !this.disposed) {
+      this.outsideDismissPending = false;
+      this.diagnostic({
+        level: "warn",
+        event: "panel.dismiss.resolved",
+        fields: { surface: "connections", blocker: "connecting" }
+      });
+      this.close("peer-panel-focus-lost-after-connect");
+    } else {
+      this.outsideDismissPending = false;
     }
   }
 

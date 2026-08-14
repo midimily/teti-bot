@@ -1,4 +1,4 @@
-# Teti macOS ad-hoc Alpha packaging
+# Teti macOS ad-hoc Beta packaging
 
 The frozen Teti Desktop Bundle Identifier is:
 
@@ -16,7 +16,7 @@ Run on an Apple Silicon Mac with the repository dependencies and pinned Chatmail
 npm run desktop:package:mac:adhoc
 ```
 
-The command intentionally produces an arm64, macOS 15.0+, ad-hoc-signed, non-notarized controlled Alpha under:
+The command intentionally produces an arm64, macOS 15.0+, ad-hoc-signed, non-notarized Beta under:
 
 ```text
 apps/desktop/release/
@@ -32,7 +32,7 @@ This package is not a formal macOS release. Its manifest must always report:
 
 ```json
 {
-  "releaseChannel": "alpha",
+    "releaseChannel": "beta",
   "distribution": "adhoc",
   "notarized": false,
   "developerIdSigned": false,
@@ -58,4 +58,4 @@ Use an Apple Silicon Mac running macOS 15 or later, preferably a fresh local mac
 10. Confirm an existing Teti profile is retained and no duplicate identity is created.
 11. Record relevant Console or crash logs.
 
-Never use `xattr -dr com.apple.quarantine` or `sudo spctl --master-disable` as part of this validation.
+Never use `xattr -dr com.apple.quarantine` or `sudo spctl --master-disable` as part of this validation. Official Beta artifacts are published at <https://github.com/midimily/teti-bot/releases>; do not install repackaged copies from unofficial mirrors.

@@ -161,9 +161,10 @@ test("a valid ID enters connecting immediately and duplicate submits are ignored
   assert.equal(controller.snapshot.connectPanel.message, "建联请求已发送");
 });
 
-test("connecting cannot be closed by eyes, Escape, or outside focus loss", async () => {
+test("connecting defers outside focus loss without interrupting the request", async () => {
   const deferred = new DeferredPeerConnectionClient();
-  const { controller, scheduler } = makeHarness(deferred);
+  const diagnostics: Array<{ event: string }> = [];
+  const { controller, scheduler } = makeHarness(deferred, (entry) => diagnostics.push(entry));
   openEditor(controller, scheduler);
   controller.updateInput("076bm9evq");
   const request = controller.connect();
@@ -176,6 +177,26 @@ test("connecting cannot be closed by eyes, Escape, or outside focus loss", async
 
   deferred.finish(emptyResult);
   await request;
+  assert.equal(controller.snapshot.open, false);
+  assert.deepEqual(diagnostics.map(({ event }) => event), [
+    "panel.dismiss.deferred",
+    "panel.dismiss.resolved"
+  ]);
+});
+
+test("focus regain cancels a deferred connection dismissal", async () => {
+  const deferred = new DeferredPeerConnectionClient();
+  const { controller, scheduler } = makeHarness(deferred);
+  openEditor(controller, scheduler);
+  controller.updateInput("076bm9evq");
+  const request = controller.connect();
+
+  controller.dismissFromOutside();
+  controller.cancelPendingOutsideDismiss();
+  deferred.finish(emptyResult);
+  await request;
+
+  assert.equal(controller.snapshot.open, true);
 });
 
 test("a mutually confirmed request shows true success then automatically returns to idle", async () => {
@@ -426,7 +447,10 @@ test("connection UI renders the complete semantic row list inside a bounded scro
   assert.match(styles, /data-has-notch="true"\]\s+\.teti-island--connections\s*\{[\s\S]*safe-top-inset/);
 });
 
-function makeHarness(client: PeerConnectionClient = new StaticPeerConnectionClient(emptyResult)): {
+function makeHarness(
+  client: PeerConnectionClient = new StaticPeerConnectionClient(emptyResult),
+  diagnostic: ConstructorParameters<typeof PeerConnectionController>[0]["diagnostic"] = () => undefined
+): {
   controller: PeerConnectionController;
   scheduler: ControlledScheduler;
   invoker: RecordingTauriInvoker;
@@ -444,7 +468,8 @@ function makeHarness(client: PeerConnectionClient = new StaticPeerConnectionClie
       controller.syncPassportConnections(connections);
     },
     schedule: scheduler.schedule,
-    cancel: scheduler.cancel
+    cancel: scheduler.cancel,
+    diagnostic
   });
   return {
     controller,

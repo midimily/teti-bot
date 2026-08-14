@@ -1,6 +1,7 @@
 import type { NotchWindowController, NotchWindowGeometry } from "../first-launch/notch-window.ts";
 import type { FirstLaunchViewModel } from "../first-launch/view-model.ts";
 import type { TauriInvoker } from "./tauri-api.ts";
+import type { PanelDiagnosticSink } from "./panel-diagnostics.ts";
 
 export type IslandVisualMode =
   | "hidden"
@@ -14,11 +15,15 @@ export type IslandVisualMode =
 
 export class TauriNotchWindowController implements NotchWindowController {
   private readonly tauri: TauriInvoker;
+  private readonly diagnostic: PanelDiagnosticSink;
   private modeQueue: Promise<void> = Promise.resolve();
   private modeRevision = 0;
+  private latestMode: IslandVisualMode = "idle";
+  private latestReason = "initial";
 
-  constructor(tauri: TauriInvoker) {
+  constructor(tauri: TauriInvoker, diagnostic: PanelDiagnosticSink = () => undefined) {
     this.tauri = tauri;
+    this.diagnostic = diagnostic;
   }
 
   async expand(reason: string): Promise<void> {
@@ -38,7 +43,16 @@ export class TauriNotchWindowController implements NotchWindowController {
     const safeHeight = finitePositiveNumber(height);
     const pending = this.modeQueue.then(async () => {
       if (revision !== this.modeRevision || safeHeight === undefined) return;
-      await this.tauri.invoke("set_connection_detail_height", { height: safeHeight, reason });
+      try {
+        await this.tauri.invoke("set_connection_detail_height", { height: safeHeight, reason });
+      } catch (error) {
+        this.diagnostic({
+          level: "error",
+          event: "panel.native.resize_failed",
+          fields: { mode: "connection_detail", reason, errorKind: errorKind(error) }
+        });
+        throw error;
+      }
     });
     this.modeQueue = pending.catch(() => undefined);
     return pending;
@@ -46,9 +60,44 @@ export class TauriNotchWindowController implements NotchWindowController {
 
   setMode(mode: IslandVisualMode, reason: string): Promise<void> {
     const revision = ++this.modeRevision;
+    this.latestMode = mode;
+    this.latestReason = reason;
+    this.diagnostic({
+      level: "debug",
+      event: "panel.mode.requested",
+      fields: { mode, reason, revision }
+    });
     const pending = this.modeQueue.then(async () => {
-      if (revision !== this.modeRevision) return;
-      await this.tauri.invoke("set_island_mode", { mode, reason });
+      if (revision !== this.modeRevision) {
+        this.diagnostic({
+          level: mode === "idle" ? "warn" : "debug",
+          event: mode === "idle" ? "panel.mode.collapse_superseded" : "panel.mode.coalesced",
+          fields: {
+            mode,
+            reason,
+            revision,
+            currentRevision: this.modeRevision,
+            replacementMode: this.latestMode,
+            replacementReason: this.latestReason
+          }
+        });
+        return;
+      }
+      try {
+        await this.tauri.invoke("set_island_mode", { mode, reason });
+        this.diagnostic({
+          level: "debug",
+          event: "panel.mode.applied",
+          fields: { mode, reason, revision }
+        });
+      } catch (error) {
+        this.diagnostic({
+          level: "error",
+          event: "panel.mode.failed",
+          fields: { mode, reason, revision, errorKind: errorKind(error) }
+        });
+        throw error;
+      }
     });
     this.modeQueue = pending.catch(() => undefined);
     return pending;
@@ -61,6 +110,11 @@ export class TauriNotchWindowController implements NotchWindowController {
   async hide(reason = "hide"): Promise<void> {
     await this.tauri.invoke("hide_island", { reason });
   }
+}
+
+function errorKind(error: unknown): string {
+  if (error instanceof Error && /^[a-zA-Z0-9_.:-]{1,80}$/.test(error.name)) return error.name;
+  return "unknown";
 }
 
 export function visualModeForViewModel(viewModel: FirstLaunchViewModel): IslandVisualMode {

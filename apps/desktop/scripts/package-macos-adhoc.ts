@@ -397,14 +397,18 @@ Install:
 Do not:
 - disable Gatekeeper
 - run xattr commands to bypass security checks
-- share this build publicly
+- install repackaged copies from unofficial mirrors
+
+Official download:
+- https://github.com/midimily/teti-bot/releases
 
 中文说明
 这是仅用于小范围受控测试的 Teti macOS Beta 安装包。
 要求：Apple Silicon Mac、macOS 15.0 或更高版本。
 本安装包仅使用 ad-hoc 签名，没有 Apple Developer ID，也没有经过 Apple 公证。
 首次启动可能被 Gatekeeper 拦截。请前往“系统设置 -> 隐私与安全性”，找到 Teti 提示并点击“仍要打开”。
-请勿关闭 Gatekeeper、请勿使用 xattr 绕过系统安全检查、请勿公开传播本安装包。
+请勿关闭 Gatekeeper、请勿使用 xattr 绕过系统安全检查，也不要安装来自非官方镜像的重新打包版本。
+官方下载：https://github.com/midimily/teti-bot/releases
 `;
 }
 

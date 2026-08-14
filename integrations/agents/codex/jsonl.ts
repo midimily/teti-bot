@@ -33,6 +33,7 @@ export function parseCodexJsonl(stdout: string): CodexJsonlSummary {
   let turnStarted = false;
   let terminalState: CodexJsonlSummary["terminalState"] = "missing";
   let failureKind: CodexJsonlSummary["failureKind"] = null;
+  let recoverableErrorKind: Exclude<CodexJsonlSummary["failureKind"], null> | null = null;
   let finalMessage: string | null = null;
 
   for (const line of lines) {
@@ -100,18 +101,32 @@ export function parseCodexJsonl(stdout: string): CodexJsonlSummary {
 
       case "turn.failed":
         terminalState = "failed";
-        failureKind = isAuthenticationFailure(collectFailureText(event)) ? "auth" : "upstream";
+        failureKind = isAuthenticationFailure(collectFailureText(event))
+          || recoverableErrorKind === "auth"
+          ? "auth"
+          : "upstream";
         break;
 
-      case "error":
-        terminalState = "error";
-        failureKind = isAuthenticationFailure(collectFailureText(event)) ? "auth" : "upstream";
+      case "error": {
+        // Codex can emit top-level error diagnostics while recovering its
+        // transport (for example, WebSocket reconnects before HTTPS fallback).
+        // They become a failed stream only if no later turn terminal arrives.
+        const nextKind = isAuthenticationFailure(collectFailureText(event)) ? "auth" : "upstream";
+        recoverableErrorKind = nextKind === "auth"
+          ? "auth"
+          : recoverableErrorKind ?? "upstream";
         break;
+      }
 
       default:
         // Forward-compatible event types remain bounded but are not persisted.
         break;
     }
+  }
+
+  if (terminalState === "missing" && recoverableErrorKind) {
+    terminalState = "error";
+    failureKind = recoverableErrorKind;
   }
 
   return {

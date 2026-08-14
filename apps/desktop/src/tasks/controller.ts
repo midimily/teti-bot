@@ -7,6 +7,7 @@ import { taskArtifactImages, taskInputImages, type TaskImagePart } from "../../.
 import type { LifecycleBridgeClient } from "../provisioning/bridge-lifecycle.ts";
 import type { TauriInvoker } from "../platform/tauri-api.ts";
 import type { TauriNotchWindowController } from "../platform/tauri-notch-window.ts";
+import type { PanelDiagnosticSink } from "../platform/panel-diagnostics.ts";
 import type { StagedTaskImageDto } from "../lifecycle-bridge/protocol.ts";
 import type { ExecutionHandle } from "../../../../core/callability/execution.ts";
 import type {
@@ -14,7 +15,14 @@ import type {
   DelegationTargetSelection
 } from "../../../../core/delegation/types.ts";
 
-const TASK_REFRESH_INTERVAL_MS = 2_000;
+export const TASK_REFRESH_DELAYS_MS = {
+  visibleActive: 2_000,
+  visibleIdle: 5_000,
+  hiddenActive: 5_000,
+  hiddenIdle: 10_000,
+  failureInitial: 5_000,
+  failureMaximum: 30_000
+} as const;
 const EMPTY_SUMMARY: CollaborationTaskSummarySnapshot = {
   schemaVersion: 1,
   generatedAt: new Date(0).toISOString(),
@@ -75,6 +83,43 @@ export interface TaskClient {
   renew(taskId: string, ttlMs: number): Promise<CollaborationTaskTransportRecord>;
 }
 
+export type TaskRefreshMode =
+  | "visible_active"
+  | "visible_idle"
+  | "hidden_active"
+  | "hidden_idle"
+  | "failure_backoff";
+
+export interface TaskRefreshDecision {
+  mode: TaskRefreshMode;
+  delayMs: number;
+}
+
+export function resolveTaskRefreshDecision(
+  snapshot: Pick<TaskControllerSnapshot, "open" | "summary" | "selectedTask">,
+  consecutiveFailures = 0
+): TaskRefreshDecision {
+  if (consecutiveFailures > 0) {
+    return {
+      mode: "failure_backoff",
+      delayMs: Math.min(
+        TASK_REFRESH_DELAYS_MS.failureMaximum,
+        TASK_REFRESH_DELAYS_MS.failureInitial * (2 ** Math.min(consecutiveFailures - 1, 3))
+      )
+    };
+  }
+  const active = snapshot.summary.tasks.some(taskSummaryNeedsFrequentRefresh)
+    || Boolean(snapshot.selectedTask && taskRecordNeedsFrequentRefresh(snapshot.selectedTask));
+  if (snapshot.open) {
+    return active
+      ? { mode: "visible_active", delayMs: TASK_REFRESH_DELAYS_MS.visibleActive }
+      : { mode: "visible_idle", delayMs: TASK_REFRESH_DELAYS_MS.visibleIdle };
+  }
+  return active
+    ? { mode: "hidden_active", delayMs: TASK_REFRESH_DELAYS_MS.hiddenActive }
+    : { mode: "hidden_idle", delayMs: TASK_REFRESH_DELAYS_MS.hiddenIdle };
+}
+
 export class TaskController {
   private readonly client: TaskClient;
   private readonly tauri: TauriInvoker;
@@ -83,6 +128,7 @@ export class TaskController {
   private readonly onReturnToIsland?: () => void;
   private readonly schedule: (callback: () => void, delayMs: number) => unknown;
   private readonly cancelTimer: (handle: unknown) => void;
+  private readonly diagnostic: PanelDiagnosticSink;
   private snapshotValue: TaskControllerSnapshot = {
     open: false,
     screen: "inbox",
@@ -104,8 +150,11 @@ export class TaskController {
   };
   private timer: unknown;
   private refreshInFlight = false;
+  private consecutiveRefreshFailures = 0;
   private active = false;
   private disposed = false;
+  private outsideDismissPending = false;
+  private readonly imageResolutionFailures = new Map<string, string>();
 
   constructor(options: {
     client: TaskClient;
@@ -115,6 +164,7 @@ export class TaskController {
     onReturnToIsland?: () => void;
     schedule?: (callback: () => void, delayMs: number) => unknown;
     cancel?: (handle: unknown) => void;
+    diagnostic?: PanelDiagnosticSink;
   }) {
     this.client = options.client;
     this.tauri = options.tauri;
@@ -123,6 +173,7 @@ export class TaskController {
     this.onReturnToIsland = options.onReturnToIsland;
     this.schedule = options.schedule ?? ((callback, delayMs) => setTimeout(callback, delayMs));
     this.cancelTimer = options.cancel ?? ((handle) => clearTimeout(handle as ReturnType<typeof setTimeout>));
+    this.diagnostic = options.diagnostic ?? (() => undefined);
   }
 
   get snapshot(): TaskControllerSnapshot {
@@ -152,21 +203,51 @@ export class TaskController {
     this.snapshotValue.draft.offerId ||= offerId;
     delete this.snapshotValue.error;
     this.onChange();
+    this.scheduleNextRefresh();
     void this.notchWindow.setMode("task", "compose-task").catch(() => undefined);
   }
 
   close(reason = "close-task-workspace", options: TaskCloseOptions = {}): void {
     if (!this.snapshotValue.open && this.snapshotValue.error === undefined) return;
+    this.outsideDismissPending = false;
     this.snapshotValue.open = false;
     delete this.snapshotValue.error;
     if (options.notify !== false) this.onChange();
+    this.scheduleNextRefresh();
     if (options.updateWindowMode !== false) {
       void this.notchWindow.setMode("idle", reason).catch(() => undefined);
     }
   }
 
   dismissFromOutside(): void {
-    if (this.snapshotValue.open && !this.snapshotValue.busy) this.close("task-focus-lost");
+    if (!this.snapshotValue.open) return;
+    if (this.snapshotValue.busy) {
+      if (!this.outsideDismissPending) {
+        this.outsideDismissPending = true;
+        this.diagnostic({
+          level: "warn",
+          event: "panel.dismiss.deferred",
+          fields: { surface: "task", screen: this.snapshotValue.screen, blocker: "busy" }
+        });
+      }
+      return;
+    }
+    this.diagnostic({
+      level: "debug",
+      event: "panel.dismiss.immediate",
+      fields: { surface: "task", screen: this.snapshotValue.screen }
+    });
+    this.close("task-focus-lost");
+  }
+
+  cancelPendingOutsideDismiss(): void {
+    if (!this.outsideDismissPending) return;
+    this.outsideDismissPending = false;
+    this.diagnostic({
+      level: "debug",
+      event: "panel.dismiss.cancelled",
+      fields: { surface: "task", reason: "focus_regained" }
+    });
   }
 
   back(): void {
@@ -185,8 +266,10 @@ export class TaskController {
     this.snapshotValue.delegationTargets = [];
     this.snapshotValue.delegationSelections = [];
     this.snapshotValue.selectedImagePaths = {};
+    this.imageResolutionFailures.clear();
     delete this.snapshotValue.error;
     this.onChange();
+    this.scheduleNextRefresh();
   }
 
   updateDraft(input: Partial<Pick<
@@ -248,10 +331,9 @@ export class TaskController {
         attachments: draft.images.map((image) => structuredClone(image.part)),
         executionMode: draft.executionMode
       });
-      this.snapshotValue.selectedTask = record;
-      await this.loadSelectedExecution(record.request.taskId);
-      await this.loadSelectedImages(record);
+      this.beginDetail(record);
       this.snapshotValue.screen = "detail";
+      this.onChange();
       this.snapshotValue.draft = {
         connectionRequestId: "",
         offerId: "",
@@ -260,7 +342,16 @@ export class TaskController {
         images: [],
         executionMode: "single_stage"
       };
-      await this.refreshSummary();
+      const [execution, imagePaths, summary] = await Promise.all([
+        this.readExecution(record.request.taskId),
+        this.resolveSelectedImagePaths(record),
+        this.client.summaries()
+      ]);
+      if (this.isSelected(record.request.taskId)) {
+        this.snapshotValue.selectedExecution = execution;
+        this.snapshotValue.selectedImagePaths = imagePaths;
+      }
+      this.snapshotValue.summary = summary;
     });
   }
 
@@ -278,11 +369,21 @@ export class TaskController {
 
   async select(taskId: string): Promise<void> {
     await this.run(async () => {
-      this.snapshotValue.selectedTask = await this.client.get(taskId);
-      await this.loadSelectedExecution(taskId);
-      await this.loadSelectedImages(this.snapshotValue.selectedTask);
-      await this.loadDelegationTargets(this.snapshotValue.selectedTask);
+      const executionPromise = this.readExecution(taskId);
+      const record = await this.client.get(taskId);
+      this.beginDetail(record);
       this.snapshotValue.screen = "detail";
+      this.onChange();
+      const [execution, imagePaths, delegation] = await Promise.all([
+        executionPromise,
+        this.resolveSelectedImagePaths(record),
+        this.readDelegationState(record)
+      ]);
+      if (!this.isSelected(taskId)) return;
+      this.snapshotValue.selectedExecution = execution;
+      this.snapshotValue.selectedImagePaths = imagePaths;
+      this.snapshotValue.delegationTargets = delegation.targets;
+      this.snapshotValue.delegationSelections = delegation.selections;
     });
   }
 
@@ -328,9 +429,18 @@ export class TaskController {
       );
       this.snapshotValue.delegationTargets = [];
       this.snapshotValue.delegationSelections = [];
-      await this.loadSelectedExecution(taskId);
-      await this.loadSelectedImages(this.snapshotValue.selectedTask);
-      await this.refreshSummary();
+      this.onChange();
+      const record = this.snapshotValue.selectedTask;
+      const [execution, imagePaths, summary] = await Promise.all([
+        this.readExecution(taskId),
+        this.resolveSelectedImagePaths(record),
+        this.client.summaries()
+      ]);
+      if (this.isSelected(taskId)) {
+        this.snapshotValue.selectedExecution = execution;
+        this.snapshotValue.selectedImagePaths = imagePaths;
+      }
+      this.snapshotValue.summary = summary;
     });
   }
 
@@ -379,15 +489,28 @@ export class TaskController {
     const taskId = this.snapshotValue.selectedTask?.request.taskId;
     if (!taskId) return;
     await this.run(async () => {
-      this.snapshotValue.selectedTask = await operation(taskId);
-      await this.loadSelectedExecution(taskId);
-      await this.loadSelectedImages(this.snapshotValue.selectedTask);
-      await this.refreshSummary();
+      const record = await operation(taskId);
+      this.snapshotValue.selectedTask = record;
+      this.onChange();
+      const [execution, imagePaths, summary] = await Promise.all([
+        this.readExecution(taskId),
+        this.resolveSelectedImagePaths(record),
+        this.client.summaries()
+      ]);
+      if (this.isSelected(taskId)) {
+        this.snapshotValue.selectedExecution = execution;
+        this.snapshotValue.selectedImagePaths = imagePaths;
+      }
+      this.snapshotValue.summary = summary;
     });
   }
 
   private async refresh(): Promise<void> {
     if (!this.active || this.disposed || this.refreshInFlight) return;
+    if (this.snapshotValue.busy) {
+      this.scheduleNextRefresh();
+      return;
+    }
     if (this.timer !== undefined) {
       this.cancelTimer(this.timer);
       this.timer = undefined;
@@ -395,12 +518,37 @@ export class TaskController {
     this.refreshInFlight = true;
     try {
       const previousPresentation = this.refreshPresentationKey();
-      await this.refreshSummary();
-      const taskId = this.snapshotValue.selectedTask?.request.taskId;
-      if (taskId) {
-        this.snapshotValue.selectedTask = await this.client.get(taskId);
-        await this.loadSelectedExecution(taskId);
-        await this.loadSelectedImages(this.snapshotValue.selectedTask);
+      const taskId = this.snapshotValue.open && this.snapshotValue.screen === "detail"
+        ? this.snapshotValue.selectedTask?.request.taskId
+        : undefined;
+      const summaryPromise = this.client.summaries();
+      const detailPromise = taskId
+        ? Promise.all([this.client.get(taskId), this.readExecution(taskId)] as const)
+        : null;
+      const [summaryResult, detailResult] = await Promise.all([
+        summaryPromise.then(
+          (summary) => ({ ok: true as const, summary }),
+          () => ({ ok: false as const })
+        ),
+        detailPromise
+          ? detailPromise.then(
+            ([record, execution]) => ({ ok: true as const, record, execution }),
+            () => ({ ok: false as const })
+          )
+          : Promise.resolve(null)
+      ]);
+      if (summaryResult.ok) this.snapshotValue.summary = summaryResult.summary;
+      if (taskId && detailResult?.ok && this.isVisibleDetail(taskId)) {
+        this.snapshotValue.selectedTask = detailResult.record;
+        this.snapshotValue.selectedExecution = detailResult.execution;
+        this.snapshotValue.selectedImagePaths = await this.resolveSelectedImagePaths(
+          detailResult.record
+        );
+      }
+      if (summaryResult.ok && (!taskId || detailResult?.ok)) {
+        this.consecutiveRefreshFailures = 0;
+      } else {
+        this.consecutiveRefreshFailures = Math.min(this.consecutiveRefreshFailures + 1, 4);
       }
       // Runtime summaries carry a fresh generatedAt value on every read. Only
       // visible Task semantics may notify the global renderer; otherwise an
@@ -412,62 +560,109 @@ export class TaskController {
       }
     } catch {
       // Chatmail polling and Task persistence remain Runtime-owned; UI retries.
+      this.consecutiveRefreshFailures = Math.min(this.consecutiveRefreshFailures + 1, 4);
     } finally {
       this.refreshInFlight = false;
-      if (this.active && !this.disposed) {
-        this.timer = this.schedule(() => {
-          this.timer = undefined;
-          void this.refresh();
-        }, TASK_REFRESH_INTERVAL_MS);
-      }
+      this.scheduleNextRefresh();
     }
   }
 
-  private async refreshSummary(): Promise<void> {
-    this.snapshotValue.summary = await this.client.summaries();
-  }
-
-  private async loadSelectedImages(record: CollaborationTaskTransportRecord): Promise<void> {
-    const paths: Record<string, string> = {};
+  private async resolveSelectedImagePaths(
+    record: CollaborationTaskTransportRecord
+  ): Promise<Record<string, string>> {
     const images = [
       ...taskInputImages(record.request.input),
       ...(record.artifacts ?? []).flatMap(taskArtifactImages)
     ];
-    for (const image of images) {
-      try {
-        paths[image.attachmentId] = await this.client.resolveImage(
-          record.request.taskId,
-          image.attachmentId
-        );
-      } catch {
-        // Attachment readiness remains visible in the authoritative Task record.
+    const imageIds = new Set(images.map((image) => image.attachmentId));
+    const paths = Object.fromEntries(Object.entries(this.snapshotValue.selectedImagePaths)
+      .filter(([attachmentId]) => imageIds.has(attachmentId)));
+    for (const key of [...this.imageResolutionFailures.keys()]) {
+      if (!key.startsWith(`${record.request.taskId}:`)
+        || !imageIds.has(key.slice(record.request.taskId.length + 1))) {
+        this.imageResolutionFailures.delete(key);
       }
     }
-    this.snapshotValue.selectedImagePaths = paths;
+    const unresolved = images.filter((image) => {
+      if (paths[image.attachmentId]) return false;
+      const key = `${record.request.taskId}:${image.attachmentId}`;
+      return this.imageResolutionFailures.get(key) !== imageResolutionVersion(record, image);
+    });
+    const resolved = await Promise.all(unresolved.map(async (image) => {
+      const key = `${record.request.taskId}:${image.attachmentId}`;
+      try {
+        const path = await this.client.resolveImage(record.request.taskId, image.attachmentId);
+        this.imageResolutionFailures.delete(key);
+        return { attachmentId: image.attachmentId, path };
+      } catch {
+        this.imageResolutionFailures.set(key, imageResolutionVersion(record, image));
+        return { attachmentId: image.attachmentId, path: null };
+      }
+    }));
+    for (const result of resolved) {
+      if (result.path) paths[result.attachmentId] = result.path;
+    }
+    return paths;
   }
 
-  private async loadSelectedExecution(taskId: string): Promise<void> {
+  private async readExecution(taskId: string): Promise<ExecutionHandle | null> {
     try {
-      this.snapshotValue.selectedExecution = await this.client.getExecution(taskId);
+      return await this.client.getExecution(taskId);
     } catch {
-      this.snapshotValue.selectedExecution = null;
+      return null;
     }
   }
 
-  private async loadDelegationTargets(record: CollaborationTaskTransportRecord): Promise<void> {
-    this.snapshotValue.delegationTargets = [];
-    this.snapshotValue.delegationSelections = [];
+  private async readDelegationState(record: CollaborationTaskTransportRecord): Promise<{
+    targets: DelegationTargetOption[];
+    selections: DelegationTargetSelection[];
+  }> {
     if (record.direction !== "incoming"
       || record.approval !== "pending"
       || record.request.executionMode !== "long_horizon"
-      || record.delegationPlan) return;
+      || record.delegationPlan) return { targets: [], selections: [] };
     try {
       const targets = await this.client.delegationTargets(record.request.taskId);
-      this.snapshotValue.delegationTargets = targets;
-      if (targets[0]) this.snapshotValue.delegationSelections = [delegationSelection(targets[0])];
+      return {
+        targets,
+        selections: targets[0] ? [delegationSelection(targets[0])] : []
+      };
     } catch {
       // Normal single-Child approval remains available when delegation is unavailable.
+      return { targets: [], selections: [] };
     }
+  }
+
+  private beginDetail(record: CollaborationTaskTransportRecord): void {
+    this.snapshotValue.selectedTask = record;
+    this.snapshotValue.selectedExecution = null;
+    this.snapshotValue.delegationTargets = [];
+    this.snapshotValue.delegationSelections = [];
+    this.snapshotValue.selectedImagePaths = {};
+    this.imageResolutionFailures.clear();
+  }
+
+  private isSelected(taskId: string): boolean {
+    return this.snapshotValue.selectedTask?.request.taskId === taskId;
+  }
+
+  private isVisibleDetail(taskId: string): boolean {
+    return this.snapshotValue.open
+      && this.snapshotValue.screen === "detail"
+      && this.isSelected(taskId);
+  }
+
+  private scheduleNextRefresh(): void {
+    if (!this.active || this.disposed || this.refreshInFlight) return;
+    if (this.timer !== undefined) this.cancelTimer(this.timer);
+    const decision = resolveTaskRefreshDecision(
+      this.snapshotValue,
+      this.consecutiveRefreshFailures
+    );
+    this.timer = this.schedule(() => {
+      this.timer = undefined;
+      void this.refresh();
+    }, decision.delayMs);
   }
 
   private refreshPresentationKey(): string {
@@ -510,6 +705,10 @@ export class TaskController {
 
   private async run(operation: () => Promise<void>): Promise<void> {
     if (this.snapshotValue.busy) return;
+    if (this.timer !== undefined) {
+      this.cancelTimer(this.timer);
+      this.timer = undefined;
+    }
     this.snapshotValue.busy = true;
     delete this.snapshotValue.error;
     this.onChange();
@@ -519,7 +718,19 @@ export class TaskController {
       this.snapshotValue.error = taskErrorMessage(error);
     } finally {
       this.snapshotValue.busy = false;
+      if (this.outsideDismissPending && this.snapshotValue.open && !this.disposed) {
+        this.outsideDismissPending = false;
+        this.diagnostic({
+          level: "warn",
+          event: "panel.dismiss.resolved",
+          fields: { surface: "task", screen: this.snapshotValue.screen, blocker: "busy" }
+        });
+        this.close("task-focus-lost-after-busy");
+        return;
+      }
+      this.outsideDismissPending = false;
       if (!this.disposed) this.onChange();
+      this.scheduleNextRefresh();
     }
   }
 }
@@ -642,6 +853,47 @@ function delegationSelection(target: DelegationTargetSelection): DelegationTarge
     connectorId: target.connectorId,
     capabilityId: target.capabilityId
   };
+}
+
+function imageResolutionVersion(
+  record: CollaborationTaskTransportRecord,
+  image: TaskImagePart
+): string {
+  const diagnostics = (record.attachmentDiagnostics ?? [])
+    .filter((diagnostic) => diagnostic.attachmentId === image.attachmentId)
+    .map((diagnostic) => [diagnostic.purpose, diagnostic.state, diagnostic.safeErrorCode ?? ""])
+    .sort((left, right) => left.join(":").localeCompare(right.join(":")));
+  return JSON.stringify({
+    sha256: image.sha256,
+    attachmentsReady: record.attachmentsReady ?? null,
+    artifactAttachmentsReady: record.artifactAttachmentsReady ?? null,
+    diagnostics
+  });
+}
+
+function taskSummaryNeedsFrequentRefresh(
+  task: CollaborationTaskSummarySnapshot["tasks"][number]
+): boolean {
+  return task.cancelPending
+    || !task.attachmentsReady
+    || (task.direction === "incoming" && task.approval === "pending")
+    || task.delivery === "queued"
+    || task.delivery === "send_failed"
+    || ["submitted", "working", "input_required", "auth_required"].includes(task.state)
+    || (task.direction === "outgoing" && task.state === "completed" && task.artifactCount === 0);
+}
+
+function taskRecordNeedsFrequentRefresh(record: CollaborationTaskTransportRecord): boolean {
+  return record.cancelPending === true
+    || record.attachmentsReady === false
+    || record.artifactAttachmentsReady === false
+    || (record.direction === "incoming" && record.approval === "pending")
+    || record.delivery === "queued"
+    || record.delivery === "send_failed"
+    || ["submitted", "working", "input_required", "auth_required"].includes(record.state)
+    || (record.direction === "outgoing"
+      && record.state === "completed"
+      && !(record.artifacts?.length));
 }
 
 function taskErrorMessage(error: unknown): string {

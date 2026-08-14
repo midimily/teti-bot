@@ -479,6 +479,82 @@ test("sharing consent persistence does not wait for a blocked peer network queue
   assert.deepEqual(await runtime.getPassportSharing(), resourceSharingPolicy(true));
 });
 
+test("Task reads stay responsive and read-only while Chatmail I/O holds the write queue", async () => {
+  const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
+  const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
+  const directory = new StaticDirectory([toIdentity(accountA), toIdentity(accountB)]);
+  const relay = new MemoryChatmailRelay();
+  const connectionsA = new MemoryTetiConnectionStorage();
+  const taskStoreA = new CountingMemoryTaskTransportStore();
+  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), directory, connectionsA, {
+    taskTransportStore: taskStoreA,
+    taskIdFactory: () => "task-responsive-read-001"
+  });
+  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), directory);
+  const connection = await confirmPeers(runtimeA, runtimeB, "beta00002");
+  const sent = await runtimeA.sendTask({
+    connectionRequestId: connection.requestId,
+    capabilityId: "code-analysis",
+    text: "Keep this task readable while the relay is blocked.",
+    ttlMs: 60_000
+  });
+
+  const accountStorage = new MemoryTetiAccountStorage();
+  await accountStorage.save(accountA);
+  let ioStarted = false;
+  let releaseIo!: () => void;
+  const ioBlocked = new Promise<void>((resolve) => { releaseIo = resolve; });
+  const restarted = new PeerConnectionRuntime({
+    accountStorage,
+    connectionStorage: connectionsA,
+    chatmailAdapter: relay.adapter(accountA.address),
+    directory,
+    startIo: () => {
+      ioStarted = true;
+      return ioBlocked;
+    },
+    taskTransportStore: taskStoreA,
+    taskAttachmentStore: new FileTaskAttachmentStore(
+      await mkdtemp(join(tmpdir(), "teti-responsive-task-artifacts-"))
+    ),
+    allowLegacyRelationshipAuthorityForTests: true
+  });
+
+  await restarted.listTaskSummaries();
+  const savesBeforeReads = taskStoreA.saveCalls;
+  const polling = restarted.poll();
+  await waitUntil(() => ioStarted);
+  const result = await Promise.race([
+    Promise.all([
+      restarted.listTasks(),
+      restarted.listTaskSummaries(),
+      restarted.getTask(sent.request.taskId),
+      restarted.getTaskExecution(sent.request.taskId)
+    ]).then(([snapshot, summaries, task, execution]) => ({
+      kind: "read" as const,
+      snapshot,
+      summaries,
+      task,
+      execution
+    })),
+    new Promise<{ kind: "blocked" }>((resolve) =>
+      setTimeout(() => resolve({ kind: "blocked" }), 100)
+    )
+  ]);
+
+  assert.equal(result.kind, "read");
+  if (result.kind === "read") {
+    assert.equal(result.snapshot.records[0]?.request.taskId, sent.request.taskId);
+    assert.equal(result.summaries.tasks[0]?.taskId, sent.request.taskId);
+    assert.equal(result.task.request.taskId, sent.request.taskId);
+    assert.equal(result.execution, null);
+  }
+  assert.equal(taskStoreA.saveCalls, savesBeforeReads);
+
+  releaseIo();
+  await polling;
+});
+
 test("Chatmail keeps a Task offline, receiver stores it once, and returns a receipt offline", async () => {
   const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
   const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
@@ -2164,6 +2240,15 @@ class FailOnceArtifactStore extends MemoryTaskTransportStore {
       this.shouldFail = false;
       throw new Error("simulated artifact persistence failure");
     }
+    await super.save(state);
+  }
+}
+
+class CountingMemoryTaskTransportStore extends MemoryTaskTransportStore {
+  saveCalls = 0;
+
+  override async save(state: TetiTaskTransportStoreState): Promise<void> {
+    this.saveCalls += 1;
     await super.save(state);
   }
 }
