@@ -6,6 +6,11 @@ import {
   type TaskImagePart
 } from "../task/types.ts";
 import type { AgentTaskContentMode } from "./types.ts";
+import {
+  currentLocalPathPlatform,
+  isSafeAbsoluteLocalPath,
+  type LocalPathPlatform
+} from "../application/local-path.ts";
 
 export const TETI_CALLABLE_ADAPTER_CONTRACT_VERSION = 2;
 export const TETI_CALLABLE_TASK_SCHEMA_VERSION = 2;
@@ -224,7 +229,8 @@ export function validateCallableAdapterDescriptor(
 
 export function validateCallableAdapterTaskRequest(
   value: CallableAdapterTaskRequest,
-  descriptor: CallableAdapterDescriptor
+  descriptor: CallableAdapterDescriptor,
+  platform: LocalPathPlatform = currentLocalPathPlatform()
 ): void {
   if (value.schemaVersion !== 1 && value.schemaVersion !== TETI_CALLABLE_TASK_SCHEMA_VERSION) {
     throw contractError("ADAPTER_TASK_VERSION", "Unsupported local Adapter task version.");
@@ -259,9 +265,7 @@ export function validateCallableAdapterTaskRequest(
   for (const image of images) {
     if (!SAFE_TASK_ID_PATTERN.test(image.attachmentId)
       || (image.mimeType !== "image/jpeg" && image.mimeType !== "image/png")
-      || typeof image.path !== "string"
-      || !image.path.startsWith("/")
-      || image.path.includes("\0")
+      || !isSafeAbsoluteLocalPath(image.path, platform)
       || seenImages.has(image.attachmentId)) {
       throw contractError("ADAPTER_TASK_INPUT", "Local Adapter task image is invalid.");
     }
@@ -308,11 +312,10 @@ function descriptorModes(
 
 export function validateCallableAdapterLaunchSpec(
   value: CallableAdapterLaunchSpec,
-  expectedEntrypoint?: string
+  expectedEntrypoint?: string,
+  platform: LocalPathPlatform = currentLocalPathPlatform()
 ): void {
-  if (typeof value.executable !== "string"
-    || !value.executable.startsWith("/")
-    || value.executable.includes("\0")) {
+  if (!isSafeAbsoluteLocalPath(value.executable, platform)) {
     throw contractError("ADAPTER_EXECUTABLE", "Callable Adapter executable must be an absolute local path.");
   }
   if (expectedEntrypoint !== undefined && value.executable !== expectedEntrypoint) {

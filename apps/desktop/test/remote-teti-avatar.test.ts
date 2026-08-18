@@ -118,7 +118,7 @@ test("confirmed peers use a stable identity-first semantic list summary", async 
   assert.doesNotMatch(app, /•••/);
   assert.doesNotMatch(app, /connection\.address/);
   assert.doesNotMatch(app, /teti-connection-presence|teti-connection-relationship|teti-connection-reachability/);
-  assert.match(app, /state\.append\(createRemotePassport\(connection\.passport\)\)/);
+  assert.match(app, /state\.append\(createRemotePassport\(connection\.passport, i18n\)\)/);
   assert.match(passportView, /viewModel\.summary\.resource/);
   assert.match(passportView, /viewModel\.summary\.agents/);
   assert.match(passportView, /viewModel\.summary\.capabilities/);
@@ -126,13 +126,14 @@ test("confirmed peers use a stable identity-first semantic list summary", async 
   assert.match(passportView, /teti-peer-signal-summary/);
   assert.match(passportView, /createSummaryOverflow/);
   assert.match(app, /connection\.compatibility === "compatible"/);
-  assert.match(app, /仅暂停此节点协作/);
-  assert.match(app, /本机功能保持可用/);
+  assert.match(app, /messages\.connections\.list\.compatibility\.upgradeHint/);
+  assert.match(app, /messages\.connections\.list\.compatibility\.checkingHint/);
   assert.match(app, /setAttribute\("role", "alertdialog"\)/);
-  assert.match(app, /本机版本已低于当前 Beta 支持门槛/);
+  assert.match(app, /messages\.updateBlocker\.message/);
   assert.doesNotMatch(app, /已建联设备需要升级或完成版本检测/);
   assert.doesNotMatch(app, /teti-protocol-blocker-button/);
-  assert.match(app, /const brand = createTetiBotBrandLink\(\{ ownerDocument: header\.ownerDocument \}\)/);
+  assert.match(app, /const brand = createTetiBotBrandLink\(\{/);
+  assert.match(app, /messages\.brand\.websiteLabel/);
   assert.doesNotMatch(app, /teti-brand-dot/);
   assert.match(
     styles,

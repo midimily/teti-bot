@@ -25,6 +25,10 @@ test("Release Policy compares the local app version, never a Peer version", () =
   assert.equal(compareTetiVersions("0.2.8", "0.2.8"), 0);
   assert.equal(compareTetiVersions("0.2.7", "0.2.8"), -1);
   assert.equal(compareTetiVersions("0.3.0", "0.2.99"), 1);
+  assert.equal(compareTetiVersions("0.4.1-alpha.1", "0.4.1"), -1);
+  assert.equal(compareTetiVersions("0.4.1-alpha.2", "0.4.1-alpha.1"), 1);
+  assert.equal(compareTetiVersions("0.4.1-alpha.3", "0.4.1-alpha.2"), 1);
+  assert.equal(compareTetiVersions("0.4.1-alpha.1", "0.4.0"), 1);
   assert.equal(
     releaseStateForPolicy("0.2.7", baseline, new Date("2026-08-02T00:00:01.000Z")),
     "update_required"

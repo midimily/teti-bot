@@ -5,12 +5,17 @@ import { fileURLToPath } from "node:url";
 
 export const TETI_DELTACHAT_RPC_PATH = "TETI_DELTACHAT_RPC_PATH";
 export const TETI_CHATMAIL_ACCOUNTS_PATH = "TETI_CHATMAIL_ACCOUNTS_PATH";
-export const REPO_LOCAL_RPC_TARGET = "aarch64-apple-darwin";
+export const REPO_LOCAL_RPC_TARGET = process.platform === "win32" && process.arch === "x64"
+  ? "x86_64-pc-windows-msvc"
+  : "aarch64-apple-darwin";
+export const REPO_LOCAL_RPC_EXECUTABLE = process.platform === "win32"
+  ? "deltachat-rpc-server.exe"
+  : "deltachat-rpc-server";
 export const REPO_LOCAL_RPC_RELATIVE_PATH = join(
   ".tools",
   "deltachat-rpc-server",
   REPO_LOCAL_RPC_TARGET,
-  "deltachat-rpc-server"
+  REPO_LOCAL_RPC_EXECUTABLE
 );
 
 export interface ChatmailRuntimeConfig {

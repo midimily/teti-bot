@@ -297,7 +297,7 @@ export function validateTaskArtifactReceiptPayload(
   timestamp(payload.receivedAt, "receivedAt");
 }
 
-/** Beta 0.3.9 never speculatively downgrades or sends before a v7 advertisement. */
+/** Beta 0.4.0 never speculatively downgrades or sends before a v7 advertisement. */
 export function selectTaskProtocolVersion(
   remoteVersions?: readonly number[]
 ): TetiTaskProtocolVersion | null {

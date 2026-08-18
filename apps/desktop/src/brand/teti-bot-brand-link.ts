@@ -11,6 +11,7 @@ export const TETI_BOT_OPEN_SETTLED_EVENT = "teti:brand-website-open-settled";
 export interface TetiBotBrandLinkOptions {
   ownerDocument?: Document;
   opener?: ExternalUrlOpener;
+  label?: string;
 }
 
 export function createTetiBotBrandLink(
@@ -23,7 +24,7 @@ export function createTetiBotBrandLink(
   button.lang = "en";
   button.dir = "ltr";
   button.setAttribute("translate", "no");
-  button.setAttribute("aria-label", `访问 ${TETI_BOT_BRAND} 官网`);
+  button.setAttribute("aria-label", options.label ?? `Visit the ${TETI_BOT_BRAND} website`);
   button.dataset.brand = TETI_BOT_BRAND;
 
   const template = ownerDocument.createElement("template");

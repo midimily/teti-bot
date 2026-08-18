@@ -7,6 +7,7 @@ import type {
   SendCollaborationTaskInput
 } from "../../../core/task/transport.ts";
 import { RecordingTauriInvoker } from "../src/platform/tauri-api.ts";
+import { createDesktopI18n } from "../src/i18n/index.ts";
 import {
   TASK_REFRESH_DELAYS_MS,
   TaskController,
@@ -18,6 +19,9 @@ import type {
   DelegationTargetOption,
   DelegationTargetSelection
 } from "../../../core/delegation/types.ts";
+
+const chinese = createDesktopI18n("zh-Hans");
+const english = createDesktopI18n("en");
 
 test("Task draft survives focus collapse and sends only staged descriptors", async () => {
   const client = new RecordingTaskClient();
@@ -33,11 +37,15 @@ test("Task draft survives focus collapse and sends only staged descriptors", asy
 
   controller.openCompose("connection-1", "code-analysis", "capability:code-analysis");
   controller.updateDraft({ text: "Analyze this image." });
-  await controller.attachImages();
+  await controller.attachImages(chinese.messages.nativeDialogs.taskImages);
   controller.dismissFromOutside();
   assert.equal(controller.snapshot.open, false);
   assert.equal(controller.snapshot.draft.text, "Analyze this image.");
   assert.equal(controller.snapshot.draft.images.length, 1);
+  assert.deepEqual(tauri.calls[0], {
+    command: "pick_task_images",
+    args: { title: "选择任务图片", filterName: "图片" }
+  });
 
   controller.openCompose();
   await controller.send();
@@ -50,13 +58,21 @@ test("Task draft survives focus collapse and sends only staged descriptors", asy
 
 test("Task headings prefer the peer nickname and include an exact local timestamp", () => {
   const timestamp = "2026-07-27T12:34:56+08:00";
-  assert.equal(formatTaskTimestamp(timestamp), "2026年07月27日 12:34:56");
+  assert.equal(formatTaskTimestamp(timestamp, chinese), "2026/07/27 12:34:56");
   assert.equal(taskPeerHeading(
     "outgoing",
     "teti_air072700",
     timestamp,
-    [{ identity: { tetiId: "teti_air072700", displayName: "Air0727" } }] as never
-  ), "发送给 Air0727 的协作请求【2026年07月27日 12:34:56】");
+    [{ identity: { tetiId: "teti_air072700", displayName: "Air0727" } }] as never,
+    chinese
+  ), "发送给 Air0727 的协作请求【2026/07/27 12:34:56】");
+  assert.equal(taskPeerHeading(
+    "outgoing",
+    "teti_air072700",
+    timestamp,
+    [{ identity: { tetiId: "teti_air072700", displayName: "Air0727" } }] as never,
+    english
+  ), "Collaboration request sent to Air0727 [07/27/2026, 12:34:56]");
 });
 
 test("Task send eligibility follows the live draft instead of a stale render snapshot", () => {
@@ -88,35 +104,69 @@ test("Task result images expose native open, reveal, and save actions", async ()
 
   await controller.openResultImage(path);
   await controller.revealResultImage(path);
-  await controller.saveResultImage(path);
+  await controller.saveResultImage(path, english.messages.nativeDialogs.taskImages);
 
   assert.deepEqual(tauri.calls, [
     { command: "open_task_result_image", args: { path } },
     { command: "reveal_task_result_image", args: { path } },
-    { command: "save_task_result_image", args: { path } }
+    {
+      command: "save_task_result_image",
+      args: { path, title: "Save result image", filterName: "Image" }
+    }
   ]);
   controller.dispose();
 });
 
-test("Task UI keeps send state live and parents native image dialogs to the Teti window", async () => {
-  const [view, native] = await Promise.all([
+test("Task controller maps native and unknown failures to safe semantic codes", async () => {
+  let failure: unknown = { code: "TASK_RESULT_IMAGE_OPEN_FAILED", message: "private detail" };
+  const controller = new TaskController({
+    client: new RecordingTaskClient(),
+    tauri: {
+      invoke: async () => { throw failure; }
+    },
+    notchWindow: { setMode: async () => undefined } as never,
+    onChange: () => undefined
+  });
+
+  await controller.openResultImage("/Users/example/private.png");
+  assert.equal(controller.snapshot.errorCode, "result_image_open_failed");
+
+  failure = new Error("token=secret /Users/example/private.png");
+  await controller.openResultImage("/Users/example/private.png");
+  assert.equal(controller.snapshot.errorCode, "operation_failed");
+  assert.equal(JSON.stringify(controller.snapshot).includes("token=secret"), false);
+  controller.dispose();
+});
+
+test("Task UI keeps send state live, catalog-driven, and parents native image dialogs", async () => {
+  const [view, native, englishCatalog, chineseCatalog] = await Promise.all([
     readFile(new URL("../src/tasks/view.ts", import.meta.url), "utf8"),
-    readFile(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8")
+    readFile(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8"),
+    readFile(new URL("../src/i18n/locales/en.ts", import.meta.url), "utf8"),
+    readFile(new URL("../src/i18n/locales/zh-hans.ts", import.meta.url), "utf8")
   ]);
 
   assert.match(view, /prompt\.addEventListener\("input", syncSendState\)/);
   assert.match(view, /send\.disabled = !controller\.canSendDraft\(\)/);
   assert.match(view, /artifactImagePreview/);
-  assert.match(view, /打开结果图片/);
-  assert.match(view, /在 Finder 中显示/);
-  assert.match(view, /另存为/);
-  assert.match(native, /async fn pick_task_images\(window: tauri::WebviewWindow\)/);
+  assert.match(view, /i18n\.messages\.tasks\.images\.open/);
+  assert.doesNotMatch(view, /[\p{Script=Han}]/u);
+  assert.match(englishCatalog, /Open result image/);
+  assert.match(chineseCatalog, /打开结果图片/);
+  assert.match(native, /async fn pick_task_images\(/);
+  assert.match(native, /title: String/);
+  assert.match(native, /filter_name: String/);
+  assert.match(native, /set_title\(&title\)/);
+  assert.match(native, /add_filter\(&filter_name/);
+  assert.doesNotMatch(native, /选择任务图片|保存结果图片/);
   assert.ok(native.match(/\.set_parent\(&window\)/g)?.length === 2);
   assert.match(native, /open_task_result_image/);
   assert.match(native, /save_task_result_image/);
-  assert.match(view, /Teti Host 委派计划/);
-  assert.match(view, /Planner 关闭/);
-  assert.match(view, /按计划委派/);
+  assert.match(view, /messages\.plannerDisabled/);
+  assert.match(view, /messages\.approve/);
+  assert.match(chineseCatalog, /Teti Host 委派计划/);
+  assert.match(chineseCatalog, /Planner 关闭/);
+  assert.match(chineseCatalog, /按计划委派/);
   assert.match(view, /content\.dataset\.scrollKey = "tasks-inbox"/);
   assert.match(view, /content\.dataset\.scrollKey = `task-detail:\$\{record\.request\.taskId\}`/);
 });

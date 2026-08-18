@@ -5,7 +5,8 @@ import { inflateSync } from "node:zlib";
 
 const root = new URL("../../..", import.meta.url).pathname;
 const desktopRoot = join(root, "apps", "desktop");
-const tauriConfigPath = join(desktopRoot, "src-tauri", "tauri.conf.json");
+const tauriMacosConfigPath = join(desktopRoot, "src-tauri", "tauri.macos.conf.json");
+const tauriWindowsConfigPath = join(desktopRoot, "src-tauri", "tauri.windows.conf.json");
 const iconsDir = join(desktopRoot, "src-tauri", "icons");
 
 const requiredPngs = [
@@ -29,10 +30,10 @@ const icnsPath = join(iconsDir, "icon.icns");
 assert.equal(existsSync(icnsPath), true, "missing macOS icon.icns");
 assert.equal(readFileSync(icnsPath).subarray(0, 4).toString("ascii"), "icns", "icon.icns is not an icns file");
 
-const config = JSON.parse(readFileSync(tauriConfigPath, "utf8")) as {
+const macosConfig = JSON.parse(readFileSync(tauriMacosConfigPath, "utf8")) as {
   bundle?: { icon?: string[] };
 };
-const configuredIcons = config.bundle?.icon ?? [];
+const configuredIcons = macosConfig.bundle?.icon ?? [];
 assert.deepEqual(configuredIcons, [
   "icons/32x32.png",
   "icons/128x128.png",
@@ -41,6 +42,16 @@ assert.deepEqual(configuredIcons, [
   "icons/icon.png"
 ]);
 assert.equal(JSON.stringify(configuredIcons).toLowerCase().includes("tauri"), false);
+
+const icoPath = join(iconsDir, "icon.ico");
+assert.equal(existsSync(icoPath), true, "missing Windows icon.ico");
+const ico = readIco(icoPath);
+assert.deepEqual(ico.sizes, [16, 32, 48, 64, 128, 256]);
+const windowsConfig = JSON.parse(readFileSync(tauriWindowsConfigPath, "utf8")) as {
+  bundle?: { icon?: string[]; windows?: { nsis?: { installerIcon?: string } } };
+};
+assert.deepEqual(windowsConfig.bundle?.icon, ["icons/icon.ico"]);
+assert.equal(windowsConfig.bundle?.windows?.nsis?.installerIcon, "icons/icon.ico");
 
 for (const size of [16, 32]) {
   const iconPath = join(iconsDir, "Teti.iconset", `icon_${size}x${size}.png`);
@@ -57,6 +68,32 @@ function readPngSize(path: string): { width: number; height: number } {
     width: buffer.readUInt32BE(16),
     height: buffer.readUInt32BE(20)
   };
+}
+
+function readIco(path: string): { sizes: number[] } {
+  const buffer = readFileSync(path);
+  assert.equal(buffer.readUInt16LE(0), 0, "ICO reserved field must be zero");
+  assert.equal(buffer.readUInt16LE(2), 1, "ICO type must be icon");
+  const count = buffer.readUInt16LE(4);
+  const sizes: number[] = [];
+  for (let index = 0; index < count; index += 1) {
+    const entryOffset = 6 + index * 16;
+    const width = buffer[entryOffset] || 256;
+    const height = buffer[entryOffset + 1] || 256;
+    assert.equal(width, height, `ICO entry ${index} must be square`);
+    assert.equal(buffer.readUInt16LE(entryOffset + 4), 1, `ICO entry ${index} planes`);
+    assert.equal(buffer.readUInt16LE(entryOffset + 6), 32, `ICO entry ${index} bit depth`);
+    const dataLength = buffer.readUInt32LE(entryOffset + 8);
+    const dataOffset = buffer.readUInt32LE(entryOffset + 12);
+    assert.ok(dataOffset + dataLength <= buffer.length, `ICO entry ${index} is truncated`);
+    assert.equal(
+      buffer.subarray(dataOffset, dataOffset + 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])),
+      true,
+      `ICO entry ${index} must contain a PNG`
+    );
+    sizes.push(width);
+  }
+  return { sizes };
 }
 
 function readPngRgba(path: string): { width: number; height: number; data: Buffer } {

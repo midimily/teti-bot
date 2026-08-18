@@ -5,6 +5,7 @@ import type { MockProvisioningScenario } from "./modes.ts";
 export interface MockLifecycleOptions {
   scenario: MockProvisioningScenario;
   delayMs: number;
+  platform?: string;
   initialAccount?: TetiAccount | null;
 }
 
@@ -34,7 +35,7 @@ export class MockDesktopAccountLifecycle implements FirstLaunchAccountLifecycle 
       throw new Error("mock storage write failure");
     }
 
-    const account = createMockAccount(input.name);
+    const account = createMockAccount(input.name, this.options.platform);
     this.account = account;
     saveMockPersistedAccount(account);
 
@@ -77,7 +78,7 @@ export class MockDesktopAccountLifecycle implements FirstLaunchAccountLifecycle 
 
 export const MOCK_ACCOUNT_STORAGE_KEY = "teti.desktop.mockAccount";
 
-function createMockAccount(name: string): TetiAccount {
+function createMockAccount(name: string, platform = "macOS"): TetiAccount {
   const normalized = name.trim() || "Teti";
   const idSafe = normalized.toLowerCase().replace(/[^a-z0-9_-]/g, "_").slice(0, 32) || "teti";
   return {
@@ -88,7 +89,7 @@ function createMockAccount(name: string): TetiAccount {
     chatmailAccountId: 1,
     publicKey: "mock-public-key",
     publicProfile: {
-      platform: "macOS",
+      platform,
       category: ["developer"],
       aiEnvironment: ["Teti Desktop Mock"]
     },

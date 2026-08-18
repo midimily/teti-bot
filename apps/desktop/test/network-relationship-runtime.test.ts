@@ -43,7 +43,7 @@ const SELF = "teti_aaaaaaaaa";
 const PEER = "teti_bbbbbbbbb";
 const RELATIONSHIP_ID = "rel_AAAAAAAAAAAAAAAAAAAAAA";
 
-test("Beta 0.3.9 Runtime cannot start without Network Relationship authority", async () => {
+test("Beta 0.4.0 Runtime cannot start without Network Relationship authority", async () => {
   const accountStorage = new MemoryTetiAccountStorage();
   await accountStorage.save(account());
   assert.throws(

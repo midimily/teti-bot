@@ -1,5 +1,9 @@
 import type { FirstLaunchSnapshot } from "./state-machine.ts";
-import { TETI_DISPLAY_NAME_MAX_CHARACTERS } from "../../../../core/account/display-name.ts";
+import {
+  TETI_DISPLAY_NAME_MAX_CHARACTERS,
+  type DisplayNameValidationReason
+} from "../../../../core/account/display-name.ts";
+import { formatMessage, type DesktopI18n } from "../i18n/index.ts";
 
 export interface FirstLaunchViewModel {
   panel: "collapsed" | "expanded";
@@ -7,6 +11,7 @@ export interface FirstLaunchViewModel {
   title: string;
   message: string;
   primaryAction?: string;
+  primaryActionKind?: "show_naming" | "submit_name" | "finish" | "retry_network";
   input?: {
     value: string;
     placeholder: string;
@@ -20,40 +25,48 @@ export interface FirstLaunchViewModel {
   };
 }
 
-export function toFirstLaunchViewModel(snapshot: FirstLaunchSnapshot): FirstLaunchViewModel {
+export function toFirstLaunchViewModel(
+  snapshot: FirstLaunchSnapshot,
+  i18n: DesktopI18n
+): FirstLaunchViewModel {
+  const messages = i18n.messages.firstLaunch;
   switch (snapshot.state) {
     case "booting":
     case "checking_existing_account":
       return {
         panel: "collapsed",
         character: "idle",
-        title: "Teti",
-        message: "Waking up",
-        progress: { active: true, label: "Waking up" }
+        title: i18n.messages.common.appName,
+        message: messages.booting.message,
+        progress: { active: true, label: messages.booting.progress }
       };
 
     case "welcome":
       return {
         panel: "expanded",
         character: "wake",
-        title: "你好，主人。",
-        message: "第一次见面，给我取个名字吧。",
-        primaryAction: "下一步"
+        title: messages.welcome.title,
+        message: messages.welcome.message,
+        primaryAction: messages.welcome.action,
+        primaryActionKind: "show_naming"
       };
 
     case "naming":
       return {
         panel: "expanded",
         character: "naming",
-        title: "给我一个名字。",
-        message: "短一点会更适合留海屏。",
-        primaryAction: "创建",
+        title: messages.naming.title,
+        message: messages.naming.message,
+        primaryAction: messages.naming.action,
+        primaryActionKind: "submit_name",
         input: {
           value: snapshot.nameInput,
-          placeholder: "名字",
+          placeholder: messages.naming.placeholder,
           disabled: false,
           maxCharacters: TETI_DISPLAY_NAME_MAX_CHARACTERS,
-          error: snapshot.error?.kind === "invalid_name" ? snapshot.error.message : undefined
+          error: snapshot.error?.kind === "invalid_name"
+            ? displayNameValidationMessage(snapshot.error.validationReason, i18n)
+            : undefined
         }
       };
 
@@ -62,15 +75,15 @@ export function toFirstLaunchViewModel(snapshot: FirstLaunchSnapshot): FirstLaun
       return {
         panel: "expanded",
         character: "thinking",
-        title: "正在创建 Teti",
-        message: phaseMessage(snapshot.phase),
+        title: messages.creating.title,
+        message: phaseCopy(snapshot.phase, i18n).message,
         progress: {
           active: true,
-          label: phaseLabel(snapshot.phase)
+          label: phaseCopy(snapshot.phase, i18n).label
         },
         input: {
           value: snapshot.nameInput,
-          placeholder: "名字",
+          placeholder: messages.naming.placeholder,
           disabled: true,
           maxCharacters: TETI_DISPLAY_NAME_MAX_CHARACTERS
         }
@@ -80,12 +93,13 @@ export function toFirstLaunchViewModel(snapshot: FirstLaunchSnapshot): FirstLaun
       return {
         panel: "expanded",
         character: "ready",
-        title: (snapshot.account?.displayName ?? snapshot.nameInput) || "Teti",
-        message: "我准备好了。",
-        primaryAction: "完成",
+        title: (snapshot.account?.displayName ?? snapshot.nameInput) || i18n.messages.common.appName,
+        message: messages.ready.message,
+        primaryAction: messages.ready.action,
+        primaryActionKind: "finish",
         progress: {
           active: false,
-          label: "就绪"
+          label: messages.ready.progress
         }
       };
 
@@ -93,8 +107,8 @@ export function toFirstLaunchViewModel(snapshot: FirstLaunchSnapshot): FirstLaun
       return {
         panel: "collapsed",
         character: "idle",
-        title: snapshot.account?.displayName ?? "Teti",
-        message: "Nearby"
+        title: snapshot.account?.displayName ?? i18n.messages.common.appName,
+        message: messages.idleMessage
       };
 
     case "recoverable_error":
@@ -102,18 +116,24 @@ export function toFirstLaunchViewModel(snapshot: FirstLaunchSnapshot): FirstLaun
       return {
         panel: "expanded",
         character: "error",
-        title: diagnosticCode ? `Teti 需要一点时间 [${diagnosticCode}]` : "Teti 需要一点时间",
-        message: snapshot.error?.message ?? "Teti 暂时还没完成。",
+        title: diagnosticCode
+          ? formatMessage(messages.recoverable.titleWithCode, { code: diagnosticCode })
+          : messages.recoverable.title,
+        message: firstLaunchErrorMessage(snapshot, i18n),
         primaryAction:
-          snapshot.error?.kind === "network_identity_failure" ? "再连接一次" : "再试一次",
+          snapshot.error?.kind === "network_identity_failure"
+            ? messages.recoverable.retryConnectionAction
+            : messages.recoverable.retryAction,
+        primaryActionKind:
+          snapshot.error?.kind === "network_identity_failure" ? "retry_network" : "submit_name",
         input:
           snapshot.error?.kind === "invalid_name"
             ? {
                 value: snapshot.nameInput,
-                placeholder: "名字",
+                placeholder: messages.naming.placeholder,
                 disabled: false,
                 maxCharacters: TETI_DISPLAY_NAME_MAX_CHARACTERS,
-                error: snapshot.error.message
+                error: displayNameValidationMessage(snapshot.error.validationReason, i18n)
               }
             : undefined
       };
@@ -122,9 +142,55 @@ export function toFirstLaunchViewModel(snapshot: FirstLaunchSnapshot): FirstLaun
       return {
         panel: "expanded",
         character: "error",
-        title: "Teti 暂时不能继续",
-        message: snapshot.error?.message ?? "Teti 遇到了内部设置问题。"
+        title: messages.fatalTitle,
+        message: firstLaunchErrorMessage(snapshot, i18n)
       };
+  }
+}
+
+function displayNameValidationMessage(
+  reason: DisplayNameValidationReason | undefined,
+  i18n: DesktopI18n
+): string {
+  const messages = i18n.messages.firstLaunch.validation;
+  switch (reason) {
+    case "empty":
+      return messages.empty;
+    case "too_long":
+      return formatMessage(messages.tooLong, { maximum: TETI_DISPLAY_NAME_MAX_CHARACTERS });
+    case "control_character":
+      return messages.controlCharacter;
+    default:
+      return messages.generic;
+  }
+}
+
+function firstLaunchErrorMessage(snapshot: FirstLaunchSnapshot, i18n: DesktopI18n): string {
+  const messages = i18n.messages.firstLaunch.errors;
+  switch (snapshot.error?.kind) {
+    case "invalid_name":
+      return displayNameValidationMessage(snapshot.error.validationReason, i18n);
+    case "temporary_account_load_failure":
+      return messages.temporaryAccountLoad;
+    case "corrupt_account":
+      return messages.corruptAccount;
+    case "partial_account":
+      return messages.partialAccount;
+    case "chatmail_provisioning_failure":
+      return messages.chatmailProvisioning;
+    case "local_persistence_failure":
+      return messages.localPersistence;
+    case "network_identity_failure":
+      return messages.networkIdentity;
+    case "loaded_account_verification_failure":
+      return messages.loadedAccountVerification;
+    case "unrecoverable_internal_state":
+      return snapshot.error.diagnosticCode === "RUNTIME-START"
+        ? messages.runtimeStartup
+        : messages.internalState;
+    case "unknown_failure":
+    default:
+      return messages.unknown;
   }
 }
 
@@ -140,40 +206,9 @@ function formatDiagnosticCode(code: string | undefined): string | null {
   return null;
 }
 
-function phaseLabel(phase: FirstLaunchSnapshot["phase"]): string {
-  switch (phase) {
-    case "preparing":
-      return "正在醒来";
-    case "provisioning_chatmail":
-      return "正在创建身份";
-    case "persisting_account":
-      return "正在保存";
-    case "registering_identity":
-      return "正在连接";
-    case "verifying_account":
-      return "正在检查";
-    case "finalizing":
-      return "就绪";
-    default:
-      return "正在醒来";
-  }
-}
-
-function phaseMessage(phase: FirstLaunchSnapshot["phase"]): string {
-  switch (phase) {
-    case "preparing":
-      return "正在醒来";
-    case "provisioning_chatmail":
-      return "正在创建身份";
-    case "persisting_account":
-      return "正在这台 Mac 上保存";
-    case "registering_identity":
-      return "正在连接";
-    case "verifying_account":
-      return "正在检查";
-    case "finalizing":
-      return "Teti 准备好了。";
-    default:
-      return "正在醒来";
-  }
+function phaseCopy(
+  phase: FirstLaunchSnapshot["phase"],
+  i18n: DesktopI18n
+): { readonly label: string; readonly message: string } {
+  return i18n.messages.firstLaunch.creating.phases[phase ?? "preparing"];
 }

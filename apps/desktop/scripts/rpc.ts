@@ -4,6 +4,10 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { repoLocalRpcServerPath, REPO_LOCAL_RPC_TARGET } from "../../../integrations/chatmail/runtime-config.ts";
 import { inspectChatmailRpcRuntime } from "../../../integrations/chatmail/runtime-diagnostics.ts";
+import {
+  stagePinnedWindowsRpc,
+  WINDOWS_RUNTIME_POLICY
+} from "./windows-runtime.ts";
 
 const CHATMAIL_CORE_REPO = "https://github.com/chatmail/core";
 const CHATMAIL_CORE_REVISION = "823b0741df82e3ec0f61285d52bf91ae19b1963e";
@@ -35,7 +39,7 @@ try {
 }
 
 async function installCommand(): Promise<void> {
-  assertAppleSilicon();
+  assertSupportedHost();
   await mkdir(toolsRoot, { recursive: true });
 
   if (!(await exists(coreCheckoutPath))) {
@@ -44,13 +48,22 @@ async function installCommand(): Promise<void> {
 
   await run("git", ["fetch", "origin", CHATMAIL_CORE_REVISION], { cwd: coreCheckoutPath });
   await run("git", ["checkout", "--detach", CHATMAIL_CORE_REVISION], { cwd: coreCheckoutPath });
-  await run("cargo", ["build", "--release", "-p", "deltachat-rpc-server"], { cwd: coreCheckoutPath });
+  await run("cargo", ["build", "--release", "-p", "deltachat-rpc-server", "--features", "vendored"], {
+    cwd: coreCheckoutPath
+  });
 
-  const source = join(coreCheckoutPath, "target", "release", "deltachat-rpc-server");
+  const executable = process.platform === "win32"
+    ? "deltachat-rpc-server.exe"
+    : "deltachat-rpc-server";
+  const source = join(coreCheckoutPath, "target", "release", executable);
   const destination = repoLocalRpcServerPath();
-  await mkdir(dirname(destination), { recursive: true });
-  await cp(source, destination);
-  await chmod(destination, 0o755);
+  if (process.platform === "win32") {
+    await stagePinnedWindowsRpc(repoRoot, source, CHATMAIL_CORE_REVISION);
+  } else {
+    await mkdir(dirname(destination), { recursive: true });
+    await cp(source, destination);
+    await chmod(destination, 0o755);
+  }
 
   await verifyPath(destination);
 }
@@ -70,7 +83,7 @@ async function verifyPath(path: string): Promise<void> {
     report.errors.length === 0 &&
     report.executable &&
     report.version === EXPECTED_VERSION &&
-    report.architecture === "arm64" &&
+    report.targetCompatible &&
     report.jsonRpcHealth &&
     report.cleanShutdown;
 
@@ -92,9 +105,15 @@ async function verifyPath(path: string): Promise<void> {
   }
 }
 
-function assertAppleSilicon(): void {
-  if (process.platform !== "darwin" || process.arch !== "arm64") {
-    throw new Error("desktop:rpc:install currently supports Apple Silicon macOS only.");
+function assertSupportedHost(): void {
+  const supported = (process.platform === "darwin" && process.arch === "arm64")
+    || (process.platform === "win32" && process.arch === "x64");
+  if (!supported) {
+    throw new Error("desktop:rpc:install supports Apple Silicon macOS and Windows x64.");
+  }
+  if (process.platform === "win32"
+    && WINDOWS_RUNTIME_POLICY.deltaChat.revision !== CHATMAIL_CORE_REVISION) {
+    throw new Error("Windows Runtime and RPC installer revisions are inconsistent.");
   }
 }
 

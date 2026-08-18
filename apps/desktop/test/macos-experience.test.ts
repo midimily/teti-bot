@@ -3,42 +3,50 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 import { toFirstLaunchViewModel } from "../src/first-launch/view-model.ts";
+import { createDesktopI18n } from "../src/i18n/index.ts";
+
+const zhHans = createDesktopI18n("zh-Hans");
 
 const repoRoot = new URL("../../..", import.meta.url).pathname;
 const desktopRoot = join(repoRoot, "apps", "desktop");
 const tauriConfigPath = join(desktopRoot, "src-tauri", "tauri.conf.json");
+const tauriMacosConfigPath = join(desktopRoot, "src-tauri", "tauri.macos.conf.json");
 
 test("macOS bundle metadata uses the Teti product identity", () => {
-  const config = readJson<{
+  const common = readJson<{
     productName: string;
     identifier: string;
     version: string;
     app: { windows: unknown[] };
     bundle: {
       active: boolean;
-      targets: string[];
       category: string;
+    };
+  }>(tauriConfigPath);
+  const macos = readJson<{
+    bundle: {
+      targets: string[];
       icon: string[];
       resources: Record<string, string>;
       macOS: { minimumSystemVersion: string };
     };
-  }>(tauriConfigPath);
+  }>(tauriMacosConfigPath);
 
-  assert.equal(config.productName, "Teti");
-  assert.equal(config.identifier, "bot.teti.app");
-  assert.match(config.version, /^\d+\.\d+\.\d+$/);
-  assert.equal(config.bundle.active, true);
-  assert.deepEqual(config.bundle.targets, ["app", "dmg"]);
-  assert.equal(config.bundle.category, "Productivity");
+  assert.equal(common.productName, "Teti");
+  assert.equal(common.identifier, "bot.teti.app");
+  assert.match(common.version, /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/);
+  assert.equal(common.bundle.active, true);
+  assert.deepEqual(macos.bundle.targets, ["app", "dmg"]);
+  assert.equal(common.bundle.category, "Productivity");
   assert.equal(
-    config.bundle.resources["resources/lifecycle-sidecar/codex-image-runner.mjs"],
+    macos.bundle.resources["resources/lifecycle-sidecar/codex-image-runner.mjs"],
     "lifecycle-sidecar/codex-image-runner.mjs"
   );
-  assert.deepEqual(config.app.windows, []);
+  assert.deepEqual(common.app.windows, []);
 });
 
 test("desktop icon configuration references generated Teti assets", () => {
-  const config = readJson<{ bundle: { icon: string[] } }>(tauriConfigPath);
+  const config = readJson<{ bundle: { icon: string[] } }>(tauriMacosConfigPath);
   assert.deepEqual(config.bundle.icon, [
     "icons/32x32.png",
     "icons/128x128.png",
@@ -55,7 +63,7 @@ test("desktop icon configuration references generated Teti assets", () => {
 });
 
 test("minimum macOS deployment target is explicit and consistent", () => {
-  const config = readJson<{ bundle: { macOS: { minimumSystemVersion: string } } }>(tauriConfigPath);
+  const config = readJson<{ bundle: { macOS: { minimumSystemVersion: string } } }>(tauriMacosConfigPath);
   const cargoConfig = readFileSync(join(desktopRoot, "src-tauri", ".cargo", "config.toml"), "utf8");
 
   assert.equal(config.bundle.macOS.minimumSystemVersion, "15.0");
@@ -92,7 +100,7 @@ test("first-launch user copy avoids transport and credential internals", () => {
   const forbidden = /\b(IMAP|SMTP|Delta Chat RPC|RPC|DCACCOUNT|credentials|relay|cryptographic|keys|Chatmail)\b/i;
 
   for (const snapshot of snapshots) {
-    const viewModel = toFirstLaunchViewModel(snapshot);
+    const viewModel = toFirstLaunchViewModel(snapshot, zhHans);
     const visibleText = [
       viewModel.title,
       viewModel.message,
@@ -112,8 +120,9 @@ test("desktop shell exposes AI Passport and explicit Passport sharing consent", 
   const passportViewModel = readFileSync(join(desktopRoot, "src", "passport", "view-model.ts"), "utf8");
   const styles = readFileSync(join(desktopRoot, "src", "styles.css"), "utf8");
 
-  assert.match(passportViewModel, /title: "AI Passport"/);
-  assert.match(passportViewModel, /toggleLabel: "Passport 分享"/);
+  assert.match(passportViewModel, /title: i18n\.messages\.passport\.title/);
+  assert.match(passportViewModel, /toggleLabel: settingsMessages\.sharing/);
+  assert.doesNotMatch(passportViewModel, /i18n\?\.messages|settingsMessages\?\./);
   assert.doesNotMatch(passportView, /本周额度剩余/);
   assert.doesNotMatch(app, /界面设置|减少动画|运行状态/);
   assert.match(styles, /@media \(prefers-reduced-motion: reduce\)/);

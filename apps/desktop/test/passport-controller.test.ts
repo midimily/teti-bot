@@ -120,7 +120,7 @@ test("Passport sharing updates optimistically and rolls back on persistence fail
   client.failSet = true;
   await controller.setResourceSharing(false);
   assert.equal(controller.snapshot.passport.sharing.resourceSummary, true);
-  assert.equal(controller.snapshot.sharingError, "Passport 分享设置暂时无法保存。");
+  assert.equal(controller.snapshot.sharingErrorCode, "sharing_save_failed");
 });
 
 test("rapid Passport sharing changes remain interactive and persist the latest intent", async () => {
@@ -209,7 +209,7 @@ test("Settings local logout stops polling and reports a local cleanup failure", 
 
   assert.equal(client.logoutCalls, 1);
   assert.equal(controller.snapshot.localLogoutBusy, false);
-  assert.match(controller.snapshot.localLogoutError ?? "", /本机 Teti Profile/);
+  assert.equal(controller.snapshot.localLogoutErrorCode, "local_profile_logout_failed");
   controller.stop();
 });
 

@@ -9,9 +9,20 @@ export type ConnectPanelState =
 
 export type ConnectPanelMessageTone = "hint" | "progress" | "success" | "error";
 
+export type ConnectPanelMessageCode =
+  | "connecting"
+  | "invalid_public_id"
+  | "request_sent"
+  | "approval_required"
+  | "connected"
+  | "already_connected"
+  | "connection_timeout"
+  | "identity_not_found"
+  | "connection_failed";
+
 export interface ConnectPanelSnapshot {
   state: ConnectPanelState;
-  message: string;
+  messageCode?: ConnectPanelMessageCode;
   messageTone: ConnectPanelMessageTone;
 }
 
@@ -19,23 +30,19 @@ export type ConnectPanelEvent =
   | { type: "EYES_CLICKED" }
   | { type: "OPEN_ANIMATION_FINISHED" }
   | { type: "INPUT_CHANGED" }
-  | { type: "VALIDATION_FAILED"; message: string }
+  | { type: "VALIDATION_FAILED"; messageCode: ConnectPanelMessageCode }
   | { type: "SUBMIT" }
-  | { type: "CONNECT_SUCCEEDED"; message: string }
-  | { type: "CONNECT_FAILED"; message: string }
+  | { type: "CONNECT_SUCCEEDED"; messageCode: ConnectPanelMessageCode }
+  | { type: "CONNECT_FAILED"; messageCode: ConnectPanelMessageCode }
   | { type: "ESCAPE_PRESSED" }
   | { type: "CLOSE_REQUESTED" }
   | { type: "CLOSE_ANIMATION_FINISHED" }
   | { type: "SUCCESS_TIMEOUT" }
   | { type: "RESET" };
 
-export const CONNECT_PANEL_PLACEHOLDER = "*********（teti.bot 社区9位ID）";
-export const CONNECT_PANEL_CONNECTING = "正在建立连接…";
-
 export function initialConnectPanelSnapshot(): ConnectPanelSnapshot {
   return {
     state: "idle",
-    message: "",
     messageTone: "hint"
   };
 }
@@ -49,32 +56,32 @@ export function transitionConnectPanel(
   switch (snapshot.state) {
     case "idle":
       return event.type === "EYES_CLICKED"
-        ? panel("opening", "", "hint")
+        ? panel("opening", undefined, "hint")
         : snapshot;
     case "opening":
       return event.type === "OPEN_ANIMATION_FINISHED"
-        ? panel("editing", "", "hint")
+        ? panel("editing", undefined, "hint")
         : snapshot;
     case "editing":
-      if (event.type === "INPUT_CHANGED") return panel("editing", "", "hint");
-      if (event.type === "VALIDATION_FAILED") return panel("error", event.message, "error");
-      if (event.type === "SUBMIT") return panel("connecting", CONNECT_PANEL_CONNECTING, "progress");
-      if (isCloseEvent(event)) return panel("closing", "", "hint");
+      if (event.type === "INPUT_CHANGED") return panel("editing", undefined, "hint");
+      if (event.type === "VALIDATION_FAILED") return panel("error", event.messageCode, "error");
+      if (event.type === "SUBMIT") return panel("connecting", "connecting", "progress");
+      if (isCloseEvent(event)) return panel("closing", undefined, "hint");
       return snapshot;
     case "connecting":
-      if (event.type === "CONNECT_SUCCEEDED") return panel("success", event.message, "success");
-      if (event.type === "CONNECT_FAILED") return panel("error", event.message, "error");
+      if (event.type === "CONNECT_SUCCEEDED") return panel("success", event.messageCode, "success");
+      if (event.type === "CONNECT_FAILED") return panel("error", event.messageCode, "error");
       return snapshot;
     case "success":
       if (event.type === "SUCCESS_TIMEOUT" || isCloseEvent(event)) {
-        return panel("closing", "", "hint");
+        return panel("closing", undefined, "hint");
       }
       return snapshot;
     case "error":
-      if (event.type === "INPUT_CHANGED") return panel("editing", "", "hint");
-      if (event.type === "VALIDATION_FAILED") return panel("error", event.message, "error");
-      if (event.type === "SUBMIT") return panel("connecting", CONNECT_PANEL_CONNECTING, "progress");
-      if (isCloseEvent(event)) return panel("closing", "", "hint");
+      if (event.type === "INPUT_CHANGED") return panel("editing", undefined, "hint");
+      if (event.type === "VALIDATION_FAILED") return panel("error", event.messageCode, "error");
+      if (event.type === "SUBMIT") return panel("connecting", "connecting", "progress");
+      if (isCloseEvent(event)) return panel("closing", undefined, "hint");
       return snapshot;
     case "closing":
       return event.type === "CLOSE_ANIMATION_FINISHED"
@@ -89,8 +96,8 @@ function isCloseEvent(event: ConnectPanelEvent): boolean {
 
 function panel(
   state: ConnectPanelState,
-  message: string,
+  messageCode: ConnectPanelMessageCode | undefined,
   messageTone: ConnectPanelMessageTone
 ): ConnectPanelSnapshot {
-  return { state, message, messageTone };
+  return { state, ...(messageCode ? { messageCode } : {}), messageTone };
 }

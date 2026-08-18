@@ -9,7 +9,7 @@ import {
   writeFile
 } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
-import { basename, dirname, extname, join, relative, resolve } from "node:path";
+import { basename, dirname, extname, isAbsolute, join, relative, resolve } from "node:path";
 import {
   TETI_EXECUTION_HANDLE_SCHEMA_VERSION,
   TETI_EXECUTION_LEASE_MS,
@@ -501,7 +501,9 @@ async function sha256File(path: string): Promise<string> {
 
 function isContained(root: string, candidate: string): boolean {
   const path = relative(root, candidate);
-  return path !== ".." && !path.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`);
+  return !isAbsolute(path)
+    && path !== ".."
+    && !path.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`);
 }
 
 function safePathSegment(value: string): string {

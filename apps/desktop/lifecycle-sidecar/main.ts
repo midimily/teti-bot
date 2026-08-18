@@ -39,7 +39,7 @@ import {
   loadAgentDetectorCatalog
 } from "./runtime/agents/config.ts";
 import { AgentObserverSupervisor } from "./runtime/agents/supervisor.ts";
-import { createMacAgentObserverSystem } from "./runtime/agents/system.ts";
+import { createAgentObserverSystem } from "./runtime/agents/system.ts";
 import { TetiHostAgentKernel } from "./runtime/callable/kernel.ts";
 import { CallableQualificationSupervisor } from "./runtime/callable/qualification-supervisor.ts";
 import { qualifyCodexConnector } from "../../../integrations/agents/codex/adapter.ts";
@@ -102,6 +102,10 @@ import {
   FileTetiNetworkRelationshipReconciliationStore
 } from "../../../services/network/relationship-reconciliation-store.ts";
 import { projectNetworkPublicProfile } from "./runtime/network/public-profile.ts";
+import {
+  lifecyclePlatformCapabilities,
+  resolveLifecycleDesktopPlatform
+} from "./desktop-platform.ts";
 
 const PROCESS_SHUTDOWN_HARD_LIMIT_MS = 4_000;
 const OSAURUS_QUALIFICATION_RETRY_MS = 15_000;
@@ -135,10 +139,18 @@ try {
 }
 
 async function startSidecar(): Promise<void> {
+  const desktopPlatform = resolveLifecycleDesktopPlatform();
+  const platformCapabilities = lifecyclePlatformCapabilities(desktopPlatform);
   const profile = await resolveTetiProfile();
   await ensureProfileBootstrapDirectories(profile);
   profileLock = await acquireTetiRuntimeProfileLock(profile);
   await ensureProfileDirectories(profile);
+  writeRuntimeDiagnostic("runtime.bootstrap", {
+    platform: desktopPlatform,
+    architecture: process.arch,
+    node: process.version,
+    profileSecurity: process.env.TETI_PROFILE_SECURITY ?? "unknown"
+  });
   const networkEnvironmentSettings = await TetiNetworkEnvironmentSettingsService.create(
     new FileTetiNetworkEnvironmentPreferenceStore(profile.networkEnvironmentPath),
     {
@@ -151,7 +163,7 @@ async function startSidecar(): Promise<void> {
   const networkClient = new HttpTetiNetworkClient({
     baseUrl: networkBaseUrl,
     clientVersion: TETI_BUILD_INFO.appVersion,
-    clientPlatform: "macos"
+    clientPlatform: desktopPlatform
   });
   const accountStorage = new FileTetiAccountStorage(profile.accountPath);
   const networkIdentityService = new TetiNetworkIdentityService({
@@ -160,7 +172,7 @@ async function startSidecar(): Promise<void> {
     credentialStore: new FileTetiNetworkCredentialStore(networkStatePaths.credentialsPath),
     environment: networkEnvironment,
     appVersion: TETI_BUILD_INFO.appVersion,
-    platform: "macos",
+    platform: desktopPlatform,
     adoptionGrant: resolveNetworkAdoptionGrant(networkBaseUrl)
   });
   let networkIdentityReady = false;
@@ -208,12 +220,13 @@ async function startSidecar(): Promise<void> {
   await releasePolicyService.initialize();
   const codexUsageService = getDefaultCodexUsageService();
   const agentConfigPath = join(profile.storeDir, "agent-detectors.override.json");
-  const agentConfiguration = new FileAgentDetectorConfiguration(agentConfigPath);
+  const agentConfiguration = new FileAgentDetectorConfiguration(agentConfigPath, desktopPlatform);
   const agentObserver = new AgentObserverSupervisor({
     loadCatalog: () => loadAgentDetectorCatalog({
-      path: agentConfigPath
+      path: agentConfigPath,
+      platform: desktopPlatform
     }),
-    system: createMacAgentObserverSystem()
+    system: createAgentObserverSystem(desktopPlatform)
   });
   const taskAttachmentStore = new FileTaskAttachmentStore(join(profile.storeDir, "task-attachments"));
   const workspaceStore = new FileCollaborationWorkspaceStore(
@@ -243,12 +256,22 @@ async function startSidecar(): Promise<void> {
     onCollaborationActiveChange: (active) => runtime?.setPresenceCollaborationActive(active),
     transports: [
       new ProcessTransport(),
-      new LoopbackHttpTransport({ identityVerifier: osaurusTrustVerifier }),
-      new OsaurusAgentTransport({
-        identityVerifier: osaurusTrustVerifier,
-        authorityVerifier: osaurusNativeAuditor
-      })
+      ...(platformCapabilities.osaurusRuntime
+        ? [new LoopbackHttpTransport({ identityVerifier: osaurusTrustVerifier })]
+        : []),
+      ...(platformCapabilities.osaurusNativeAgent
+        ? [new OsaurusAgentTransport({
+            identityVerifier: osaurusTrustVerifier,
+            authorityVerifier: osaurusNativeAuditor
+          })]
+        : [])
     ]
+  });
+  const interruptedExecutions = await hostAgent.reconcileExecutionHandles();
+  writeRuntimeDiagnostic("callable.recovery", {
+    platform: desktopPlatform,
+    interrupted: interruptedExecutions.length,
+    processTreeCancellation: platformCapabilities.processTreeCancellation
   });
   const networkProfileService = new TetiNetworkProfileService({
     client: networkClient,
@@ -281,7 +304,8 @@ async function startSidecar(): Promise<void> {
         if (signal.aborted) return;
         const qualification = await qualifyCodexConnector({
           pathOverride: pathOverrides.codex,
-          signal
+          signal,
+          platform: desktopPlatform
         });
         if (signal.aborted) return;
         writeRuntimeDiagnostic("callable.codex", {
@@ -329,7 +353,7 @@ async function startSidecar(): Promise<void> {
           runtime?.notifyNetworkProfileStateChange("capability", publicCapabilityIds(hostAgent));
         }
       },
-      async (signal) => {
+      ...(platformCapabilities.osaurusRuntime ? [async (signal: AbortSignal) => {
         while (!signal.aborted) {
           const qualification = await qualifyOsaurusConnector({
             signal,
@@ -353,8 +377,8 @@ async function startSidecar(): Promise<void> {
           }
           await waitForRetry(signal, OSAURUS_QUALIFICATION_RETRY_MS);
         }
-      },
-      async (signal) => {
+      }] : []),
+      ...(platformCapabilities.osaurusNativeAgent ? [async (signal: AbortSignal) => {
         let registeredDigest: string | null = null;
         while (!signal.aborted) {
           let configuration = null;
@@ -411,7 +435,7 @@ async function startSidecar(): Promise<void> {
             { directory: osaurusNativeAuditor.agentsRoot }
           ], OSAURUS_QUALIFICATION_RETRY_MS);
         }
-      }
+      }] : [])
     ],
     onJobError: ({ index, error }) => {
       writeRuntimeDiagnostic("callable.qualification", {
@@ -498,6 +522,7 @@ async function startSidecar(): Promise<void> {
       createTetiAccount: (input) => createGuardedRealTetiAccount(input, {
         resolveAccountProvisioning: () => networkRelayService.selectProvisioningRelay()
       }),
+      ...(platformCapabilities.osaurusNativeAgent ? {
       getOsaurusNativeChildSettings: async () => {
         const configuration = await readOsaurusNativeChildConfiguration(
           osaurusNativeConfigPath,
@@ -518,7 +543,8 @@ async function startSidecar(): Promise<void> {
         const configuration = await writeOsaurusNativeChildConfiguration(osaurusNativeConfigPath, agentId);
         osaurusNativeReadiness = { state: configuration.agentId ? "checking" : "unconfigured" };
         return { ...configuration, readiness: osaurusNativeReadiness.state };
-      },
+      }
+      } : {}),
       getNetworkEnvironmentSettings: () => networkEnvironmentSettings.settings,
       setLocalDevelopmentNetwork: (enabled) =>
         networkEnvironmentSettings.setUseLocalDevelopmentNetwork(enabled)

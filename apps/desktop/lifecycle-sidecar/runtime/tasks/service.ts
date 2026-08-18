@@ -2879,7 +2879,7 @@ function validateSendInput(input: SendCollaborationTaskInput): Required<Pick<
     && (attachments.length > 0 || input.capabilityId === "image-editing")) {
     throw new TaskTransportRuntimeError(
       "TASK_LONG_HORIZON_TEXT_ONLY",
-      "Long-horizon collaboration accepts text-only capabilities in Beta 0.3.9."
+      "Long-horizon collaboration accepts text-only capabilities in Beta 0.4.0."
     );
   }
   try {

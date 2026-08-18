@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { constants } from "node:fs";
-import { access, mkdir, rm, stat, writeFile } from "node:fs/promises";
+import { access, mkdir, open, rm, stat, writeFile } from "node:fs/promises";
 import { delimiter, isAbsolute, join } from "node:path";
 import { promisify } from "node:util";
 import { JsonRpcClientTransport } from "./rpc-client.ts";
@@ -16,8 +16,10 @@ export interface ChatmailRpcRuntimeDiagnostics {
   executable: boolean;
   version?: string;
   fileOutput?: string;
+  binaryPlatform?: "macos" | "windows" | "unknown";
   architecture?: "arm64" | "x86_64" | "unknown";
   appleSiliconCompatible: boolean;
+  targetCompatible: boolean;
   accountsPath: string;
   accountsPathWritable: boolean;
   jsonRpcHealth: boolean;
@@ -40,6 +42,7 @@ export async function inspectChatmailRpcRuntime(
     exists: false,
     executable: false,
     appleSiliconCompatible: false,
+    targetCompatible: false,
     accountsPath: runtime.accountsPath,
     accountsPathWritable: false,
     jsonRpcHealth: false,
@@ -64,11 +67,14 @@ export async function inspectChatmailRpcRuntime(
   }
 
   diagnostics.version = await readVersion(resolvedPath, errors);
-  diagnostics.fileOutput = await readFileOutput(resolvedPath, errors);
-  diagnostics.architecture = classifyArchitecture(diagnostics.fileOutput);
-  diagnostics.appleSiliconCompatible = diagnostics.architecture === "arm64";
-  if (!diagnostics.appleSiliconCompatible) {
-    errors.push(`RPC executable is not an arm64 Mach-O binary: ${diagnostics.fileOutput ?? "unknown"}`);
+  const binary = await inspectBinary(resolvedPath, errors);
+  diagnostics.fileOutput = binary.description;
+  diagnostics.binaryPlatform = binary.platform;
+  diagnostics.architecture = binary.architecture;
+  diagnostics.appleSiliconCompatible = binary.platform === "macos" && binary.architecture === "arm64";
+  diagnostics.targetCompatible = isCurrentTargetCompatible(binary);
+  if (binary.platform !== "unknown" && !diagnostics.targetCompatible) {
+    errors.push(`RPC executable does not match ${process.platform}/${process.arch}: ${binary.description ?? "unknown"}`);
   }
 
   diagnostics.accountsPathWritable = await ensureWritableDirectory(runtime.accountsPath, errors);
@@ -89,10 +95,15 @@ export async function resolveExecutablePath(
   }
 
   const paths = (env.PATH ?? "").split(delimiter).filter(Boolean);
+  const names = process.platform === "win32" && !commandPath.toLowerCase().endsWith(".exe")
+    ? [commandPath, `${commandPath}.exe`]
+    : [commandPath];
   for (const base of paths) {
-    const candidate = join(base, commandPath);
-    if (await canExecute(candidate)) {
-      return candidate;
+    for (const name of names) {
+      const candidate = join(base, name);
+      if (await canExecute(candidate)) {
+        return candidate;
+      }
     }
   }
 
@@ -139,14 +150,70 @@ async function readVersion(path: string, errors: string[]): Promise<string | und
   }
 }
 
-async function readFileOutput(path: string, errors: string[]): Promise<string | undefined> {
+interface InspectedBinary {
+  platform: "macos" | "windows" | "unknown";
+  architecture: "arm64" | "x86_64" | "unknown";
+  description?: string;
+}
+
+async function inspectBinary(path: string, errors: string[]): Promise<InspectedBinary> {
+  const pe = await inspectPortableExecutable(path);
+  if (pe) {
+    return {
+      platform: "windows",
+      architecture: pe,
+      description: `PE executable (${pe})`
+    };
+  }
+
+  if (process.platform === "win32") {
+    return { platform: "unknown", architecture: "unknown", description: "unknown executable format" };
+  }
+
   try {
     const { stdout } = await execFileAsync("file", [path], { timeout: 5000 });
-    return String(stdout).trim();
+    const output = String(stdout).trim();
+    return {
+      platform: /Mach-O/i.test(output) ? "macos" : "unknown",
+      architecture: classifyArchitecture(output),
+      description: output
+    };
   } catch (error) {
     errors.push(`Unable to inspect RPC architecture: ${error instanceof Error ? error.message : String(error)}`);
-    return undefined;
+    return { platform: "unknown", architecture: "unknown" };
   }
+}
+
+async function inspectPortableExecutable(path: string): Promise<"x86_64" | "arm64" | "unknown" | undefined> {
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
+  try {
+    handle = await open(path, "r");
+    const header = Buffer.alloc(4096);
+    const { bytesRead } = await handle.read(header, 0, header.length, 0);
+    if (bytesRead < 64 || header[0] !== 0x4d || header[1] !== 0x5a) return undefined;
+    const peOffset = header.readUInt32LE(0x3c);
+    if (peOffset + 6 > bytesRead || header.toString("ascii", peOffset, peOffset + 4) !== "PE\0\0") {
+      return undefined;
+    }
+    const machine = header.readUInt16LE(peOffset + 4);
+    if (machine === 0x8664) return "x86_64";
+    if (machine === 0xaa64) return "arm64";
+    return "unknown";
+  } catch {
+    return undefined;
+  } finally {
+    await handle?.close();
+  }
+}
+
+function isCurrentTargetCompatible(binary: InspectedBinary): boolean {
+  if (process.platform === "darwin" && process.arch === "arm64") {
+    return binary.platform === "macos" && binary.architecture === "arm64";
+  }
+  if (process.platform === "win32" && process.arch === "x64") {
+    return binary.platform === "windows" && binary.architecture === "x86_64";
+  }
+  return false;
 }
 
 function classifyArchitecture(fileOutput: string | undefined): "arm64" | "x86_64" | "unknown" {
@@ -186,6 +253,7 @@ async function fileExists(path: string): Promise<boolean> {
 
 async function canExecute(path: string): Promise<boolean> {
   try {
+    if (process.platform === "win32") return (await stat(path)).isFile();
     await access(path, constants.X_OK);
     return true;
   } catch {

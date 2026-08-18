@@ -161,6 +161,8 @@ async function readAndValidateMetadata(): Promise<{ version: string }> {
     productName?: string;
     version?: string;
     identifier?: string;
+  };
+  const tauriMacosConfig = JSON.parse(await readFile(join(tauriRoot, "tauri.macos.conf.json"), "utf8")) as {
     bundle?: { targets?: string[]; macOS?: { minimumSystemVersion?: string } };
   };
   const cargoToml = await readFile(join(tauriRoot, "Cargo.toml"), "utf8");
@@ -169,10 +171,10 @@ async function readAndValidateMetadata(): Promise<{ version: string }> {
 
   assert(tauriConfig.productName === EXPECTED_PRODUCT, `productName must be ${EXPECTED_PRODUCT}.`);
   assert(tauriConfig.identifier === EXPECTED_BUNDLE_ID, `Bundle Identifier must be ${EXPECTED_BUNDLE_ID}.`);
-  assert(tauriConfig.bundle?.macOS?.minimumSystemVersion === EXPECTED_MINIMUM_MACOS, "Minimum macOS must remain 15.0.");
-  assert(tauriConfig.bundle?.targets?.includes("app") && tauriConfig.bundle.targets.includes("dmg"), "Tauri targets must include app and dmg.");
+  assert(tauriMacosConfig.bundle?.macOS?.minimumSystemVersion === EXPECTED_MINIMUM_MACOS, "Minimum macOS must remain 15.0.");
+  assert(tauriMacosConfig.bundle?.targets?.includes("app") && tauriMacosConfig.bundle.targets.includes("dmg"), "Tauri targets must include app and dmg.");
   assert(versions.every((version) => version === versions[0]), `Version mismatch: ${versions.join(", ")}`);
-  assert(typeof versions[0] === "string" && /^\d+\.\d+\.\d+$/.test(versions[0]), "Version must be semver.");
+  assert(typeof versions[0] === "string" && /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(versions[0]), "Version must be semver.");
   return { version: versions[0] };
 }
 

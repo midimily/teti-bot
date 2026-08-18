@@ -84,6 +84,24 @@ test("native desktop authorization selects the production profile without a term
   assert.equal(report.profile?.root, join(homedir(), ".teti"));
 });
 
+test("native desktop authorization accepts the platform profile injected by the Rust shell", async () => {
+  const root = await mkdtemp(join(tmpdir(), "teti-native-windows-profile-"));
+  try {
+    const report = await validateAuthorizedProvisioningProfile({
+      [TETI_DESKTOP_NATIVE_PROVISIONING]: "1",
+      [TETI_PROVISIONING_MODE]: "real",
+      [TETI_PROFILE_DIR]: root
+    });
+
+    assert.equal(report.ok, true);
+    assert.equal(report.profile?.root, root);
+    assert.equal(report.profile?.productionRoot, root);
+    assert.equal(report.profile?.isValidationProfile, false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("existing account blocks guarded real account creation", async () => {
   const profile = await createTempValidationProfile();
   const previousEnv = snapshotEnv();

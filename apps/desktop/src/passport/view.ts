@@ -1,5 +1,13 @@
 import type { PassportController } from "./controller.ts";
 import type { MemoryController } from "../memory/controller.ts";
+import { memoryErrorMessage } from "../memory/message.ts";
+import {
+  createDesktopI18n,
+  formatMessage,
+  type AppLanguageSettings,
+  type AppLocalePreference,
+  type DesktopI18n
+} from "../i18n/index.ts";
 import type {
   AgentViewModel,
   AiPassportPanelViewModel,
@@ -14,41 +22,60 @@ import type {
 
 const codexIconUrl = new URL("../../assets/codex-status.png", import.meta.url).href;
 
-export function createAiPassportPanel(viewModel: AiPassportPanelViewModel): HTMLElement {
+export function createAiPassportPanel(
+  viewModel: AiPassportPanelViewModel,
+  i18n: DesktopI18n = createDesktopI18n("zh-Hans")
+): HTMLElement {
   const panel = document.createElement("div");
+  panel.id = "teti-ai-passport-panel";
   panel.className = "teti-header-panel teti-ai-status-panel";
   panel.dataset.scrollKey = "passport";
+  panel.setAttribute("role", "region");
+  panel.setAttribute("aria-labelledby", "teti-ai-passport-panel-title");
   panel.hidden = !viewModel.open;
   const panelHeading = document.createElement("div");
   panelHeading.className = "teti-panel-heading";
   const heading = document.createElement("strong");
+  heading.id = "teti-ai-passport-panel-title";
   heading.textContent = viewModel.title;
   const summary = document.createElement("small");
   summary.textContent = passportSummary(
     viewModel.resources.length,
     viewModel.agents.length,
-    viewModel.capabilities.length
+    viewModel.capabilities.length,
+    i18n
   );
   panelHeading.append(heading, summary);
   panel.append(panelHeading);
   if (viewModel.resources.length > 0) {
     const section = document.createElement("section");
     section.className = "teti-passport-section teti-resource-section";
-    section.append(createSectionTitle("AI 资源", viewModel.resources.length));
-    for (const resource of viewModel.resources) section.append(createResourceRow(resource));
+    section.append(createSectionTitle(
+      i18n.messages.passport.sections.resources,
+      viewModel.resources.length
+    ));
+    for (const resource of viewModel.resources) {
+      section.append(createResourceRow(resource, i18n));
+    }
     panel.append(section);
   }
   if (viewModel.agents.length > 0) {
     const section = document.createElement("section");
     section.className = "teti-passport-section teti-agent-section";
-    section.append(createSectionTitle("可用 Agent", viewModel.agents.length));
+    section.append(createSectionTitle(
+      i18n.messages.passport.sections.agents,
+      viewModel.agents.length
+    ));
     for (const agent of viewModel.agents) section.append(createAgentRow(agent));
     panel.append(section);
   }
   if (viewModel.capabilities.length > 0) {
     const section = document.createElement("section");
     section.className = "teti-passport-section teti-capability-section";
-    section.append(createSectionTitle("可调用能力", viewModel.capabilities.length));
+    section.append(createSectionTitle(
+      i18n.messages.passport.sections.capabilities,
+      viewModel.capabilities.length
+    ));
     const list = document.createElement("div");
     list.className = "teti-capability-list";
     for (const capability of viewModel.capabilities) list.append(createCapabilityChip(capability));
@@ -62,18 +89,27 @@ export function createPassportSettingsPanel(
   viewModel: PassportSettingsViewModel,
   controller?: PassportController,
   memoryController?: MemoryController,
-  childAgents: readonly AgentViewModel[] = []
+  childAgents: readonly AgentViewModel[] = [],
+  i18n: DesktopI18n = createDesktopI18n("zh-Hans"),
+  languageSettings?: AppLanguageSettings
 ): HTMLElement {
   const panel = document.createElement("div");
+  panel.id = "teti-passport-settings-panel";
   panel.className = "teti-header-panel teti-sharing-panel";
   panel.dataset.scrollKey = "settings";
+  panel.setAttribute("role", "region");
+  panel.setAttribute("aria-labelledby", "teti-passport-settings-panel-title");
+  panel.setAttribute("aria-busy", String(
+    viewModel.busy || viewModel.agentManagement.scanning || viewModel.networkEnvironmentBusy
+  ));
   panel.hidden = !viewModel.open;
   const panelHeading = document.createElement("div");
   panelHeading.className = "teti-panel-heading";
   const title = document.createElement("strong");
+  title.id = "teti-passport-settings-panel-title";
   title.textContent = viewModel.title;
   const caption = document.createElement("small");
-  caption.textContent = "身份、分享与本机 Agent";
+  caption.textContent = i18n.messages.passport.settings.caption;
   panelHeading.append(title, caption);
   const overview = document.createElement("section");
   overview.className = "teti-settings-card teti-settings-overview";
@@ -81,7 +117,7 @@ export function createPassportSettingsPanel(
   identity.className = "teti-settings-identity-row";
   const identityKey = document.createElement("span");
   identityKey.className = "teti-settings-label";
-  identityKey.textContent = "我的 Teti";
+  identityKey.textContent = i18n.messages.passport.settings.myTeti;
   const identityValue = document.createElement("span");
   identityValue.className = "teti-settings-identity-value";
   identityValue.textContent = viewModel.identityLabel;
@@ -91,7 +127,7 @@ export function createPassportSettingsPanel(
   networkIdentity.className = "teti-settings-identity-row";
   const networkIdentityKey = document.createElement("span");
   networkIdentityKey.className = "teti-settings-label";
-  networkIdentityKey.textContent = "Network 身份";
+  networkIdentityKey.textContent = i18n.messages.passport.settings.networkIdentity;
   const networkIdentityValue = document.createElement("span");
   networkIdentityValue.className = `teti-settings-identity-value is-${viewModel.networkIdentityTone}`;
   networkIdentityValue.textContent = viewModel.networkIdentityLabel;
@@ -99,18 +135,21 @@ export function createPassportSettingsPanel(
   overview.append(identity, networkIdentity);
   const networkEnvironment = document.createElement("section");
   networkEnvironment.className = "teti-settings-card teti-network-environment";
-  networkEnvironment.setAttribute("aria-label", "Teti Network 环境");
+  networkEnvironment.setAttribute(
+    "aria-label",
+    i18n.messages.passport.settings.networkEnvironment.label
+  );
   const networkToggle = document.createElement("label");
   networkToggle.className = "teti-toggle-row teti-network-environment-toggle";
   networkToggle.setAttribute("aria-busy", String(viewModel.networkEnvironmentBusy));
   const networkCopy = document.createElement("span");
   networkCopy.className = "teti-toggle-copy";
   const networkTitle = document.createElement("strong");
-  networkTitle.textContent = "本机 Network 开发环境";
+  networkTitle.textContent = i18n.messages.passport.settings.networkEnvironment.title;
   const networkHint = document.createElement("small");
   networkHint.textContent = viewModel.useLocalDevelopmentNetwork
-    ? "下次启动连接本机 teti-network"
-    : "默认连接 network.teti.bot";
+    ? i18n.messages.passport.settings.networkEnvironment.localHint
+    : i18n.messages.passport.settings.networkEnvironment.productionHint;
   networkCopy.append(networkTitle, networkHint);
   const networkInput = document.createElement("input");
   networkInput.type = "checkbox";
@@ -131,7 +170,10 @@ export function createPassportSettingsPanel(
   if (viewModel.networkEnvironmentRestartRequired) {
     const restart = document.createElement("small");
     restart.className = "teti-network-environment-restart";
-    restart.textContent = `设置已保存；重启后使用 ${viewModel.networkEnvironmentNextEndpoint}`;
+    restart.textContent = formatMessage(
+      i18n.messages.passport.settings.networkEnvironment.restartRequired,
+      { endpoint: viewModel.networkEnvironmentNextEndpoint }
+    );
     networkMeta.append(restart);
   }
   networkEnvironment.append(networkToggle, networkMeta);
@@ -143,7 +185,7 @@ export function createPassportSettingsPanel(
   const text = document.createElement("strong");
   text.textContent = viewModel.toggleLabel;
   const hint = document.createElement("small");
-  hint.textContent = "向已建联 Teti 分享当前 Passport";
+  hint.textContent = i18n.messages.passport.settings.sharingHint;
   toggleCopy.append(text, hint);
   const toggle = document.createElement("input");
   toggle.type = "checkbox";
@@ -154,37 +196,91 @@ export function createPassportSettingsPanel(
   if (viewModel.error) {
     const error = document.createElement("small");
     error.className = "teti-sharing-error";
+    error.setAttribute("role", "alert");
     error.textContent = viewModel.error;
     panel.append(error);
   }
-  panel.append(createAgentManagementSection(viewModel, controller));
+  panel.append(createAgentManagementSection(viewModel, controller, i18n));
   if (viewModel.showOsaurusNativeConfiguration) {
-    panel.append(createOsaurusNativeChildSection(viewModel, controller));
+    panel.append(createOsaurusNativeChildSection(viewModel, controller, i18n));
   }
-  if (memoryController) panel.append(createChildMemorySection(memoryController, childAgents));
+  if (memoryController) {
+    panel.append(createChildMemorySection(memoryController, childAgents, i18n));
+  }
+  if (languageSettings) {
+    panel.append(createLanguageSetting(languageSettings, i18n));
+  }
   if (viewModel.showLocalDevelopmentNetworkSwitch) {
     panel.append(networkEnvironment);
     if (viewModel.networkEnvironmentError) {
       const error = document.createElement("small");
       error.className = "teti-sharing-error";
+      error.setAttribute("role", "alert");
       error.textContent = viewModel.networkEnvironmentError;
       panel.append(error);
     }
   }
-  panel.append(createBuildInformation(viewModel, controller));
+  panel.append(createBuildInformation(viewModel, controller, i18n));
   return panel;
+}
+
+export function languagePreferenceOptions(
+  i18n: DesktopI18n
+): ReadonlyArray<{ value: AppLocalePreference; label: string }> {
+  const options = i18n.messages.passport.settings.language.options;
+  return [
+    { value: "auto", label: options.auto },
+    { value: "zh-Hans", label: options.chinese },
+    { value: "en", label: options.english }
+  ];
+}
+
+function createLanguageSetting(
+  settings: AppLanguageSettings,
+  i18n: DesktopI18n
+): HTMLElement {
+  const messages = i18n.messages.passport.settings.language;
+  const label = document.createElement("label");
+  label.className = "teti-settings-card teti-language-setting";
+  const copy = document.createElement("span");
+  copy.className = "teti-toggle-copy";
+  const title = document.createElement("strong");
+  title.textContent = messages.title;
+  const hint = document.createElement("small");
+  hint.textContent = messages.hint;
+  copy.append(title, hint);
+  const select = document.createElement("select");
+  select.className = "teti-language-select";
+  select.dataset.focusKey = "settings-language";
+  select.setAttribute("aria-label", messages.label);
+  for (const item of languagePreferenceOptions(i18n)) {
+    const option = document.createElement("option");
+    option.value = item.value;
+    option.textContent = item.label;
+    option.selected = item.value === settings.preference;
+    select.append(option);
+  }
+  select.addEventListener("change", () => {
+    if (select.value === "auto" || select.value === "zh-Hans" || select.value === "en") {
+      settings.setPreference(select.value);
+    }
+  });
+  label.append(copy, select);
+  return label;
 }
 
 function createBuildInformation(
   viewModel: PassportSettingsViewModel,
-  controller?: PassportController
+  controller: PassportController | undefined,
+  i18n: DesktopI18n
 ): HTMLElement {
+  const messages = i18n.messages.passport.settings.build;
   const footer = document.createElement("footer");
   footer.className = "teti-build-information";
-  footer.setAttribute("aria-label", "Teti 程序版本与构建信息");
+  footer.setAttribute("aria-label", messages.label);
 
   const versionLabel = document.createElement("span");
-  versionLabel.textContent = "程序版本";
+  versionLabel.textContent = messages.appVersion;
   const version = document.createElement("code");
   version.textContent = viewModel.appVersion;
   const logout = document.createElement("button");
@@ -192,16 +288,16 @@ function createBuildInformation(
   logout.className = "teti-local-logout";
   logout.dataset.focusKey = "settings-local-logout";
   logout.textContent = viewModel.localLogoutBusy
-    ? "注销中"
+    ? messages.resetting
     : viewModel.localLogoutConfirmationRequired
-      ? "取消"
-      : "注销";
+      ? messages.cancelReset
+      : messages.resetLocalTeti;
   logout.disabled = viewModel.localLogoutBusy;
   logout.setAttribute(
     "aria-label",
     viewModel.localLogoutConfirmationRequired
-      ? "取消注销本机 Teti Profile"
-      : "注销并清理本机 Teti Profile"
+      ? messages.cancelResetLabel
+      : messages.resetLabel
   );
   logout.addEventListener("click", () => {
     if (viewModel.localLogoutConfirmationRequired) {
@@ -212,7 +308,7 @@ function createBuildInformation(
   });
 
   const timestampLabel = document.createElement("span");
-  timestampLabel.textContent = "构建时间（UTC）";
+  timestampLabel.textContent = messages.buildTimestamp;
   const timestamp = document.createElement("time");
   timestamp.textContent = viewModel.buildTimestamp;
   if (Number.isFinite(Date.parse(viewModel.buildTimestamp))) {
@@ -220,7 +316,7 @@ function createBuildInformation(
   }
 
   const networkVersionLabel = document.createElement("span");
-  networkVersionLabel.textContent = "teti-network 版本";
+  networkVersionLabel.textContent = messages.networkVersion;
   const networkVersion = document.createElement("code");
   networkVersion.textContent = viewModel.networkVersionLabel;
   const networkVersionSpacer = document.createElement("span");
@@ -243,13 +339,13 @@ function createBuildInformation(
     const confirmation = document.createElement("div");
     confirmation.className = "teti-local-logout-confirmation";
     confirmation.setAttribute("role", "group");
-    confirmation.setAttribute("aria-label", "确认注销本机 Teti Profile");
+    confirmation.setAttribute("aria-label", messages.confirmationLabel);
     const warning = document.createElement("small");
-    warning.textContent = "将清除本机 Profile、Network 凭据、建联缓存和消息数据；服务器身份暂不删除。";
+    warning.textContent = messages.warning;
     const confirm = document.createElement("button");
     confirm.type = "button";
     confirm.className = "teti-local-logout-confirm";
-    confirm.textContent = "确认注销";
+    confirm.textContent = messages.confirmReset;
     confirm.addEventListener("click", () => void controller?.confirmLocalProfileLogout());
     confirmation.append(warning, confirm);
     footer.prepend(confirmation);
@@ -266,31 +362,34 @@ function createBuildInformation(
 
 function createOsaurusNativeChildSection(
   viewModel: PassportSettingsViewModel,
-  controller?: PassportController
+  controller: PassportController | undefined,
+  i18n: DesktopI18n
 ): HTMLElement {
+  const messages = i18n.messages.passport.settings.osaurus;
   const section = document.createElement("section");
   section.className = "teti-osaurus-native teti-settings-card";
-  section.setAttribute("aria-label", "Osaurus Native Child Agent");
+  section.setAttribute("aria-label", messages.label);
   const header = document.createElement("div");
   header.className = "teti-osaurus-native-header";
   const copy = document.createElement("span");
   const title = document.createElement("strong");
-  title.textContent = "Osaurus Native Child";
+  title.textContent = messages.title;
   const hint = document.createElement("small");
-  hint.textContent = "固定专用 Agent ID · 沿用本机 Agent 配置";
+  hint.textContent = messages.hint;
   copy.append(title, hint);
   const status = document.createElement("span");
-  status.className = `teti-osaurus-native-status is-${
-    viewModel.osaurusNativeStatus === "可调用"
-      ? "ready"
-      : viewModel.osaurusNativeStatus === "安全资格未通过"
-        ? "blocked"
-        : "pending"
-  }`;
+  status.className = `teti-osaurus-native-status is-${viewModel.osaurusNativeState === "ready"
+    ? "ready"
+    : viewModel.osaurusNativeState === "blocked"
+      ? "blocked"
+      : "pending"}`;
   status.textContent = viewModel.osaurusNativeStatus;
   if (viewModel.osaurusNativeReason) {
     status.title = viewModel.osaurusNativeReason;
-    status.setAttribute("aria-label", `${viewModel.osaurusNativeStatus}：${viewModel.osaurusNativeReason}`);
+    status.setAttribute("aria-label", formatMessage(messages.statusWithReason, {
+      status: viewModel.osaurusNativeStatus,
+      reason: viewModel.osaurusNativeReason
+    }));
   }
   header.append(copy, status);
 
@@ -299,14 +398,16 @@ function createOsaurusNativeChildSection(
   const input = document.createElement("input");
   input.type = "text";
   input.value = viewModel.osaurusNativeAgentId;
-  input.placeholder = "Agent UUID";
+  input.placeholder = messages.uuidPlaceholder;
   input.autocomplete = "off";
   input.spellcheck = false;
   input.disabled = viewModel.osaurusNativeBusy;
-  input.setAttribute("aria-label", "固定 Osaurus Agent UUID");
+  input.setAttribute("aria-label", messages.uuidLabel);
   const save = document.createElement("button");
   save.type = "submit";
-  save.textContent = viewModel.osaurusNativeBusy ? "检查中" : "保存";
+  save.textContent = viewModel.osaurusNativeBusy
+    ? messages.checkingAction
+    : messages.saveAction;
   const valid = () => /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
     .test(input.value.trim());
   save.disabled = viewModel.osaurusNativeBusy || !valid();
@@ -319,18 +420,18 @@ function createOsaurusNativeChildSection(
   if (viewModel.osaurusNativeAgentId) {
     const clear = document.createElement("button");
     clear.type = "button";
-    clear.textContent = "清除";
+    clear.textContent = messages.clearAction;
     clear.disabled = viewModel.osaurusNativeBusy;
     clear.addEventListener("click", () => void controller?.setOsaurusNativeChildAgentId(null));
     form.append(clear);
   }
   const policy = document.createElement("p");
-  policy.textContent = "Teti 不修改 Tools、Osaurus Memory 与 Autonomous Exec；直接 Host Workspace 挂载仍被拒绝，且 Runtime 身份通过校验后才会进入 Passport。";
+  policy.textContent = messages.policy;
   section.append(header, form, policy);
   if (viewModel.osaurusNativeReason) {
     const reason = document.createElement("small");
     reason.className = `teti-osaurus-native-reason ${
-      viewModel.osaurusNativeStatus === "可调用" ? "is-warning" : "is-error"
+      viewModel.osaurusNativeState === "ready" ? "is-warning" : "is-error"
     }`;
     reason.textContent = viewModel.osaurusNativeReason;
     section.append(reason);
@@ -347,25 +448,27 @@ function createOsaurusNativeChildSection(
 
 export function createChildMemorySection(
   controller: MemoryController,
-  childAgents: readonly AgentViewModel[]
+  childAgents: readonly AgentViewModel[],
+  i18n: DesktopI18n = createDesktopI18n("zh-Hans")
 ): HTMLElement {
+  const messages = i18n.messages.memory;
   const snapshot = controller.snapshot;
   const section = document.createElement("section");
   section.className = "teti-child-memory";
-  section.setAttribute("aria-label", "Child Agent Memory");
+  section.setAttribute("aria-label", messages.label);
 
   const header = document.createElement("div");
   header.className = "teti-child-memory-header";
   const copy = document.createElement("span");
   const title = document.createElement("strong");
-  title.textContent = "Child Memory";
+  title.textContent = messages.title;
   const hint = document.createElement("small");
-  hint.textContent = "由 Teti 管理 · 默认关闭";
+  hint.textContent = messages.hint;
   copy.append(title, hint);
   const exportButton = document.createElement("button");
   exportButton.type = "button";
   exportButton.className = "teti-memory-action";
-  exportButton.textContent = "导出";
+  exportButton.textContent = messages.exportAction;
   exportButton.disabled = snapshot.busy || snapshot.memory.records.length === 0;
   exportButton.addEventListener("click", () => void controller.export());
   header.append(copy, exportButton);
@@ -373,7 +476,7 @@ export function createChildMemorySection(
 
   const taskNote = document.createElement("p");
   taskNote.className = "teti-memory-note";
-  taskNote.textContent = "Task Memory 只在一次执行中存在。长期 Memory 必须先授权，再从已完成任务中单独保存；对端不能触发写入。";
+  taskNote.textContent = messages.taskNote;
   section.append(taskNote);
 
   const agents = document.createElement("div");
@@ -385,13 +488,15 @@ export function createChildMemorySection(
     const name = document.createElement("strong");
     name.textContent = agent.name;
     const description = document.createElement("small");
-    description.textContent = "允许你把完成结果保存为此 Child Agent 的长期上下文";
+    description.textContent = messages.authorizationDescription;
     agentCopy.append(name, description);
     const memoryToggle = document.createElement("input");
     memoryToggle.type = "checkbox";
     memoryToggle.checked = controller.isAuthorized("child_agent", null, agent.id);
     memoryToggle.disabled = snapshot.busy;
-    memoryToggle.setAttribute("aria-label", `${agent.name} Child Agent Memory`);
+    memoryToggle.setAttribute("aria-label", formatMessage(messages.authorizationLabel, {
+      agent: agent.name
+    }));
     memoryToggle.addEventListener("change", () => void controller.setAuthorization({
       scope: "child_agent",
       workspaceId: null,
@@ -404,7 +509,7 @@ export function createChildMemorySection(
   if (childAgents.length === 0) {
     const empty = document.createElement("small");
     empty.className = "teti-memory-empty";
-    empty.textContent = "检测到可用 Child Agent 后，可在这里单独授权长期 Memory。";
+    empty.textContent = messages.emptyAgents;
     agents.append(empty);
   }
   section.append(agents);
@@ -413,22 +518,32 @@ export function createChildMemorySection(
     const records = document.createElement("div");
     records.className = "teti-memory-records";
     const recordsTitle = document.createElement("strong");
-    recordsTitle.textContent = `已保存记录 ${snapshot.memory.records.length}`;
+    recordsTitle.textContent = i18n.formatPlural(
+      snapshot.memory.records.length,
+      messages.savedRecords
+    );
     records.append(recordsTitle);
     for (const record of snapshot.memory.records) {
       const row = document.createElement("article");
       row.className = "teti-memory-record";
       const provenance = document.createElement("small");
-      provenance.textContent = `${memoryScopeLabel(record.scope)} · ${record.childAgentId} · 来源任务 ${record.sourceTaskId} · Peer ${record.sourcePeerId}`;
+      provenance.textContent = formatMessage(messages.provenance, {
+        scope: memoryScopeLabel(record.scope, i18n),
+        agent: record.childAgentId,
+        task: record.sourceTaskId,
+        peer: record.sourcePeerId
+      });
       const preview = document.createElement("p");
       preview.textContent = record.contentPreview;
       const footer = document.createElement("div");
       const expiry = document.createElement("small");
-      expiry.textContent = `到期 ${formatMemoryDate(record.expiresAt)}`;
+      expiry.textContent = formatMessage(messages.expires, {
+        date: formatMemoryDate(record.expiresAt, i18n)
+      });
       const remove = document.createElement("button");
       remove.type = "button";
       remove.className = "teti-memory-action is-delete";
-      remove.textContent = "删除";
+      remove.textContent = messages.deleteAction;
       remove.disabled = snapshot.busy;
       remove.addEventListener("click", () => void controller.delete(record.memoryId));
       footer.append(expiry, remove);
@@ -440,26 +555,33 @@ export function createChildMemorySection(
   if (snapshot.exportResult) {
     const exported = document.createElement("small");
     exported.className = "teti-memory-export-result";
-    exported.textContent = `已导出 ${snapshot.exportResult.recordCount} 条：${snapshot.exportResult.path}`;
+    exported.textContent = formatMessage(messages.exported, {
+      count: i18n.formatNumber(snapshot.exportResult.recordCount),
+      path: snapshot.exportResult.path
+    });
     section.append(exported);
   }
-  if (snapshot.error) {
+  if (snapshot.errorCode) {
     const error = document.createElement("small");
     error.className = "teti-memory-error";
     error.setAttribute("role", "alert");
-    error.textContent = snapshot.error;
+    error.textContent = memoryErrorMessage(snapshot.errorCode, i18n);
     section.append(error);
   }
   return section;
 }
 
-function memoryScopeLabel(scope: string): string {
-  return scope === "workspace" ? "Workspace Memory" : "Child Agent Memory";
+function memoryScopeLabel(scope: string, i18n: DesktopI18n): string {
+  return scope === "workspace"
+    ? i18n.messages.memory.scopes.workspace
+    : i18n.messages.memory.scopes.childAgent;
 }
 
-function formatMemoryDate(value: string): string {
+function formatMemoryDate(value: string, i18n: DesktopI18n): string {
   const date = new Date(value);
-  return Number.isFinite(date.getTime()) ? date.toLocaleDateString() : "未知";
+  return Number.isFinite(date.getTime())
+    ? i18n.formatDate(date, { year: "numeric", month: "short", day: "numeric" })
+    : i18n.messages.memory.invalidDate;
 }
 
 function createSectionTitle(label: string, count: number): HTMLElement {
@@ -474,17 +596,27 @@ function createSectionTitle(label: string, count: number): HTMLElement {
   return title;
 }
 
-function passportSummary(resourceCount: number, agentCount: number, capabilityCount: number): string {
-  const parts = [`${resourceCount} 项 AI 资源`];
-  if (agentCount > 0) parts.push(`${agentCount} 个可用 Agent`);
-  if (capabilityCount > 0) parts.push(`${capabilityCount} 项能力`);
+function passportSummary(
+  resourceCount: number,
+  agentCount: number,
+  capabilityCount: number,
+  i18n: DesktopI18n
+): string {
+  const summary = i18n.messages.passport.summary;
+  const parts = [i18n.formatPlural(resourceCount, summary.resources)];
+  if (agentCount > 0) parts.push(i18n.formatPlural(agentCount, summary.agents));
+  if (capabilityCount > 0) {
+    parts.push(i18n.formatPlural(capabilityCount, summary.capabilities));
+  }
   return parts.join(" · ");
 }
 
 function createAgentManagementSection(
   viewModel: PassportSettingsViewModel,
-  controller?: PassportController
+  controller: PassportController | undefined,
+  i18n: DesktopI18n
 ): HTMLElement {
+  const messages = i18n.messages.passport.settings.agentManagement;
   const management = viewModel.agentManagement;
   const section = document.createElement("section");
   section.className = "teti-agent-management";
@@ -493,14 +625,14 @@ function createAgentManagementSection(
   header.className = "teti-agent-management-header";
   const copy = document.createElement("span");
   const title = document.createElement("strong");
-  title.textContent = "Agent 管理";
+  title.textContent = messages.title;
   const status = document.createElement("small");
   status.textContent = management.statusLabel;
   copy.append(title, status);
   const rescan = document.createElement("button");
   rescan.className = "teti-agent-rescan";
   rescan.type = "button";
-  rescan.textContent = management.scanning ? "扫描中" : "重新扫描";
+  rescan.textContent = management.scanning ? messages.scanning : messages.rescan;
   rescan.disabled = management.scanning;
   rescan.addEventListener("click", () => void controller?.rescanAgents());
   header.append(copy, rescan);
@@ -510,15 +642,17 @@ function createAgentManagementSection(
     const pending = document.createElement("div");
     pending.className = "teti-agent-discovery-pending";
     pending.setAttribute("role", "status");
-    pending.textContent = "完成首次安全扫描后显示 Agent 列表。";
+    pending.textContent = messages.pending;
     section.append(pending);
   } else {
     const list = document.createElement("div");
     list.className = "teti-agent-management-list";
-    for (const agent of management.agents) list.append(createManagedAgentRow(agent, controller));
+    for (const agent of management.agents) {
+      list.append(createManagedAgentRow(agent, controller, i18n));
+    }
     if (management.agents.length === 0) {
       const empty = document.createElement("small");
-      empty.textContent = "当前未检测到已安装的 Agent。";
+      empty.textContent = messages.empty;
       list.append(empty);
     }
     section.append(list);
@@ -527,20 +661,23 @@ function createAgentManagementSection(
   if (management.error) {
     const error = document.createElement("small");
     error.className = "teti-agent-management-error";
+    error.setAttribute("role", "alert");
     error.textContent = management.error;
     section.append(error);
   }
   const privacy = document.createElement("small");
   privacy.className = "teti-agent-management-privacy";
-  privacy.textContent = "仅检查安装、版本和运行状态；路径只保存在本机。";
+  privacy.textContent = messages.privacy;
   section.append(privacy);
   return section;
 }
 
 function createManagedAgentRow(
   agent: ManagedAgentViewModel,
-  controller?: PassportController
+  controller: PassportController | undefined,
+  i18n: DesktopI18n
 ): HTMLElement {
+  const messages = i18n.messages.passport.settings.agentManagement;
   const item = document.createElement("div");
   item.className = "teti-managed-agent";
   item.append(createAgentRow(agent));
@@ -549,7 +686,9 @@ function createManagedAgentRow(
   const details = document.createElement("details");
   details.className = "teti-agent-path-details";
   const summary = document.createElement("summary");
-  summary.textContent = agent.pathOverride ? "自定义路径已启用" : "路径 override";
+  summary.textContent = agent.pathOverride
+    ? messages.customPathEnabled
+    : messages.pathOverride;
   const form = document.createElement("form");
   form.className = "teti-agent-path-form";
   const input = document.createElement("input");
@@ -560,14 +699,14 @@ function createManagedAgentRow(
   input.autocomplete = "off";
   input.spellcheck = false;
   input.disabled = agent.busy;
-  input.setAttribute("aria-label", `${agent.name} 自定义安装路径`);
+  input.setAttribute("aria-label", formatMessage(messages.pathLabel, { agent: agent.name }));
   const save = document.createElement("button");
   save.type = "submit";
-  save.textContent = agent.busy ? "保存中" : "保存";
+  save.textContent = agent.busy ? messages.saving : messages.save;
   save.disabled = agent.busy;
   const clear = document.createElement("button");
   clear.type = "button";
-  clear.textContent = "清除";
+  clear.textContent = messages.clear;
   clear.disabled = agent.busy || !agent.pathOverride;
   clear.addEventListener("click", () => void controller?.setAgentPathOverride(agent.id, ""));
   form.addEventListener("submit", (event) => {
@@ -580,7 +719,10 @@ function createManagedAgentRow(
   return item;
 }
 
-export function createRemotePassport(viewModel: RemotePassportViewModel): HTMLElement {
+export function createRemotePassport(
+  viewModel: RemotePassportViewModel,
+  i18n: DesktopI18n = createDesktopI18n("zh-Hans")
+): HTMLElement {
   const container = document.createElement("div");
   container.className = "teti-peer-ai-status";
   if (viewModel.note) return passportNote(container, viewModel.note, viewModel.stale);
@@ -591,7 +733,7 @@ export function createRemotePassport(viewModel: RemotePassportViewModel): HTMLEl
     agents.append(createRemoteAgentSummary(agent));
   }
   if (viewModel.summary.agentOverflowCount > 0) {
-    agents.append(createSummaryOverflow(viewModel.summary.agentOverflowCount, "Agent"));
+    agents.append(createSummaryOverflow(viewModel.summary.agentOverflowCount, "Agent", i18n));
   }
 
   const signals = document.createElement("div");
@@ -599,18 +741,20 @@ export function createRemotePassport(viewModel: RemotePassportViewModel): HTMLEl
   if (viewModel.summary.resource) {
     signals.append(createRemoteResourceSignal(
       viewModel.summary.resource,
-      viewModel.summary.resourceOverflowCount
+      viewModel.summary.resourceOverflowCount,
+      i18n
     ));
   }
   const capabilities = document.createElement("div");
   capabilities.className = "teti-peer-capability-summary";
   for (const capability of viewModel.summary.capabilities) {
-    capabilities.append(createRemoteCapabilityChip(capability));
+    capabilities.append(createRemoteCapabilityChip(capability, i18n));
   }
   if (viewModel.summary.capabilityOverflowCount > 0) {
     capabilities.append(createSummaryOverflow(
       viewModel.summary.capabilityOverflowCount,
-      "Capability"
+      "Capability",
+      i18n
     ));
   }
   signals.append(capabilities);
@@ -618,32 +762,39 @@ export function createRemotePassport(viewModel: RemotePassportViewModel): HTMLEl
   return container;
 }
 
-export function createRemotePassportDetails(viewModel: RemotePassportViewModel): HTMLElement {
+export function createRemotePassportDetails(
+  viewModel: RemotePassportViewModel,
+  i18n: DesktopI18n = createDesktopI18n("zh-Hans")
+): HTMLElement {
   const details = document.createElement("div");
   details.className = "teti-peer-details-sections";
-  details.setAttribute("aria-label", "AI Passport 完整详情");
+  details.setAttribute("aria-label", i18n.messages.connections.details.fullDetailsLabel);
   if (viewModel.note) return passportNote(details, viewModel.note, viewModel.stale);
 
   details.append(
     createRemoteDetailSection(
       "Resource",
       viewModel.resources.length,
-      viewModel.resources.map(createRemoteResourceDetail)
+      viewModel.resources.map((resource) => createRemoteResourceDetail(resource, i18n)),
+      i18n
     ),
     createRemoteDetailSection(
       "Agent",
       viewModel.agents.length,
-      viewModel.agents.map(createRemoteAgentDetail)
+      viewModel.agents.map((agent) => createRemoteAgentDetail(agent, i18n)),
+      i18n
     ),
     createRemoteDetailSection(
       "Provider",
       viewModel.providers.length,
-      viewModel.providers.map(createRemoteProviderDetail)
+      viewModel.providers.map((provider) => createRemoteProviderDetail(provider, i18n)),
+      i18n
     ),
     createRemoteDetailSection(
       "Capability",
       viewModel.capabilities.length,
-      viewModel.capabilities.map(createRemoteCapabilityDetail)
+      viewModel.capabilities.map((capability) => createRemoteCapabilityDetail(capability, i18n)),
+      i18n
     )
   );
   return details;
@@ -652,11 +803,16 @@ export function createRemotePassportDetails(viewModel: RemotePassportViewModel):
 function createRemoteDetailSection(
   label: string,
   count: number,
-  items: HTMLElement[]
+  items: HTMLElement[],
+  i18n: DesktopI18n
 ): HTMLElement {
   const section = document.createElement("section");
   section.className = `teti-peer-detail-section is-${label.toLowerCase()}`;
-  section.setAttribute("aria-label", `${label}，${count} 项`);
+  const countLabel = i18n.formatPlural(count, i18n.messages.connections.details.itemCount);
+  section.setAttribute("aria-label", formatMessage(
+    i18n.messages.connections.details.sectionLabel,
+    { entity: label, count: countLabel }
+  ));
   const heading = document.createElement("div");
   heading.className = "teti-peer-detail-section-heading";
   const title = document.createElement("h3");
@@ -664,13 +820,13 @@ function createRemoteDetailSection(
   const badge = document.createElement("span");
   badge.className = "teti-section-count";
   badge.textContent = String(count);
-  badge.setAttribute("aria-label", `${count} 项`);
+  badge.setAttribute("aria-label", countLabel);
   heading.append(title, badge);
   section.append(heading);
   if (items.length === 0) {
     const empty = document.createElement("p");
     empty.className = "teti-peer-detail-empty";
-    empty.textContent = "未分享此类信息";
+    empty.textContent = i18n.messages.connections.details.notShared;
     section.append(empty);
   } else {
     section.append(...items);
@@ -678,7 +834,7 @@ function createRemoteDetailSection(
   return section;
 }
 
-function createRemoteResourceDetail(resource: ResourceViewModel): HTMLElement {
+function createRemoteResourceDetail(resource: ResourceViewModel, i18n: DesktopI18n): HTMLElement {
   const item = document.createElement("article");
   item.className = `teti-peer-detail-item teti-peer-resource-detail${resource.stale ? " is-stale" : ""}`;
   const header = document.createElement("div");
@@ -703,7 +859,7 @@ function createRemoteResourceDetail(resource: ResourceViewModel): HTMLElement {
   if (resource.quotas.length === 0) {
     const empty = document.createElement("span");
     empty.className = "teti-peer-detail-muted";
-    empty.textContent = "未提供 Quota";
+    empty.textContent = i18n.messages.connections.details.quotaUnavailable;
     quotas.append(empty);
   } else {
     for (const quota of resource.quotas) {
@@ -712,11 +868,20 @@ function createRemoteResourceDetail(resource: ResourceViewModel): HTMLElement {
       const copy = document.createElement("span");
       copy.textContent = `${quota.periodLabel} · ${quota.windowLabel} · ${quota.resetLabel}`;
       const value = document.createElement("strong");
-      value.textContent = `${quota.inferred ? "约 " : ""}${Math.round(quota.remainingPercent)}%`;
+      value.textContent = `${quota.inferred
+        ? i18n.messages.connections.details.approximatePrefix
+        : ""}${Math.round(quota.remainingPercent)}%`;
       row.append(
         copy,
         value,
-        progressTrack(quota.remainingPercent, false, `${resource.productName} ${quota.periodLabel}剩余额度`)
+        progressTrack(
+          quota.remainingPercent,
+          false,
+          formatMessage(i18n.messages.connections.details.remainingQuota, {
+            product: resource.productName,
+            period: quota.periodLabel
+          })
+        )
       );
       quotas.append(row);
     }
@@ -725,7 +890,7 @@ function createRemoteResourceDetail(resource: ResourceViewModel): HTMLElement {
   return item;
 }
 
-function createRemoteAgentDetail(agent: AgentViewModel): HTMLElement {
+function createRemoteAgentDetail(agent: AgentViewModel, i18n: DesktopI18n): HTMLElement {
   const item = document.createElement("article");
   item.className = `teti-peer-detail-item teti-peer-agent-detail is-${agent.tone}`;
   const header = document.createElement("div");
@@ -743,19 +908,28 @@ function createRemoteAgentDetail(agent: AgentViewModel): HTMLElement {
   const name = document.createElement("strong");
   name.textContent = agent.name;
   const provider = document.createElement("small");
-  provider.textContent = agent.providerName || "Provider 未标注";
+  provider.textContent = agent.providerName
+    || i18n.messages.connections.details.providerUnspecified;
   identity.append(name, provider);
   header.append(identity, detailStatus(agent.statusLabel, agent.tone === "unknown"));
   const modes = [
     agent.versionLabel,
-    agent.inputModeLabels.length > 0 ? `输入：${agent.inputModeLabels.join("、")}` : "",
-    agent.outputModeLabels.length > 0 ? `输出：${agent.outputModeLabels.join("、")}` : ""
+    agent.inputModeLabels.length > 0
+      ? formatMessage(i18n.messages.connections.details.inputModes, {
+          modes: agent.inputModeLabels.join(i18n.messages.connections.details.listSeparator)
+        })
+      : "",
+    agent.outputModeLabels.length > 0
+      ? formatMessage(i18n.messages.connections.details.outputModes, {
+          modes: agent.outputModeLabels.join(i18n.messages.connections.details.listSeparator)
+        })
+      : ""
   ];
   item.append(header, detailMeta(modes));
   return item;
 }
 
-function createRemoteProviderDetail(provider: ProviderViewModel): HTMLElement {
+function createRemoteProviderDetail(provider: ProviderViewModel, i18n: DesktopI18n): HTMLElement {
   const item = document.createElement("article");
   item.className = "teti-peer-detail-item teti-peer-provider-detail";
   const header = document.createElement("div");
@@ -766,18 +940,35 @@ function createRemoteProviderDetail(provider: ProviderViewModel): HTMLElement {
   const name = document.createElement("strong");
   name.textContent = provider.name;
   const summary = document.createElement("small");
-  summary.textContent = `${provider.resourceNames.length} Resource · ${provider.agentNames.length} Agent`;
+  summary.textContent = `${i18n.formatPlural(
+    provider.resourceNames.length,
+    i18n.messages.passport.summary.resources
+  )} · ${i18n.formatPlural(
+    provider.agentNames.length,
+    i18n.messages.passport.summary.agents
+  )}`;
   identity.append(name, summary);
   header.append(identity);
   const associations = [
-    provider.resourceNames.length > 0 ? `Resource：${provider.resourceNames.join("、")}` : "",
-    provider.agentNames.length > 0 ? `Agent：${provider.agentNames.join("、")}` : ""
+    provider.resourceNames.length > 0
+      ? formatMessage(i18n.messages.connections.details.resourceAssociation, {
+          items: provider.resourceNames.join(i18n.messages.connections.details.listSeparator)
+        })
+      : "",
+    provider.agentNames.length > 0
+      ? formatMessage(i18n.messages.connections.details.agentAssociation, {
+          items: provider.agentNames.join(i18n.messages.connections.details.listSeparator)
+        })
+      : ""
   ];
   item.append(header, detailMeta(associations));
   return item;
 }
 
-function createRemoteCapabilityDetail(capability: CapabilityViewModel): HTMLElement {
+function createRemoteCapabilityDetail(
+  capability: CapabilityViewModel,
+  i18n: DesktopI18n
+): HTMLElement {
   const item = document.createElement("article");
   item.className = `teti-peer-detail-item teti-peer-capability-detail${capability.stale ? " is-stale" : ""}`;
   const header = document.createElement("div");
@@ -810,7 +1001,7 @@ function createRemoteCapabilityDetail(capability: CapabilityViewModel): HTMLElem
   if (capability.bindings.length === 0) {
     const empty = document.createElement("span");
     empty.className = "teti-peer-detail-muted";
-    empty.textContent = "未提供绑定";
+    empty.textContent = i18n.messages.connections.details.bindingUnavailable;
     bindings.append(empty);
   } else {
     for (const binding of capability.bindings) {
@@ -820,10 +1011,18 @@ function createRemoteCapabilityDetail(capability: CapabilityViewModel): HTMLElem
       status.textContent = binding.statusLabel;
       const copy = document.createElement("span");
       const parts = [
-        binding.agentNames.length > 0 ? `Agent：${binding.agentNames.join("、")}` : "",
-        binding.resourceNames.length > 0 ? `Resource：${binding.resourceNames.join("、")}` : ""
+        binding.agentNames.length > 0
+          ? formatMessage(i18n.messages.connections.details.agentAssociation, {
+              items: binding.agentNames.join(i18n.messages.connections.details.listSeparator)
+            })
+          : "",
+        binding.resourceNames.length > 0
+          ? formatMessage(i18n.messages.connections.details.resourceAssociation, {
+              items: binding.resourceNames.join(i18n.messages.connections.details.listSeparator)
+            })
+          : ""
       ].filter(Boolean);
-      copy.textContent = parts.join(" · ") || "空绑定";
+      copy.textContent = parts.join(" · ") || i18n.messages.connections.details.emptyBinding;
       row.append(status, copy);
       bindings.append(row);
     }
@@ -884,7 +1083,8 @@ function providerInitials(name: string): string {
 
 function createRemoteResourceSignal(
   resource: ResourceViewModel,
-  overflowCount: number
+  overflowCount: number,
+  i18n: DesktopI18n
 ): HTMLElement {
   const row = document.createElement("div");
   row.className = `teti-peer-resource-signal${resource.stale ? " is-stale" : ""}`;
@@ -899,9 +1099,18 @@ function createRemoteResourceSignal(
     : `${resource.inferred ? "≈" : ""}${Math.round(resource.remainingPercent)}%`;
   row.append(label);
   if (resource.remainingPercent !== null) {
-    row.append(progressTrack(resource.remainingPercent, true), quota);
+    row.append(progressTrack(
+      resource.remainingPercent,
+      true,
+      formatMessage(i18n.messages.connections.details.remainingQuota, {
+        product: resource.productName,
+        period: ""
+      }).trim()
+    ), quota);
   }
-  if (overflowCount > 0) row.append(createSummaryOverflow(overflowCount, "Resource"));
+  if (overflowCount > 0) {
+    row.append(createSummaryOverflow(overflowCount, "Resource", i18n));
+  }
   row.title = [
     `${resource.productName} ${resource.planLabel}`,
     resource.availabilityLabel,
@@ -919,22 +1128,29 @@ function createRemoteAgentSummary(agent: AgentViewModel): HTMLElement {
   return name;
 }
 
-function createRemoteCapabilityChip(capability: CapabilityViewModel): HTMLElement {
+function createRemoteCapabilityChip(
+  capability: CapabilityViewModel,
+  i18n: DesktopI18n
+): HTMLElement {
   const chip = document.createElement("span");
   chip.className = `teti-peer-capability-chip${capability.stale ? " is-stale" : ""}`;
   chip.dataset.capabilityId = capability.id;
   chip.textContent = capability.computeOffer
-    ? `${capability.name} · 本地算力`
+    ? `${capability.name} · ${i18n.messages.connections.details.localCompute}`
     : capability.name;
   chip.title = `${capability.categoryLabel} · ${capability.availabilityLabel}`;
   return chip;
 }
 
-function createSummaryOverflow(count: number, entity: string): HTMLElement {
+function createSummaryOverflow(
+  count: number,
+  entity: string,
+  i18n: DesktopI18n
+): HTMLElement {
   const overflow = document.createElement("span");
   overflow.className = "teti-peer-summary-overflow";
   overflow.textContent = `+${count}`;
-  overflow.title = `另有 ${count} 个 ${entity}`;
+  overflow.title = formatMessage(i18n.messages.connections.details.overflow, { count, entity });
   overflow.setAttribute("aria-label", overflow.title);
   return overflow;
 }
@@ -948,7 +1164,7 @@ function createCapabilityChip(capability: CapabilityViewModel): HTMLElement {
   return chip;
 }
 
-function createResourceRow(resource: ResourceViewModel): HTMLElement {
+function createResourceRow(resource: ResourceViewModel, i18n: DesktopI18n): HTMLElement {
   const row = document.createElement("div");
   row.className = "teti-ai-tool-row";
   const identity = document.createElement("div");
@@ -968,11 +1184,22 @@ function createResourceRow(resource: ResourceViewModel): HTMLElement {
   const quotaValue = document.createElement("strong");
   quotaValue.textContent = resource.remainingPercent === null
     ? "--"
-    : `${resource.inferred ? "约 " : ""}${Math.round(resource.remainingPercent)}%`;
-  quota.append(quotaLabel, quotaValue, progressTrack(resource.remainingPercent));
+    : `${resource.inferred ? i18n.messages.passport.usage.approximatePrefix : ""}${Math.round(resource.remainingPercent)}%`;
+  quota.append(
+    quotaLabel,
+    quotaValue,
+    progressTrack(
+      resource.remainingPercent,
+      false,
+      i18n.messages.passport.usage.remainingQuota
+    )
+  );
 
   const detail = document.createElement("small");
-  const details = [resource.inferred ? "按最长窗口推定" : "", resource.stale ? "数据可能已过期" : ""]
+  const details = [
+    resource.inferred ? i18n.messages.passport.usage.inferredFromLongestWindow : "",
+    resource.stale ? i18n.messages.passport.usage.stale : ""
+  ]
     .filter(Boolean);
   detail.textContent = details.join(" · ");
   detail.hidden = details.length === 0;
@@ -1043,7 +1270,7 @@ function createImageMark(tone: ResourceTone, stale: boolean): HTMLElement {
   return mark;
 }
 
-function progressTrack(percent: number | null, compact = false, label = "剩余额度"): HTMLElement {
+function progressTrack(percent: number | null, compact: boolean, label: string): HTMLElement {
   const track = document.createElement("span");
   track.className = `teti-ai-progress${compact ? " is-compact" : ""}`;
   track.setAttribute("role", "progressbar");

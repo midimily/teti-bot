@@ -56,8 +56,8 @@ export interface ProfileValidationReport {
 
 export async function resolveTetiProfile(env: NodeJS.ProcessEnv = process.env): Promise<TetiProfile> {
   const explicitRoot = env[TETI_PROFILE_DIR];
-  const root = normalizeProfileRoot(explicitRoot ?? defaultProductionProfileRoot());
-  const productionRoot = normalizeProfileRoot(defaultProductionProfileRoot());
+  const productionRoot = normalizeProfileRoot(defaultProductionProfileRoot(env));
+  const root = normalizeProfileRoot(explicitRoot ?? productionRoot);
   const storeDir = join(root, "store-v2");
   const networkStateRoot = join(storeDir, "network");
   const profile: TetiProfile = {
@@ -169,7 +169,7 @@ export function createProfiledAccountManager(
 export async function validateAuthorizedProvisioningProfile(
   env: NodeJS.ProcessEnv = process.env
 ): Promise<ProfileValidationReport> {
-  if (env[TETI_DESKTOP_NATIVE_PROVISIONING] !== "1" || env[TETI_PROFILE_DIR]) {
+  if (env[TETI_DESKTOP_NATIVE_PROVISIONING] !== "1") {
     return validateRealProvisioningProfile(env);
   }
 
@@ -300,7 +300,10 @@ function normalizeProfileRoot(root: string): string {
   return normalized;
 }
 
-function defaultProductionProfileRoot(): string {
+function defaultProductionProfileRoot(env: NodeJS.ProcessEnv): string {
+  if (env[TETI_DESKTOP_NATIVE_PROVISIONING] === "1" && env[TETI_PROFILE_DIR]) {
+    return env[TETI_PROFILE_DIR];
+  }
   return join(homedir(), ".teti");
 }
 

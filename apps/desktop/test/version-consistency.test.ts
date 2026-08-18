@@ -28,7 +28,7 @@ test("application version sources and generated lock metadata stay aligned", asy
   ];
 
   assert.equal(typeof versions[0], "string");
-  assert.match(versions[0] as string, /^\d+\.\d+\.\d+$/);
+  assert.match(versions[0] as string, /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/);
   assert.deepEqual(versions, Array(versions.length).fill(versions[0]));
 });
 

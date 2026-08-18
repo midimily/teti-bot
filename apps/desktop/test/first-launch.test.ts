@@ -8,6 +8,9 @@ import {
   type FirstLaunchAccountLifecycle
 } from "../src/first-launch/index.ts";
 import { toFirstLaunchViewModel } from "../src/first-launch/view-model.ts";
+import { createDesktopI18n } from "../src/i18n/index.ts";
+
+const zhHans = createDesktopI18n("zh-Hans");
 
 test("no account enters first-launch onboarding and expands notch panel", async () => {
   const lifecycle = new RecordingLifecycle();
@@ -79,7 +82,9 @@ test("name longer than ten Unicode characters is rejected before relay creation"
 
   assert.equal(snapshot.state, "recoverable_error");
   assert.equal(snapshot.error?.kind, "invalid_name");
-  assert.equal(snapshot.error?.message, "名字最多 10 个字符。");
+  assert.equal(snapshot.error?.validationReason, "too_long");
+  assert.equal(snapshot.error?.diagnosticCode, "FL-NAME");
+  assert.equal(toFirstLaunchViewModel(snapshot, zhHans).input?.error, "名字最多 10 个字符。");
   assert.equal(lifecycle.createCalls.length, 0);
 });
 
@@ -175,7 +180,7 @@ test("Chatmail provisioning diagnostics are visible as a compact setup failure c
 
   await coordinator.initialize();
   const snapshot = await coordinator.submitName("Milo");
-  const viewModel = toFirstLaunchViewModel(snapshot);
+  const viewModel = toFirstLaunchViewModel(snapshot, zhHans);
 
   assert.equal(snapshot.error?.kind, "chatmail_provisioning_failure");
   assert.equal(snapshot.error?.diagnosticCode, "CM_RPC_LOCKED");
@@ -197,6 +202,25 @@ test("persistence failure never reaches ready", async () => {
 
   assert.equal(snapshot.state, "fatal_error");
   assert.equal(snapshot.error?.kind, "local_persistence_failure");
+});
+
+test("unknown first-launch failures use a safe kind instead of backend copy", async () => {
+  const lifecycle = new RecordingLifecycle();
+  lifecycle.createHandler = async () => {
+    throw new Error("private /Users/example token=secret");
+  };
+  const coordinator = new FirstLaunchCoordinator({
+    accountLifecycle: lifecycle,
+    notchWindow: new MemoryNotchWindowController()
+  });
+
+  await coordinator.initialize();
+  const snapshot = await coordinator.submitName("Milo");
+
+  assert.equal(snapshot.error?.kind, "unknown_failure");
+  assert.equal(snapshot.error?.diagnosticCode, "FL-UNKNOWN");
+  assert.equal(toFirstLaunchViewModel(snapshot, zhHans).message, "Teti 暂时还没完成。");
+  assert.equal(JSON.stringify(snapshot).includes("/Users/example"), false);
 });
 
 test("a post-save Network failure still completes local initialization", async () => {

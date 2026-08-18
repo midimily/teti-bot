@@ -97,7 +97,9 @@ export class FirstLaunchCoordinator {
     if (!validation.ok) {
       return this.stateMachine.transition({
         type: "creation_failed",
-        error: createFirstLaunchError("invalid_name", validation.message)
+        error: createFirstLaunchError("invalid_name", {
+          validationReason: validation.reason
+        })
       });
     }
     const name = validation.value;
@@ -122,10 +124,7 @@ export class FirstLaunchCoordinator {
     if (!this.accountLifecycle.synchronizeNetworkIdentity) {
       return this.stateMachine.transition({
         type: "registration_retry_failed",
-        error: createFirstLaunchError(
-          "network_identity_failure",
-          "Teti could not finish connecting yet."
-        )
+        error: createFirstLaunchError("network_identity_failure")
       });
     }
 
@@ -192,11 +191,9 @@ export class FirstLaunchCoordinator {
       if (!account) {
         return this.stateMachine.transition({
           type: "registration_retry_failed",
-          error: createFirstLaunchError(
-            "loaded_account_verification_failure",
-            "Teti could not verify the local identity.",
-            false
-          )
+          error: createFirstLaunchError("loaded_account_verification_failure", {
+            recoverable: false
+          })
         });
       }
 
@@ -212,10 +209,7 @@ export class FirstLaunchCoordinator {
       this.diagnostics.warn("first_launch_network_identity_retry_failed", sanitizeError(error));
       return this.stateMachine.transition({
         type: "registration_retry_failed",
-        error: createFirstLaunchError(
-          "network_identity_failure",
-          "Teti could not finish connecting yet."
-        )
+        error: createFirstLaunchError("network_identity_failure")
       });
     }
   }
@@ -225,8 +219,7 @@ export class FirstLaunchCoordinator {
     if (!loaded || loaded.id !== expected.id || loaded.chatmailAccountId !== expected.chatmailAccountId) {
       throw createFirstLaunchError(
         "loaded_account_verification_failure",
-        "Teti could not verify the local identity.",
-        false
+        { recoverable: false }
       );
     }
 
@@ -263,9 +256,9 @@ export function sanitizeError(error: unknown): Record<string, unknown> {
   if (isFirstLaunchError(error)) {
     return {
       kind: error.kind,
-      message: error.message,
       recoverable: error.recoverable,
-      diagnosticCode: error.diagnosticCode
+      diagnosticCode: error.diagnosticCode,
+      validationReason: error.validationReason
     };
   }
 
@@ -288,13 +281,10 @@ function classifyAccountLoadError(error: unknown): FirstLaunchError {
     message.includes("must not contain") ||
     message.includes("required")
   ) {
-    return createFirstLaunchError("corrupt_account", "Teti found local identity data that needs repair.", false);
+    return createFirstLaunchError("corrupt_account", { recoverable: false });
   }
 
-  return createFirstLaunchError(
-    "temporary_account_load_failure",
-    "Teti could not check the local identity yet."
-  );
+  return createFirstLaunchError("temporary_account_load_failure");
 }
 
 function classifyCreationError(error: unknown): FirstLaunchError {
@@ -307,38 +297,31 @@ function classifyCreationError(error: unknown): FirstLaunchError {
   if (diagnosticCode?.startsWith("CM_")) {
     return createFirstLaunchError(
       "chatmail_provisioning_failure",
-      "Chatmail 身份初始化未完成。",
-      true,
-      diagnosticCode
+      { diagnosticCode }
     );
   }
   if (diagnosticCode?.startsWith("LOC_")) {
     return createFirstLaunchError(
       "local_persistence_failure",
-      "Teti 无法安全保存本机身份。",
-      false,
-      diagnosticCode
+      { recoverable: false, diagnosticCode }
     );
   }
   if (/(save|persist|storage|write|rename|EACCES|EPERM|ENOSPC)/i.test(message)) {
     return createFirstLaunchError(
       "local_persistence_failure",
-      "Teti could not safely save its identity.",
-      false
+      { recoverable: false }
     );
   }
 
   if (/(network|fetch|identity|register|ECONN|ENOTFOUND|timeout)/i.test(message)) {
-    return createFirstLaunchError(
-      "network_identity_failure",
-      "Teti could not finish connecting yet."
-    );
+    return createFirstLaunchError("network_identity_failure");
   }
 
-  return createFirstLaunchError(
-    "chatmail_provisioning_failure",
-    "Teti could not finish setting up."
-  );
+  if (/(chatmail|provision|rpc)/i.test(message)) {
+    return createFirstLaunchError("chatmail_provisioning_failure");
+  }
+
+  return createFirstLaunchError("unknown_failure");
 }
 
 function readDiagnosticCode(error: unknown): string | undefined {
@@ -353,7 +336,7 @@ function isFirstLaunchError(error: unknown): error is FirstLaunchError {
     error !== null &&
     "kind" in error &&
     "recoverable" in error &&
-    "message" in error
+    "diagnosticCode" in error
   );
 }
 

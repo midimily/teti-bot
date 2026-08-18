@@ -1,5 +1,8 @@
 import type { TetiAccount, TetiStatus } from "../../../core/account/model.ts";
-import { validateTetiDisplayName } from "../../../core/account/display-name.ts";
+import {
+  InvalidDisplayNameError,
+  validateTetiDisplayName
+} from "../../../core/account/display-name.ts";
 import { TetiAccountManager } from "../../../core/account/manager.ts";
 import {
   LIFECYCLE_MAX_LINE_BYTES,
@@ -47,6 +50,7 @@ import type {
 } from "../../../core/memory/types.ts";
 import type { LocalReleaseStatus } from "../../../core/release/policy.ts";
 import type { DelegationTargetSelection } from "../../../core/delegation/types.ts";
+import { isSafeAbsoluteLocalPath } from "../../../core/application/local-path.ts";
 
 export interface LifecycleSidecarDependencies {
   loadTetiAccount(): Promise<TetiAccount | null>;
@@ -514,11 +518,11 @@ function validateLifecycleRequest(
 
 function validateName(value: unknown): string {
   if (typeof value !== "string") {
-    throw new Error("Teti display name is required.");
+    throw new InvalidDisplayNameError("empty");
   }
 
   const validation = validateTetiDisplayName(value);
-  if (!validation.ok) throw new Error(validation.message);
+  if (!validation.ok) throw new InvalidDisplayNameError(validation.reason);
   return validation.value;
 }
 
@@ -648,10 +652,7 @@ function validateDelegationSelections(value: unknown): DelegationTargetSelection
 }
 
 function validateAbsoluteTaskImagePath(value: unknown): string {
-  if (typeof value !== "string"
-    || !value.startsWith("/")
-    || value.includes("\0")
-    || value.length > 4_096) {
+  if (!isSafeAbsoluteLocalPath(value)) {
     throw new Error("Task image path is invalid.");
   }
   return value;

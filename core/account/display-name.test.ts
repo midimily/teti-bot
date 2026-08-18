@@ -13,9 +13,22 @@ test("Teti display names accept one to ten Unicode characters", () => {
     value: "薄荷Teti123",
     characterCount: 9
   });
-  assert.equal(validateTetiDisplayName("一二三四五六七八九十甲").ok, false);
-  assert.equal(validateTetiDisplayName("  ").ok, false);
-  assert.equal(validateTetiDisplayName("Mint\nTeti").ok, false);
+  assert.deepEqual(validateTetiDisplayName("一二三四五六七八九十甲"), {
+    ok: false,
+    reason: "too_long",
+    characterCount: 11,
+    maximumCharacters: TETI_DISPLAY_NAME_MAX_CHARACTERS
+  });
+  assert.deepEqual(validateTetiDisplayName("  "), {
+    ok: false,
+    reason: "empty",
+    characterCount: 0
+  });
+  assert.deepEqual(validateTetiDisplayName("Mint\nTeti"), {
+    ok: false,
+    reason: "control_character",
+    characterCount: 9
+  });
 });
 
 test("Teti display name truncation does not split Unicode code points", () => {

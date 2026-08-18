@@ -6,12 +6,21 @@ import type {
 import { emptyChildMemorySnapshot } from "../../../../core/memory/types.ts";
 import { validateChildMemorySnapshot } from "../../../../core/memory/validation.ts";
 import type { LifecycleBridgeClient } from "../provisioning/bridge-lifecycle.ts";
+import { readStableErrorCode } from "../errors/stable-error-code.ts";
+
+export type MemoryUiErrorCode =
+  | "read_failed"
+  | "operation_failed"
+  | "authorization_required"
+  | "source_invalid"
+  | "scope_invalid"
+  | "store_full";
 
 export interface MemoryControllerSnapshot {
   memory: ChildMemorySnapshot;
   busy: boolean;
   busyKey?: string;
-  error?: string;
+  errorCode?: MemoryUiErrorCode;
   exportResult?: MemoryExportResult;
 }
 
@@ -53,7 +62,7 @@ export class MemoryController {
       if (this.disposed) return;
       this.snapshotValue.memory = memory;
     } catch {
-      if (!this.disposed) this.snapshotValue.error = "Child Memory 暂时无法读取。";
+      if (!this.disposed) this.snapshotValue.errorCode = "read_failed";
     }
   }
 
@@ -119,13 +128,13 @@ export class MemoryController {
     if (this.snapshotValue.busy || this.disposed) return;
     this.snapshotValue.busy = true;
     this.snapshotValue.busyKey = key;
-    this.snapshotValue.error = undefined;
+    this.snapshotValue.errorCode = undefined;
     this.snapshotValue.exportResult = undefined;
     this.onChange();
     try {
       await operation();
     } catch (error) {
-      this.snapshotValue.error = memoryErrorMessage(error);
+      this.snapshotValue.errorCode = memoryErrorCode(error);
     } finally {
       this.snapshotValue.busy = false;
       this.snapshotValue.busyKey = undefined;
@@ -206,7 +215,9 @@ export class MockChildMemoryClient implements ChildMemoryClient {
   }
 
   async saveTask(): Promise<ChildMemorySnapshot> {
-    throw new Error("Mock 模式没有可保存的本机任务结果。");
+    const error = new Error("MEMORY_SOURCE_INVALID");
+    error.name = "MEMORY_SOURCE_INVALID";
+    throw error;
   }
 
   async delete(memoryId: string): Promise<boolean> {
@@ -219,21 +230,25 @@ export class MockChildMemoryClient implements ChildMemoryClient {
     return {
       schemaVersion: 1,
       fileName: "teti-child-memory-mock.json",
-      path: "Mock 模式不写入磁盘",
+      path: "mock://memory-export-not-written",
       recordCount: this.memory.records.length,
       createdAt: new Date().toISOString()
     };
   }
 }
 
-function memoryErrorMessage(error: unknown): string {
-  if (!(error instanceof Error)) return "Child Memory 操作失败。";
-  const known: Record<string, string> = {
-    MEMORY_OPERATION_FAILED: "本机 Child Memory 操作未完成，请检查授权与任务状态后重试。",
-    MEMORY_AUTHORIZATION_REQUIRED: "请先显式开启对应的长期 Memory 授权。",
-    MEMORY_SOURCE_INVALID: "当前任务没有可保存的本机文字结果。",
-    MEMORY_SCOPE_INVALID: "当前 Workspace 不允许写入这类 Memory。",
-    MEMORY_STORE_FULL: "Child Memory 已达到本机记录上限。"
-  };
-  return known[error.name] ?? (error.message || "Child Memory 操作失败。");
+function memoryErrorCode(error: unknown): MemoryUiErrorCode {
+  switch (readStableErrorCode(error)) {
+    case "MEMORY_AUTHORIZATION_REQUIRED":
+      return "authorization_required";
+    case "MEMORY_SOURCE_INVALID":
+      return "source_invalid";
+    case "MEMORY_SCOPE_INVALID":
+      return "scope_invalid";
+    case "MEMORY_STORE_FULL":
+      return "store_full";
+    case "MEMORY_OPERATION_FAILED":
+    default:
+      return "operation_failed";
+  }
 }

@@ -14,6 +14,8 @@ import type {
   DelegationTargetOption,
   DelegationTargetSelection
 } from "../../../../core/delegation/types.ts";
+import { readStableErrorCode } from "../errors/stable-error-code.ts";
+import type { AppMessages } from "../i18n/index.ts";
 
 export const TASK_REFRESH_DELAYS_MS = {
   visibleActive: 2_000,
@@ -32,7 +34,21 @@ const EMPTY_SUMMARY: CollaborationTaskSummarySnapshot = {
 
 export type TaskWorkspaceScreen = "inbox" | "compose" | "detail";
 
+export type TaskUiErrorCode =
+  | "draft_incomplete"
+  | "operation_timeout"
+  | "transport_failed"
+  | "result_image_unavailable"
+  | "result_image_invalid"
+  | "result_image_unsupported"
+  | "result_image_open_failed"
+  | "result_image_reveal_failed"
+  | "result_image_save_failed"
+  | "result_image_action_unsupported"
+  | "operation_failed";
+
 export interface TaskDraftImage extends StagedTaskImageDto {}
+export type TaskNativeDialogCopy = AppMessages["nativeDialogs"]["taskImages"];
 
 export interface TaskControllerSnapshot {
   open: boolean;
@@ -52,7 +68,7 @@ export interface TaskControllerSnapshot {
     executionMode: "single_stage" | "long_horizon";
   };
   busy: boolean;
-  error?: string;
+  errorCode?: TaskUiErrorCode;
 }
 
 export interface TaskCloseOptions {
@@ -189,7 +205,7 @@ export class TaskController {
   openInbox(): void {
     this.snapshotValue.open = true;
     this.snapshotValue.screen = "inbox";
-    delete this.snapshotValue.error;
+    delete this.snapshotValue.errorCode;
     this.onChange();
     void this.notchWindow.setMode("task", "open-task-inbox").catch(() => undefined);
     void this.refresh();
@@ -201,17 +217,17 @@ export class TaskController {
     this.snapshotValue.draft.connectionRequestId ||= connectionRequestId;
     this.snapshotValue.draft.capabilityId ||= capabilityId;
     this.snapshotValue.draft.offerId ||= offerId;
-    delete this.snapshotValue.error;
+    delete this.snapshotValue.errorCode;
     this.onChange();
     this.scheduleNextRefresh();
     void this.notchWindow.setMode("task", "compose-task").catch(() => undefined);
   }
 
   close(reason = "close-task-workspace", options: TaskCloseOptions = {}): void {
-    if (!this.snapshotValue.open && this.snapshotValue.error === undefined) return;
+    if (!this.snapshotValue.open && this.snapshotValue.errorCode === undefined) return;
     this.outsideDismissPending = false;
     this.snapshotValue.open = false;
-    delete this.snapshotValue.error;
+    delete this.snapshotValue.errorCode;
     if (options.notify !== false) this.onChange();
     this.scheduleNextRefresh();
     if (options.updateWindowMode !== false) {
@@ -267,7 +283,7 @@ export class TaskController {
     this.snapshotValue.delegationSelections = [];
     this.snapshotValue.selectedImagePaths = {};
     this.imageResolutionFailures.clear();
-    delete this.snapshotValue.error;
+    delete this.snapshotValue.errorCode;
     this.onChange();
     this.scheduleNextRefresh();
   }
@@ -281,7 +297,7 @@ export class TaskController {
     if (input.capabilityId !== undefined) this.snapshotValue.draft.capabilityId = input.capabilityId;
     if (input.text !== undefined) this.snapshotValue.draft.text = [...input.text].slice(0, 6_000).join("");
     if (input.executionMode !== undefined) this.snapshotValue.draft.executionMode = input.executionMode;
-    delete this.snapshotValue.error;
+    delete this.snapshotValue.errorCode;
   }
 
   canSendDraft(): boolean {
@@ -301,10 +317,13 @@ export class TaskController {
     this.onChange();
   }
 
-  async attachImages(): Promise<void> {
+  async attachImages(dialogCopy: TaskNativeDialogCopy): Promise<void> {
     if (this.snapshotValue.busy || this.snapshotValue.draft.images.length >= 4) return;
     await this.run(async () => {
-      const paths = await this.tauri.invoke<string[]>("pick_task_images");
+      const paths = await this.tauri.invoke<string[]>("pick_task_images", {
+        title: dialogCopy.selectTitle,
+        filterName: dialogCopy.selectFilter
+      });
       const remaining = 4 - this.snapshotValue.draft.images.length;
       for (const path of paths.slice(0, remaining)) {
         const staged = await this.client.stageImage(path);
@@ -318,7 +337,7 @@ export class TaskController {
   async send(): Promise<void> {
     const draft = this.snapshotValue.draft;
     if (!draft.connectionRequestId || !draft.offerId || !draft.capabilityId || !draft.text.trim()) {
-      this.snapshotValue.error = "请选择已建联的 Teti 和能力，并写明任务。";
+      this.snapshotValue.errorCode = "draft_incomplete";
       this.onChange();
       return;
     }
@@ -363,8 +382,12 @@ export class TaskController {
     return this.run(() => this.tauri.invoke("reveal_task_result_image", { path }));
   }
 
-  saveResultImage(path: string): Promise<void> {
-    return this.run(() => this.tauri.invoke("save_task_result_image", { path }));
+  saveResultImage(path: string, dialogCopy: TaskNativeDialogCopy): Promise<void> {
+    return this.run(() => this.tauri.invoke("save_task_result_image", {
+      path,
+      title: dialogCopy.saveTitle,
+      filterName: dialogCopy.saveFilter
+    }));
   }
 
   async select(taskId: string): Promise<void> {
@@ -398,14 +421,14 @@ export class TaskController {
       Math.min(this.snapshotValue.delegationSelections.length, this.snapshotValue.delegationTargets.length - 1)
     ]!;
     this.snapshotValue.delegationSelections.push(delegationSelection(target));
-    delete this.snapshotValue.error;
+    delete this.snapshotValue.errorCode;
     this.onChange();
   }
 
   removeDelegationStep(index: number): void {
     if (this.snapshotValue.delegationSelections.length <= 1) return;
     this.snapshotValue.delegationSelections.splice(index, 1);
-    delete this.snapshotValue.error;
+    delete this.snapshotValue.errorCode;
     this.onChange();
   }
 
@@ -415,7 +438,7 @@ export class TaskController {
     );
     if (!target || index < 0 || index >= this.snapshotValue.delegationSelections.length) return;
     this.snapshotValue.delegationSelections[index] = delegationSelection(target);
-    delete this.snapshotValue.error;
+    delete this.snapshotValue.errorCode;
     this.onChange();
   }
 
@@ -710,12 +733,12 @@ export class TaskController {
       this.timer = undefined;
     }
     this.snapshotValue.busy = true;
-    delete this.snapshotValue.error;
+    delete this.snapshotValue.errorCode;
     this.onChange();
     try {
       await operation();
     } catch (error) {
-      this.snapshotValue.error = taskErrorMessage(error);
+      this.snapshotValue.errorCode = taskErrorCode(error);
     } finally {
       this.snapshotValue.busy = false;
       if (this.outsideDismissPending && this.snapshotValue.open && !this.disposed) {
@@ -896,13 +919,31 @@ function taskRecordNeedsFrequentRefresh(record: CollaborationTaskTransportRecord
       && !(record.artifacts?.length));
 }
 
-function taskErrorMessage(error: unknown): string {
-  if (error instanceof Error) {
-    if (error.name === "REQUEST_TIMEOUT") return "操作超时，Runtime 会继续保留任务状态。";
-    if (error.name === "TASK_TRANSPORT_FAILED") return error.message || "暂时无法处理这个任务。";
-    return error.message || "暂时无法处理这个任务。";
+function taskErrorCode(error: unknown): TaskUiErrorCode {
+  switch (readStableErrorCode(error)) {
+    case "REQUEST_TIMEOUT":
+      return "operation_timeout";
+    case "TASK_TRANSPORT_FAILED":
+      return "transport_failed";
+    case "TASK_RESULT_IMAGE_UNAVAILABLE":
+      return "result_image_unavailable";
+    case "TASK_RESULT_IMAGE_INVALID":
+    case "TASK_RESULT_IMAGE_OUTSIDE_SCOPE":
+      return "result_image_invalid";
+    case "TASK_RESULT_IMAGE_UNSUPPORTED":
+      return "result_image_unsupported";
+    case "TASK_RESULT_IMAGE_OPEN_FAILED":
+      return "result_image_open_failed";
+    case "TASK_RESULT_IMAGE_REVEAL_FAILED":
+      return "result_image_reveal_failed";
+    case "TASK_RESULT_IMAGE_SAVE_FAILED":
+    case "TASK_RESULT_IMAGE_SAVE_DESTINATION_INVALID":
+      return "result_image_save_failed";
+    case "TASK_RESULT_IMAGE_ACTION_UNSUPPORTED":
+      return "result_image_action_unsupported";
+    default:
+      return "operation_failed";
   }
-  return "暂时无法处理这个任务。";
 }
 
 export function taskImageParts(images: readonly TaskDraftImage[]): TaskImagePart[] {

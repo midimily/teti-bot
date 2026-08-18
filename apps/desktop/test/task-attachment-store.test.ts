@@ -1,14 +1,25 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, stat, utimes, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, stat, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { FileTaskAttachmentStore } from "../lifecycle-sidecar/runtime/tasks/attachments.ts";
+import {
+  FileTaskAttachmentStore,
+  isAbsoluteTaskAttachmentPath
+} from "../lifecycle-sidecar/runtime/tasks/attachments.ts";
 
 const ONE_PIXEL_PNG = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
   "base64"
 );
+
+test("Task attachment paths use the host platform absolute-path rules", () => {
+  assert.equal(isAbsoluteTaskAttachmentPath("/Users/teti/image.png", "darwin"), true);
+  assert.equal(isAbsoluteTaskAttachmentPath("relative/image.png", "darwin"), false);
+  assert.equal(isAbsoluteTaskAttachmentPath("C:\\Users\\teti\\image.png", "win32"), true);
+  assert.equal(isAbsoluteTaskAttachmentPath("C:image.png", "win32"), false);
+  assert.equal(isAbsoluteTaskAttachmentPath("\\\\server\\share\\image.png", "win32"), false);
+});
 
 test("Task attachment store stages a private bounded PNG without exposing its source path", async () => {
   const root = await mkdtemp(join(tmpdir(), "teti-task-attachments-"));
@@ -26,6 +37,23 @@ test("Task attachment store stages a private bounded PNG without exposing its so
   assert.equal((await stat(staged.path)).mode & 0o777, 0o600);
   assert.deepEqual(await readFile(staged.path), ONE_PIXEL_PNG);
   assert.deepEqual((await store.getStagedImage(staged.part)).part, staged.part);
+});
+
+test("Task attachment writes reject a symlink or junction that leaves the store", async () => {
+  const root = await mkdtemp(join(tmpdir(), "teti-task-containment-"));
+  const source = join(root, "selected.png");
+  const storeRoot = join(root, "private");
+  const outside = join(root, "outside");
+  await writeFile(source, ONE_PIXEL_PNG);
+  await mkdir(storeRoot, { recursive: true });
+  await mkdir(outside, { recursive: true });
+  await symlink(outside, join(storeRoot, "staged"), process.platform === "win32" ? "junction" : "dir");
+
+  await assert.rejects(
+    () => new FileTaskAttachmentStore(storeRoot).stageImage(source),
+    /TASK_ATTACHMENT_PATH_OUTSIDE_STORE/
+  );
+  await assert.rejects(() => stat(join(outside, "unexpected.png")), /ENOENT/);
 });
 
 test("Task attachment ingestion is digest-bound and idempotent", async () => {

@@ -63,30 +63,58 @@ export function releaseStateForPolicy(
 export function compareTetiVersions(left: string, right: string): number {
   const a = parseTetiVersion(left);
   const b = parseTetiVersion(right);
-  for (let index = 0; index < a.length; index += 1) {
-    const difference = a[index]! - b[index]!;
+  for (let index = 0; index < a.core.length; index += 1) {
+    const difference = a.core[index]! - b.core[index]!;
     if (difference !== 0) return difference < 0 ? -1 : 1;
+  }
+  if (a.prerelease.length === 0 || b.prerelease.length === 0) {
+    if (a.prerelease.length === b.prerelease.length) return 0;
+    return a.prerelease.length === 0 ? 1 : -1;
+  }
+  const length = Math.max(a.prerelease.length, b.prerelease.length);
+  for (let index = 0; index < length; index += 1) {
+    const leftPart = a.prerelease[index];
+    const rightPart = b.prerelease[index];
+    if (leftPart === undefined || rightPart === undefined) {
+      return leftPart === undefined ? -1 : 1;
+    }
+    if (leftPart === rightPart) continue;
+    const leftNumeric = /^\d+$/.test(leftPart);
+    const rightNumeric = /^\d+$/.test(rightPart);
+    if (leftNumeric && rightNumeric) return Number(leftPart) < Number(rightPart) ? -1 : 1;
+    if (leftNumeric !== rightNumeric) return leftNumeric ? -1 : 1;
+    return leftPart < rightPart ? -1 : 1;
   }
   return 0;
 }
 
 export function isTetiVersion(value: unknown): value is string {
-  return typeof value === "string" && /^\d+\.\d+\.\d+$/.test(value);
+  return typeof value === "string"
+    && /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*))?$/.test(value);
 }
 
 function requireTetiVersion(value: unknown): string {
-  if (!isTetiVersion(value)) throw new Error("Teti version must use major.minor.patch.");
+  if (!isTetiVersion(value)) throw new Error("Teti version must use semantic versioning.");
   parseTetiVersion(value);
   return value;
 }
 
-function parseTetiVersion(value: string): [number, number, number] {
-  if (!isTetiVersion(value)) throw new Error("Teti version must use major.minor.patch.");
-  const parts = value.split(".").map(Number);
+function parseTetiVersion(value: string): {
+  core: [number, number, number];
+  prerelease: string[];
+} {
+  if (!isTetiVersion(value)) throw new Error("Teti version must use semantic versioning.");
+  const separator = value.indexOf("-");
+  const core = separator === -1 ? value : value.slice(0, separator);
+  const prerelease = separator === -1 ? "" : value.slice(separator + 1);
+  const parts = core.split(".").map(Number);
   if (parts.some((part) => !Number.isSafeInteger(part))) {
     throw new Error("Teti version component is invalid.");
   }
-  return parts as [number, number, number];
+  return {
+    core: parts as [number, number, number],
+    prerelease: prerelease ? prerelease.split(".") : []
+  };
 }
 
 function requireIsoTimestamp(value: unknown, label: string): string {

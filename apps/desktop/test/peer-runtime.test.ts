@@ -717,7 +717,7 @@ test("a confirmed 0.1 peer is reachable but explicitly requires upgrade and cann
     connectionRequestId: result.connections[0]!.requestId,
     capabilityId: "code-analysis",
     text: "Do not deliver this to 0.1."
-  }), /must upgrade to Beta 0.3.9/);
+  }), /must upgrade to Beta 0.4.0/);
   assert.equal(relay.peek(accountB.address).filter(isTaskRequestMessage).length, 0);
 });
 
@@ -1429,7 +1429,12 @@ test("a deferred generated image Artifact reaches the requester after slow downl
 
     await runtimeB.poll();
     await runtimeB.approveTask(sent.request.taskId);
-    await waitUntil(() => relay.pendingAttachmentCount(accountA.address) > 0);
+    await waitUntil(() => relay.pendingAttachmentCount(accountA.address) > 0
+      && relay.peek(accountA.address).some((message) => {
+        if (applicationType(message) !== "teti.task.status" || !message.text) return false;
+        const envelope = parseApplicationEnvelope(message.text);
+        return (envelope.payload as { state?: string }).state === "completed";
+      }));
     await runtimeA.poll();
     const waiting = await runtimeA.getTask(sent.request.taskId);
     assert.equal(waiting.state, "completed");
@@ -1966,7 +1971,7 @@ test("an auth-required Task still expires instead of remaining actionable foreve
   assert.equal(expired.safeErrorCode, "TASK_EXPIRED");
 });
 
-test("Beta 0.3.9 refuses Task delivery to a peer advertising only v1", async () => {
+test("Beta 0.4.0 refuses Task delivery to a peer advertising only v1", async () => {
   const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
   const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
   const directory = new StaticDirectory([toIdentity(accountA), toIdentity(accountB)]);

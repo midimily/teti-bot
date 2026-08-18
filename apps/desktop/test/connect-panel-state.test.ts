@@ -1,18 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  CONNECT_PANEL_CONNECTING,
-  CONNECT_PANEL_PLACEHOLDER,
   initialConnectPanelSnapshot,
   transitionConnectPanel,
   type ConnectPanelSnapshot
 } from "../src/connections/connect-panel-state.ts";
 
 test("connect panel starts idle without reserving message state", () => {
-  assert.equal(CONNECT_PANEL_PLACEHOLDER, "*********（teti.bot 社区9位ID）");
   assert.deepEqual(initialConnectPanelSnapshot(), {
     state: "idle",
-    message: "",
     messageTone: "hint"
   });
 });
@@ -23,7 +19,6 @@ test("eyes open the editor through one ordered opening transition", () => {
 
   assert.deepEqual(opening, {
     state: "opening",
-    message: "",
     messageTone: "hint"
   });
   assert.equal(transitionConnectPanel(opening, { type: "EYES_CLICKED" }), opening);
@@ -38,7 +33,7 @@ test("editing, connecting, success and closing use one deterministic state path"
   snapshot = transitionConnectPanel(snapshot, { type: "SUBMIT" });
   assert.deepEqual(snapshot, {
     state: "connecting",
-    message: CONNECT_PANEL_CONNECTING,
+    messageCode: "connecting",
     messageTone: "progress"
   });
 
@@ -47,11 +42,11 @@ test("editing, connecting, success and closing use one deterministic state path"
 
   snapshot = transitionConnectPanel(snapshot, {
     type: "CONNECT_SUCCEEDED",
-    message: "已成功建联"
+    messageCode: "connected"
   });
   assert.deepEqual(snapshot, {
     state: "success",
-    message: "已成功建联",
+    messageCode: "connected",
     messageTone: "success"
   });
 
@@ -67,18 +62,17 @@ test("editing, connecting, success and closing use one deterministic state path"
 test("errors retain a recoverable editor and clear as soon as input changes", () => {
   let snapshot = transitionConnectPanel(editingSnapshot(), {
     type: "VALIDATION_FAILED",
-    message: "请输入正确的 9 位 ID"
+    messageCode: "invalid_public_id"
   });
   assert.deepEqual(snapshot, {
     state: "error",
-    message: "请输入正确的 9 位 ID",
+    messageCode: "invalid_public_id",
     messageTone: "error"
   });
 
   snapshot = transitionConnectPanel(snapshot, { type: "INPUT_CHANGED" });
   assert.deepEqual(snapshot, {
     state: "editing",
-    message: "",
     messageTone: "hint"
   });
 });
@@ -86,15 +80,15 @@ test("errors retain a recoverable editor and clear as soon as input changes", ()
 test("editing, success and error can close while connecting cannot", () => {
   for (const snapshot of [
     editingSnapshot(),
-    { state: "success", message: "已成功建联", messageTone: "success" } as const,
-    { state: "error", message: "连接失败", messageTone: "error" } as const
+    { state: "success", messageCode: "connected", messageTone: "success" } as const,
+    { state: "error", messageCode: "connection_failed", messageTone: "error" } as const
   ]) {
     assert.equal(transitionConnectPanel(snapshot, { type: "ESCAPE_PRESSED" }).state, "closing");
   }
 
   const connecting: ConnectPanelSnapshot = {
     state: "connecting",
-    message: CONNECT_PANEL_CONNECTING,
+    messageCode: "connecting",
     messageTone: "progress"
   };
   assert.equal(transitionConnectPanel(connecting, { type: "CLOSE_REQUESTED" }), connecting);
@@ -103,7 +97,6 @@ test("editing, success and error can close while connecting cannot", () => {
 function editingSnapshot(): ConnectPanelSnapshot {
   return {
     state: "editing",
-    message: "",
     messageTone: "hint"
   };
 }

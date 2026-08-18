@@ -1,0 +1,47 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "app": {
+    "macOSPrivateApi": true,
+    "security": {
+      "assetProtocol": {
+        "enable": true,
+        "scope": [
+          "$APPLOCALDATA/profile/store-v2/task-attachments/input/**",
+          "$APPLOCALDATA/profile/store-v2/task-attachments/artifact/**"
+        ]
+      }
+    }
+  },
+  "bundle": {
+    "targets": ["nsis"],
+    "resources": {
+      "resources/lifecycle-sidecar/main.mjs": "lifecycle-sidecar/main.mjs",
+      "resources/lifecycle-sidecar/codex-image-runner.mjs": "lifecycle-sidecar/codex-image-runner.mjs",
+      "resources/runtime/node.exe": "runtime/node.exe",
+      "resources/runtime/deltachat-rpc-server.exe": "runtime/deltachat-rpc-server.exe"
+    },
+    "icon": ["icons/icon.ico"],
+    "windows": {
+      "allowDowngrades": false,
+      "digestAlgorithm": "sha256",
+      "signCommand": {
+        "cmd": "node",
+        "args": ["--experimental-strip-types", "scripts/windows-sign-command.ts", "%1"]
+      },
+      "webviewInstallMode": {
+        "type": "embedBootstrapper",
+        "silent": true
+      },
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": ["English", "SimpChinese"],
+        "displayLanguageSelector": false,
+        "installerIcon": "icons/icon.ico",
+        "uninstallerIcon": "icons/icon.ico",
+        "compression": "lzma",
+        "startMenuFolder": "Teti",
+        "installerHooks": "nsis/installer-hooks.nsh"
+      }
+    }
+  }
+}

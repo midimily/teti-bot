@@ -3,7 +3,7 @@ use serde_json::Value;
 use std::{
     collections::HashMap,
     env,
-    fs::{create_dir_all, metadata, rename, OpenOptions},
+    fs::{create_dir_all, metadata, remove_file, rename, OpenOptions},
     io::{self, BufRead, BufReader, Write},
     path::PathBuf,
     process::{Child, ChildStdin, Command, Stdio},
@@ -17,6 +17,10 @@ use std::{
 };
 use tauri::{AppHandle, Manager};
 
+use crate::platform;
+#[cfg(target_os = "windows")]
+use crate::windows_job::WindowsJob;
+
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
@@ -25,6 +29,7 @@ const MAX_LINE_BYTES: usize = 64 * 1024;
 const MAX_RESPONSE_LINE_BYTES: usize = 128 * 1024;
 const MAX_LOG_BYTES: u64 = 1024 * 1024;
 const SIDECAR_GRACEFUL_SHUTDOWN: Duration = Duration::from_millis(3_000);
+#[cfg(unix)]
 const SIDECAR_TERMINATE_GRACE: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -66,6 +71,19 @@ struct ManagedSidecar {
     child: Child,
     stdin: Option<ChildStdin>,
     pending: PendingResponses,
+    #[cfg(target_os = "windows")]
+    job: WindowsJob,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopRuntimeDiagnostics {
+    platform: platform::DesktopPlatform,
+    architecture: platform::DesktopArchitecture,
+    lifecycle_runtime: platform::LifecycleRuntime,
+    profile_security: String,
+    sidecar_state: &'static str,
+    descendant_ownership: &'static str,
 }
 
 type PendingResponses = Arc<Mutex<HashMap<String, SyncSender<LifecycleCommandResponse>>>>;
@@ -78,6 +96,20 @@ pub async fn lifecycle_request(
 ) -> Result<LifecycleCommandResponse, ()> {
     if let Err(error) = validate_request(&request) {
         return Ok(failure(Some(request.id), error));
+    }
+    if matches!(
+        platform::info().lifecycle_runtime,
+        platform::LifecycleRuntime::Mock
+    ) {
+        return Ok(failure(
+            Some(request.id),
+            bridge_error(
+                "LIFECYCLE_RUNTIME_UNAVAILABLE",
+                "The lifecycle Runtime is not included in this desktop shell.",
+                false,
+                None,
+            ),
+        ));
     }
 
     let request_id = request.id.clone();
@@ -96,6 +128,35 @@ pub async fn lifecycle_request(
             ),
         },
     )
+}
+
+#[tauri::command]
+pub fn desktop_runtime_diagnostics(
+    app: AppHandle,
+    bridge: tauri::State<'_, LifecycleBridge>,
+) -> DesktopRuntimeDiagnostics {
+    let info = platform::info();
+    let profile_security = platform::profile_security_status(&app)
+        .map(|status| status.as_str().to_string())
+        .unwrap_or_else(|_| "unavailable".to_string());
+    let sidecar_state = bridge
+        .process
+        .lock()
+        .ok()
+        .and_then(|process| process.as_ref().map(|_| "running"))
+        .unwrap_or("stopped");
+    DesktopRuntimeDiagnostics {
+        platform: info.platform,
+        architecture: info.architecture,
+        lifecycle_runtime: info.lifecycle_runtime,
+        profile_security,
+        sidecar_state,
+        descendant_ownership: if cfg!(target_os = "windows") {
+            "job-object"
+        } else {
+            "process-group"
+        },
+    }
 }
 
 impl LifecycleBridge {
@@ -278,17 +339,32 @@ impl ManagedSidecar {
         fail_pending_responses(&self.pending);
         self.stdin.take();
         if wait_for_child_exit(&mut self.child, SIDECAR_GRACEFUL_SHUTDOWN) {
+            append_sanitized_log_line("bridge", "event=runtime.shutdown state=clean");
             return;
         }
 
-        signal_process_group(self.child.id(), 15);
-        if wait_for_child_exit(&mut self.child, SIDECAR_TERMINATE_GRACE) {
+        #[cfg(target_os = "windows")]
+        {
+            append_sanitized_log_line(
+                "bridge",
+                "event=runtime.shutdown state=forced ownership=job-object",
+            );
+            self.job.terminate();
+            let _ = self.child.wait();
             return;
         }
 
-        signal_process_group(self.child.id(), 9);
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        #[cfg(unix)]
+        {
+            signal_process_group(self.child.id(), 15);
+            if wait_for_child_exit(&mut self.child, SIDECAR_TERMINATE_GRACE) {
+                return;
+            }
+
+            signal_process_group(self.child.id(), 9);
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
     }
 }
 
@@ -316,17 +392,20 @@ fn signal_process_group(pid: u32, signal: i32) {
     }
 }
 
-#[cfg(not(unix))]
-fn signal_process_group(_pid: u32, _signal: i32) {}
-
 fn spawn_sidecar(app: &AppHandle) -> Result<ManagedSidecar, String> {
+    let platform_info = platform::info();
+    let platform_paths = platform::paths(app)?;
     let sidecar_path = resolve_sidecar_path(app)?;
     let resource_dir = app
         .path()
         .resource_dir()
         .map_err(|error| error.to_string())?;
-    let bundled_node = resource_dir.join("runtime").join("node");
-    let bundled_rpc = resource_dir.join("runtime").join("deltachat-rpc-server");
+    let bundled_node = resource_dir
+        .join("runtime")
+        .join(runtime_executable_name("node"));
+    let bundled_rpc = resource_dir
+        .join("runtime")
+        .join(runtime_executable_name("deltachat-rpc-server"));
     let node_path = env::var("TETI_NODE_PATH")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
@@ -342,6 +421,13 @@ fn spawn_sidecar(app: &AppHandle) -> Result<ManagedSidecar, String> {
         .arg(sidecar_path)
         .env("TETI_DESKTOP_NATIVE_PROVISIONING", "1")
         .env("TETI_PROVISIONING_MODE", "real")
+        .env("TETI_DESKTOP_PLATFORM", platform_info.platform.as_str())
+        .env("TETI_PROFILE_DIR", platform_paths.profile_root)
+        .env("TETI_DESKTOP_LOG_DIR", platform_paths.log_dir)
+        .env(
+            "TETI_PROFILE_SECURITY",
+            platform::profile_security_status(app)?.as_str(),
+        )
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -351,7 +437,31 @@ fn spawn_sidecar(app: &AppHandle) -> Result<ManagedSidecar, String> {
         command.env("TETI_DELTACHAT_RPC_PATH", bundled_rpc);
     }
     configure_node_proxy(&mut command);
+    #[cfg(target_os = "windows")]
+    let job = WindowsJob::new()?;
+    append_sanitized_log_line(
+        "bridge",
+        &format!(
+            "event=runtime.spawn state=starting platform={} ownership={}",
+            platform_info.platform.as_str(),
+            if cfg!(target_os = "windows") {
+                "job-object"
+            } else {
+                "process-group"
+            }
+        ),
+    );
     let mut child = command.spawn().map_err(|error| error.to_string())?;
+    #[cfg(target_os = "windows")]
+    if let Err(error) = job.assign(&child) {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(error);
+    }
+    append_sanitized_log_line(
+        "bridge",
+        &format!("event=runtime.spawn state=owned pid={}", child.id()),
+    );
 
     let stdin = child
         .stdin
@@ -384,7 +494,17 @@ fn spawn_sidecar(app: &AppHandle) -> Result<ManagedSidecar, String> {
         child,
         stdin: Some(stdin),
         pending,
+        #[cfg(target_os = "windows")]
+        job,
     })
+}
+
+fn runtime_executable_name(base: &str) -> String {
+    if cfg!(target_os = "windows") {
+        format!("{base}.exe")
+    } else {
+        base.to_string()
+    }
 }
 
 fn configure_node_proxy(command: &mut Command) {
@@ -771,6 +891,9 @@ pub(crate) fn append_sanitized_log_line(source: &str, line: &str) {
 }
 
 fn log_file_path() -> Option<PathBuf> {
+    if let Some(log_dir) = env::var_os("TETI_DESKTOP_LOG_DIR") {
+        return Some(PathBuf::from(log_dir).join("teti-desktop.log"));
+    }
     env::var_os("HOME").map(|home| {
         PathBuf::from(home)
             .join("Library")
@@ -783,6 +906,7 @@ fn log_file_path() -> Option<PathBuf> {
 fn rotate_log_if_needed(path: &PathBuf) {
     if matches!(metadata(path), Ok(meta) if meta.len() > MAX_LOG_BYTES) {
         let rotated = path.with_extension("log.1");
+        let _ = remove_file(&rotated);
         let _ = rename(path, rotated);
     }
 }

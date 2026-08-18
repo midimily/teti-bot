@@ -267,7 +267,7 @@ export class PeerConnectionRuntime implements PeerConnectionService {
 
   constructor(options: PeerConnectionRuntimeOptions) {
     if (!options.relationshipService && options.allowLegacyRelationshipAuthorityForTests !== true) {
-      throw new Error("Teti Network Relationship service is required by Beta 0.3.9 Runtime.");
+      throw new Error("Teti Network Relationship service is required by Beta 0.4.0 Runtime.");
     }
     this.accountStorage = options.accountStorage;
     this.connectionStorage = options.connectionStorage;
@@ -613,8 +613,8 @@ export class PeerConnectionRuntime implements PeerConnectionService {
             ? "TASK_PEER_UPGRADE_REQUIRED"
             : "TASK_PEER_COMPATIBILITY_UNKNOWN",
           knownIncompatible
-            ? "The confirmed Teti must upgrade to Beta 0.3.9 before receiving tasks."
-            : "Wait until the confirmed Teti proves Beta 0.3.9 compatibility."
+            ? "The confirmed Teti must upgrade to Beta 0.4.0 before receiving tasks."
+            : "Wait until the confirmed Teti proves Beta 0.4.0 compatibility."
         );
       }
       return this.taskTransport.send(input);

@@ -1,5 +1,6 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { homedir, tmpdir } from "node:os";
+import { win32 } from "node:path";
 import type {
   ExecutionExit,
   ExecutionTransportHandle,
@@ -9,8 +10,33 @@ import type {
 
 const FORCE_KILL_WAIT_MS = 1_000;
 
+export interface ProcessTransportOptions {
+  platform?: NodeJS.Platform;
+  environment?: NodeJS.ProcessEnv;
+  windowsTreeKiller?: (pid: number, force: boolean) => Promise<void>;
+}
+
+export class ProcessTreeTerminationError extends Error {
+  readonly code = "PROCESS_TREE_TERMINATION_FAILED";
+
+  constructor() {
+    super("PROCESS_TREE_TERMINATION_FAILED");
+    this.name = "ProcessTreeTerminationError";
+  }
+}
+
 export class ProcessTransport implements ExecutionTransport {
   readonly kind = "process" as const;
+  private readonly platform: NodeJS.Platform;
+  private readonly environment: NodeJS.ProcessEnv;
+  private readonly windowsTreeKiller: (pid: number, force: boolean) => Promise<void>;
+
+  constructor(options: ProcessTransportOptions = {}) {
+    this.platform = options.platform ?? process.platform;
+    this.environment = options.environment ?? process.env;
+    this.windowsTreeKiller = options.windowsTreeKiller
+      ?? ((pid, force) => terminateWindowsProcessTree(pid, force, this.environment));
+  }
 
   start(input: {
     spec: ExecutionSpec;
@@ -24,12 +50,12 @@ export class ProcessTransport implements ExecutionTransport {
     }
     const child = spawn(input.spec.executable, input.spec.args, {
       cwd: input.workspacePath,
-      detached: process.platform !== "win32",
-      env: minimalEnvironment(input.spec.environment),
+      detached: this.platform !== "win32",
+      env: minimalEnvironment(input.spec.environment, this.platform, this.environment),
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true
     });
-    return new ManagedProcessExecution(child);
+    return new ManagedProcessExecution(child, this.platform, this.windowsTreeKiller);
   }
 }
 
@@ -40,9 +66,17 @@ class ManagedProcessExecution implements ExecutionTransportHandle {
   private readonly child: ChildProcessWithoutNullStreams;
   private running = true;
   private terminationPromise: Promise<void> | null = null;
+  private readonly platform: NodeJS.Platform;
+  private readonly windowsTreeKiller: (pid: number, force: boolean) => Promise<void>;
 
-  constructor(child: ChildProcessWithoutNullStreams) {
+  constructor(
+    child: ChildProcessWithoutNullStreams,
+    platform: NodeJS.Platform,
+    windowsTreeKiller: (pid: number, force: boolean) => Promise<void>
+  ) {
     this.child = child;
+    this.platform = platform;
+    this.windowsTreeKiller = windowsTreeKiller;
     this.stdout = child.stdout;
     this.stderr = child.stderr;
     this.completion = new Promise<ExecutionExit>((resolve, reject) => {
@@ -86,7 +120,13 @@ class ManagedProcessExecution implements ExecutionTransportHandle {
   }
 
   forceKill(): void {
-    this.signalProcessTree("SIGKILL");
+    if (this.platform === "win32" && this.child.pid) {
+      void this.windowsTreeKiller(this.child.pid, true).catch(() => {
+        this.child.kill("SIGKILL");
+      });
+      return;
+    }
+    this.signalPosixProcessTree("SIGKILL");
   }
 
   private async performTermination(graceMs: number): Promise<void> {
@@ -94,38 +134,101 @@ class ManagedProcessExecution implements ExecutionTransportHandle {
       await this.completion.catch(() => undefined);
       return;
     }
-    this.signalProcessTree("SIGTERM");
+    if (this.platform === "win32") {
+      const pid = this.child.pid;
+      if (!pid) throw new ProcessTreeTerminationError();
+      await this.windowsTreeKiller(pid, false).catch(() => undefined);
+      if (await settlesWithin(this.completion, graceMs)) return;
+      await this.windowsTreeKiller(pid, true).catch(() => {
+        throw new ProcessTreeTerminationError();
+      });
+      if (await settlesWithin(this.completion, FORCE_KILL_WAIT_MS)) return;
+      throw new ProcessTreeTerminationError();
+    }
+
+    this.signalPosixProcessTree("SIGTERM");
     if (await settlesWithin(this.completion, graceMs)) return;
 
-    this.signalProcessTree("SIGKILL");
+    this.signalPosixProcessTree("SIGKILL");
     if (await settlesWithin(this.completion, FORCE_KILL_WAIT_MS)) return;
     throw new Error("Child Agent process did not exit after SIGKILL.");
   }
 
-  private signalProcessTree(signal: NodeJS.Signals): void {
+  private signalPosixProcessTree(signal: NodeJS.Signals): void {
     if (!this.running) return;
     const pid = this.child.pid;
     try {
-      if (pid && process.platform !== "win32") {
-        process.kill(-pid, signal);
-      } else {
-        this.child.kill(signal);
-      }
+      if (pid) process.kill(-pid, signal);
+      else this.child.kill(signal);
     } catch (error) {
       if (readErrorCode(error) !== "ESRCH") throw error;
     }
   }
 }
 
-function minimalEnvironment(extra: Record<string, string> | undefined): NodeJS.ProcessEnv {
+function minimalEnvironment(
+  extra: Record<string, string> | undefined,
+  platform: NodeJS.Platform,
+  environment: NodeJS.ProcessEnv
+): NodeJS.ProcessEnv {
+  if (platform === "win32") {
+    return {
+      ...copyEnvironmentKeys(environment, [
+        "SystemRoot", "SYSTEMROOT", "ComSpec", "USERPROFILE", "HOME",
+        "LOCALAPPDATA", "APPDATA", "TEMP", "TMP", "PATH", "PATHEXT"
+      ]),
+      ...extra
+    };
+  }
   return {
     HOME: homedir(),
-    PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+    PATH: environment.PATH ?? "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
     LANG: "C.UTF-8",
     LC_ALL: "C.UTF-8",
-    TMPDIR: process.env.TMPDIR ?? tmpdir(),
+    TMPDIR: environment.TMPDIR ?? tmpdir(),
     ...extra
   };
+}
+
+export function windowsTaskkillCommand(
+  pid: number,
+  force: boolean,
+  environment: NodeJS.ProcessEnv = process.env
+): { executable: string; args: string[] } {
+  if (!Number.isSafeInteger(pid) || pid <= 0) throw new ProcessTreeTerminationError();
+  const systemRoot = environment.SystemRoot ?? environment.SYSTEMROOT ?? "C:\\Windows";
+  if (!/^[A-Za-z]:\\[^\u0000-\u001f]+$/.test(systemRoot)) {
+    throw new ProcessTreeTerminationError();
+  }
+  return {
+    executable: win32.join(systemRoot, "System32", "taskkill.exe"),
+    args: ["/PID", String(pid), "/T", ...(force ? ["/F"] : [])]
+  };
+}
+
+export function terminateWindowsProcessTree(
+  pid: number,
+  force: boolean,
+  environment: NodeJS.ProcessEnv = process.env
+): Promise<void> {
+  const command = windowsTaskkillCommand(pid, force, environment);
+  return new Promise((resolve, reject) => {
+    execFile(command.executable, command.args, {
+      windowsHide: true,
+      timeout: 2_000,
+      maxBuffer: 16 * 1024,
+      env: copyEnvironmentKeys(environment, ["SystemRoot", "SYSTEMROOT", "ComSpec", "TEMP", "TMP"])
+    }, (error) => error ? reject(new ProcessTreeTerminationError()) : resolve());
+  });
+}
+
+function copyEnvironmentKeys(
+  environment: NodeJS.ProcessEnv,
+  keys: readonly string[]
+): NodeJS.ProcessEnv {
+  return Object.fromEntries(keys.flatMap((key) =>
+    environment[key] === undefined ? [] : [[key, environment[key]!]]
+  ));
 }
 
 async function settlesWithin(promise: Promise<unknown>, timeoutMs: number): Promise<boolean> {

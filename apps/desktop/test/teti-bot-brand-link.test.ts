@@ -60,7 +60,8 @@ test("desktop brand uses a fixed accessible SVG wordmark with only the i dot acc
   assert.match(component, /button\.lang = "en"/);
   assert.match(component, /button\.dir = "ltr"/);
   assert.match(component, /setAttribute\("translate", "no"\)/);
-  assert.match(component, /setAttribute\("aria-label", `访问 \$\{TETI_BOT_BRAND\} 官网`\)/);
+  assert.match(component, /options\.label \?\? `Visit the \$\{TETI_BOT_BRAND\} website`/);
+  assert.match(app, /messages\.brand\.websiteLabel/);
   assert.match(component, /wordmark\.setAttribute\("aria-hidden", "true"\)/);
   assert.match(component, /fixedBrandText\.textContent = TETI_BOT_BRAND/);
   assert.match(component, /TETI_BOT_OPENING_EVENT/);

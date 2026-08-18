@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import type { ChatmailAdapter } from "../../integrations/chatmail/types.ts";
-import { validateTetiDisplayName } from "./display-name.ts";
+import { InvalidDisplayNameError, validateTetiDisplayName } from "./display-name.ts";
 import { RealChatmailAdapter } from "../../integrations/chatmail/real-adapter.ts";
 import {
   RuntimeChatmailProvisioner,
@@ -221,7 +221,7 @@ export class LocalAccountPersistenceError extends Error {
 
 function requireDisplayName(displayName: string | undefined): string {
   const validation = validateTetiDisplayName(displayName ?? "");
-  if (!validation.ok) throw new Error(validation.message);
+  if (!validation.ok) throw new InvalidDisplayNameError(validation.reason);
   return validation.value;
 }
 

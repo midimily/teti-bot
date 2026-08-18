@@ -10,7 +10,11 @@ import {
   stat,
   writeFile
 } from "node:fs/promises";
-import { basename, dirname, extname, join } from "node:path";
+import { basename, dirname, extname, isAbsolute, join, relative, sep } from "node:path";
+import {
+  currentLocalPathPlatform,
+  isSafeAbsoluteLocalPath
+} from "../../../../../core/application/local-path.ts";
 import {
   MAX_TASK_IMAGE_BYTES,
   MAX_TASK_IMAGE_DIMENSION,
@@ -90,14 +94,14 @@ export class FileTaskAttachmentStore implements TaskAttachmentStore {
     const part = imagePart(attachmentId, sanitized);
     const path = this.stagedPath(part);
     await requireGlobalStoreQuota(this.root, path, sanitized.bytes.byteLength);
-    await atomicPrivateWrite(path, sanitized.bytes);
+    await atomicPrivateWrite(this.root, path, sanitized.bytes);
     return { part, path, safeFileName: safeFileName(part) };
   }
 
   async getStagedImage(part: TaskImagePart): Promise<StagedTaskImage> {
     validateTaskImagePart(part);
     const path = this.stagedPath(part);
-    await verifyStoredImage(path, part);
+    await verifyStoredImage(this.root, path, part);
     return { part: structuredClone(part), path, safeFileName: safeFileName(part) };
   }
 
@@ -114,13 +118,13 @@ export class FileTaskAttachmentStore implements TaskAttachmentStore {
     requireMatchingImage(input.part, sanitized);
     const destination = this.taskPath(input.taskId, input.purpose, input.part);
     try {
-      await verifyStoredImage(destination, input.part);
+      await verifyStoredImage(this.root, destination, input.part);
       return destination;
     } catch {
       await requireTaskQuota(destination, sanitized.bytes.byteLength);
       await requireGlobalStoreQuota(this.root, destination, sanitized.bytes.byteLength);
-      await atomicPrivateWrite(destination, sanitized.bytes);
-      await verifyStoredImage(destination, input.part);
+      await atomicPrivateWrite(this.root, destination, sanitized.bytes);
+      await verifyStoredImage(this.root, destination, input.part);
       return destination;
     }
   }
@@ -133,8 +137,8 @@ export class FileTaskAttachmentStore implements TaskAttachmentStore {
     const destination = this.taskPath(taskId, "artifact", part);
     await requireTaskQuota(destination, sanitized.bytes.byteLength);
     await requireGlobalStoreQuota(this.root, destination, sanitized.bytes.byteLength);
-    await atomicPrivateWrite(destination, sanitized.bytes);
-    await verifyStoredImage(destination, part);
+    await atomicPrivateWrite(this.root, destination, sanitized.bytes);
+    await verifyStoredImage(this.root, destination, part);
     return { part, path: destination, safeFileName: safeFileName(part) };
   }
 
@@ -153,7 +157,7 @@ export class FileTaskAttachmentStore implements TaskAttachmentStore {
     validateTaskImagePart(input.part);
     const path = this.taskPath(input.taskId, input.purpose, input.part);
     try {
-      await verifyStoredImage(path, input.part);
+      await verifyStoredImage(this.root, path, input.part);
       return path;
     } catch {
       return null;
@@ -174,7 +178,7 @@ export class FileTaskAttachmentStore implements TaskAttachmentStore {
     const safeFileName = `${artifact.artifactId}.teti-artifact.json`;
     const path = join(this.root, "artifact-document", taskId, safeFileName);
     await requireGlobalStoreQuota(this.root, path, bytes.byteLength);
-    await atomicPrivateWrite(path, bytes);
+    await atomicPrivateWrite(this.root, path, bytes);
     return {
       path,
       safeFileName,
@@ -384,8 +388,9 @@ function requireMatchingImage(part: TaskImagePart, image: SanitizedImage): void 
   }
 }
 
-async function verifyStoredImage(path: string, part: TaskImagePart): Promise<void> {
+async function verifyStoredImage(root: string, path: string, part: TaskImagePart): Promise<void> {
   const canonical = await realpath(path);
+  await requireContainedStorePath(root, canonical);
   if (basename(canonical) !== basename(path)) throw new Error("TASK_ATTACHMENT_PATH_INVALID");
   const image = sanitizeImage(await readBoundedFile(canonical));
   requireMatchingImage(part, image);
@@ -402,7 +407,7 @@ async function readBoundedFile(path: string): Promise<Buffer> {
 }
 
 async function requireRegularSourceFile(sourcePath: string): Promise<string> {
-  if (typeof sourcePath !== "string" || !sourcePath.startsWith("/") || sourcePath.includes("\0")) {
+  if (!isAbsoluteTaskAttachmentPath(sourcePath)) {
     throw new Error("TASK_IMAGE_PATH_INVALID");
   }
   const canonical = await realpath(sourcePath);
@@ -414,7 +419,7 @@ async function requireRegularSourceFile(sourcePath: string): Promise<string> {
 }
 
 async function requireRegularArtifactFile(sourcePath: string): Promise<string> {
-  if (typeof sourcePath !== "string" || !sourcePath.startsWith("/") || sourcePath.includes("\0")) {
+  if (!isAbsoluteTaskAttachmentPath(sourcePath)) {
     throw new Error("TASK_ARTIFACT_FILE_PATH_INVALID");
   }
   const canonical = await realpath(sourcePath);
@@ -423,8 +428,10 @@ async function requireRegularArtifactFile(sourcePath: string): Promise<string> {
   return canonical;
 }
 
-async function atomicPrivateWrite(path: string, bytes: Buffer): Promise<void> {
+async function atomicPrivateWrite(root: string, path: string, bytes: Buffer): Promise<void> {
+  await mkdir(root, { recursive: true, mode: 0o700 });
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  await requireContainedStorePath(root, await realpath(dirname(path)));
   await chmod(dirname(path), 0o700);
   const temporary = `${path}.${randomUUID()}.tmp`;
   try {
@@ -433,6 +440,22 @@ async function atomicPrivateWrite(path: string, bytes: Buffer): Promise<void> {
     await chmod(path, 0o600);
   } finally {
     await rm(temporary, { force: true }).catch(() => undefined);
+  }
+}
+
+export function isAbsoluteTaskAttachmentPath(
+  value: unknown,
+  platform: NodeJS.Platform = process.platform
+): value is string {
+  return isSafeAbsoluteLocalPath(value, currentLocalPathPlatform(platform));
+}
+
+async function requireContainedStorePath(root: string, candidate: string): Promise<void> {
+  const canonicalRoot = await realpath(root);
+  const descendant = relative(canonicalRoot, candidate);
+  if (descendant === "") return;
+  if (isAbsolute(descendant) || descendant === ".." || descendant.startsWith(`..${sep}`)) {
+    throw new Error("TASK_ATTACHMENT_PATH_OUTSIDE_STORE");
   }
 }
 

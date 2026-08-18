@@ -2,7 +2,8 @@ import { execFile } from "node:child_process";
 import { constants } from "node:fs";
 import { access, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, delimiter, join } from "node:path";
+import { basename, delimiter, extname, join, win32 } from "node:path";
+import type { LifecycleDesktopPlatform } from "../../desktop-platform.ts";
 import type {
   AgentObserverSystem,
   AgentVersionProbe,
@@ -28,27 +29,39 @@ export class AgentObserverSystemError extends Error {
 export function createMacAgentObserverSystem(
   env: NodeJS.ProcessEnv = process.env
 ): AgentObserverSystem {
+  return createAgentObserverSystem("macos", env);
+}
+
+export function createAgentObserverSystem(
+  platform: LifecycleDesktopPlatform,
+  env: NodeJS.ProcessEnv = process.env
+): AgentObserverSystem {
   return {
-    findExecutable: (names) => findExecutable(names, env),
-    findExecutablePath,
-    inspectAppBundle,
-    listProcessNames,
-    runVersionProbe
+    findExecutable: (names) => findExecutable(names, env, platform),
+    findExecutablePath: (paths, expectedNames) =>
+      findExecutablePath(paths, expectedNames, platform, env),
+    inspectAppBundle: platform === "macos"
+      ? inspectAppBundle
+      : async () => ({ present: false }),
+    listProcessNames: () => listProcessNames(platform, env),
+    runVersionProbe: (path, probe) => runVersionProbe(path, probe, platform, env)
   };
 }
 
 async function findExecutablePath(
   paths: readonly string[],
-  expectedNames: readonly string[]
+  expectedNames: readonly string[],
+  platform: LifecycleDesktopPlatform,
+  env: NodeJS.ProcessEnv
 ): Promise<ResolvedExecutable | null> {
-  const acceptedNames = new Set(expectedNames);
+  const acceptedNames = new Set(expectedNames.map((name) => normalizedExecutableName(name, platform)));
   for (const configuredPath of paths) {
-    const candidate = expandHome(configuredPath);
-    if (!acceptedNames.has(basename(candidate))) continue;
+    const candidate = expandConfiguredPath(configuredPath, platform, env);
+    if (!candidate || !acceptedNames.has(normalizedExecutableName(basename(candidate), platform))) continue;
     try {
-      await access(candidate, constants.X_OK);
+      await access(candidate, platform === "windows" ? constants.F_OK : constants.X_OK);
       const canonicalPath = await realpath(candidate);
-      if (!acceptedNames.has(basename(canonicalPath))) continue;
+      if (!acceptedNames.has(normalizedExecutableName(basename(canonicalPath), platform))) continue;
       if ((await stat(canonicalPath)).isFile()) return { canonicalPath };
     } catch {
       // A missing, unreadable, or renamed explicit path is a normal negative signal.
@@ -59,18 +72,23 @@ async function findExecutablePath(
 
 async function findExecutable(
   names: readonly string[],
-  env: NodeJS.ProcessEnv
+  env: NodeJS.ProcessEnv,
+  platform: LifecycleDesktopPlatform
 ): Promise<ResolvedExecutable | null> {
-  const searchPaths = (env.PATH ?? "").split(delimiter).filter(Boolean);
+  const searchPaths = (env.PATH ?? "").split(platform === "windows" ? ";" : delimiter).filter(Boolean);
   for (const name of names) {
     for (const directory of searchPaths) {
-      const candidate = join(directory, name);
-      try {
-        await access(candidate, constants.X_OK);
-        const canonicalPath = await realpath(candidate);
-        if ((await stat(canonicalPath)).isFile()) return { canonicalPath };
-      } catch {
-        // One missing, unreadable, or broken PATH entry is a normal negative signal.
+      for (const fileName of executableFileNames(name, platform, env)) {
+        const candidate = platform === "windows"
+          ? win32.join(directory, fileName)
+          : join(directory, fileName);
+        try {
+          await access(candidate, platform === "windows" ? constants.F_OK : constants.X_OK);
+          const canonicalPath = await realpath(candidate);
+          if ((await stat(canonicalPath)).isFile()) return { canonicalPath };
+        } catch {
+          // One missing, unreadable, or broken PATH entry is a normal negative signal.
+        }
       }
     }
   }
@@ -106,12 +124,20 @@ async function inspectAppBundle(
   return { present: false };
 }
 
-async function listProcessNames(): Promise<string[]> {
-  const stdout = await execFileText("/bin/ps", ["-axo", "comm="], {
+async function listProcessNames(
+  platform: LifecycleDesktopPlatform,
+  env: NodeJS.ProcessEnv
+): Promise<string[]> {
+  const executable = platform === "windows"
+    ? windowsSystemExecutable(env, "tasklist.exe")
+    : "/bin/ps";
+  const args = platform === "windows" ? ["/FO", "CSV", "/NH"] : ["-axo", "comm="];
+  const stdout = await execFileText(executable, args, {
     timeoutMs: PROCESS_LIST_TIMEOUT_MS,
     maxOutputBytes: PROCESS_LIST_MAX_BYTES,
     errorCode: "PROCESS_ENUMERATION_FAILED"
   });
+  if (platform === "windows") return parseWindowsTasklist(stdout);
   return stdout
     .split(/\r?\n/)
     .map((line) => basename(line.trim()))
@@ -120,13 +146,20 @@ async function listProcessNames(): Promise<string[]> {
 
 async function runVersionProbe(
   executablePath: string,
-  probe: AgentVersionProbe
+  probe: AgentVersionProbe,
+  platform: LifecycleDesktopPlatform,
+  env: NodeJS.ProcessEnv
 ): Promise<string | null> {
+  if (platform === "windows" && [".cmd", ".bat"].includes(extname(executablePath).toLowerCase())) {
+    return null;
+  }
   const stdout = await execFileText(executablePath, probe.args, {
     timeoutMs: probe.timeoutMs,
     maxOutputBytes: probe.maxOutputBytes,
     errorCode: "VERSION_PROBE_FAILED",
-    minimalEnvironment: true
+    minimalEnvironment: true,
+    environment: env,
+    platform
   });
   return sanitizeVersion(stdout);
 }
@@ -148,6 +181,8 @@ interface ExecTextOptions {
   maxOutputBytes: number;
   errorCode: string;
   minimalEnvironment?: boolean;
+  environment?: NodeJS.ProcessEnv;
+  platform?: LifecycleDesktopPlatform;
 }
 
 function execFileText(
@@ -163,11 +198,10 @@ function execFileText(
       killSignal: "SIGKILL",
       windowsHide: true,
       env: options.minimalEnvironment
-        ? {
-            PATH: process.env.PATH ?? "/usr/bin:/bin",
-            LANG: "C",
-            LC_ALL: "C"
-          }
+        ? minimalProbeEnvironment(
+            options.environment ?? process.env,
+            options.platform ?? (process.platform === "win32" ? "windows" : "macos")
+          )
         : undefined
     }, (error, stdout) => {
       if (!error) {
@@ -205,6 +239,89 @@ function sanitizeVersion(value: string | null): string | null {
 
 function expandHome(path: string): string {
   return path.startsWith("~/") ? join(homedir(), path.slice(2)) : path;
+}
+
+function expandConfiguredPath(
+  value: string,
+  platform: LifecycleDesktopPlatform,
+  env: NodeJS.ProcessEnv
+): string | null {
+  if (platform === "macos") return expandHome(value);
+  let unresolved = false;
+  const expanded = value.replace(/%([A-Za-z_][A-Za-z0-9_]*)%/g, (_match, name: string) => {
+    const replacement = env[name] ?? env[name.toUpperCase()] ?? env[name.toLowerCase()];
+    if (!replacement) unresolved = true;
+    return replacement ?? "";
+  });
+  return unresolved ? null : expanded;
+}
+
+function executableFileNames(
+  name: string,
+  platform: LifecycleDesktopPlatform,
+  env: NodeJS.ProcessEnv
+): string[] {
+  if (platform !== "windows" || extname(name)) return [name];
+  const extensions = (env.PATHEXT ?? ".EXE;.CMD;.BAT")
+    .split(";")
+    .map((value) => value.trim().toLowerCase())
+    .filter((value) => /^\.[a-z0-9]{1,8}$/.test(value));
+  return [...new Set(extensions.map((extension) => `${name}${extension}`))];
+}
+
+function normalizedExecutableName(
+  name: string,
+  platform: LifecycleDesktopPlatform
+): string {
+  const lower = platform === "windows" ? name.toLowerCase() : name;
+  return platform === "windows" ? lower.replace(/\.(?:exe|cmd|bat)$/i, "") : lower;
+}
+
+export function parseWindowsTasklist(stdout: string): string[] {
+  const names: string[] = [];
+  for (const line of stdout.split(/\r?\n/)) {
+    const match = /^"((?:[^"]|"")*)"(?:,|$)/.exec(line.trim());
+    if (!match) continue;
+    const name = match[1]!.replaceAll('""', '"').trim();
+    if (name) names.push(name.replace(/\.exe$/i, ""));
+  }
+  return names;
+}
+
+function windowsSystemExecutable(env: NodeJS.ProcessEnv, name: string): string {
+  const systemRoot = env.SystemRoot ?? env.SYSTEMROOT ?? "C:\\Windows";
+  if (!/^[A-Za-z]:\\[^\u0000-\u001f]+$/.test(systemRoot)) {
+    throw new AgentObserverSystemError("PROCESS_ENUMERATION_FAILED");
+  }
+  return win32.join(systemRoot, "System32", name);
+}
+
+function minimalProbeEnvironment(
+  env: NodeJS.ProcessEnv,
+  platform: LifecycleDesktopPlatform
+): NodeJS.ProcessEnv {
+  if (platform === "windows") {
+    return Object.fromEntries([
+      "SystemRoot",
+      "SYSTEMROOT",
+      "ComSpec",
+      "USERPROFILE",
+      "LOCALAPPDATA",
+      "APPDATA",
+      "TEMP",
+      "TMP",
+      "PATH",
+      "PATHEXT",
+      "CODEX_HOME"
+    ].flatMap((key) => env[key] === undefined ? [] : [[key, env[key]!]]));
+  }
+  return {
+    HOME: env.HOME ?? homedir(),
+    PATH: env.PATH ?? "/usr/bin:/bin",
+    LANG: "C",
+    LC_ALL: "C",
+    ...(env.CODEX_HOME ? { CODEX_HOME: env.CODEX_HOME } : {})
+  };
 }
 
 function readErrorCode(error: unknown): string | undefined {

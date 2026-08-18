@@ -1,26 +1,47 @@
 export const TETI_DISPLAY_NAME_MIN_CHARACTERS = 1;
 export const TETI_DISPLAY_NAME_MAX_CHARACTERS = 10;
 
+export type DisplayNameValidationReason =
+  | "empty"
+  | "too_long"
+  | "control_character";
+
 export type DisplayNameValidationResult =
   | { ok: true; value: string; characterCount: number }
-  | { ok: false; message: string; characterCount: number };
+  | {
+      ok: false;
+      reason: DisplayNameValidationReason;
+      characterCount: number;
+      maximumCharacters?: number;
+    };
+
+export class InvalidDisplayNameError extends Error {
+  readonly reason: DisplayNameValidationReason;
+
+  constructor(reason: DisplayNameValidationReason) {
+    super(`Invalid Teti display name: ${reason}.`);
+    this.name = "INVALID_NAME";
+    this.reason = reason;
+  }
+}
 
 export function validateTetiDisplayName(input: string): DisplayNameValidationResult {
   const value = input.normalize("NFC").trim();
   const characterCount = countUnicodeCharacters(value);
 
   if (characterCount < TETI_DISPLAY_NAME_MIN_CHARACTERS) {
-    return { ok: false, message: "先给 Teti 一个名字。", characterCount };
+    return { ok: false, reason: "empty", characterCount };
   }
   if (characterCount > TETI_DISPLAY_NAME_MAX_CHARACTERS) {
     return {
       ok: false,
-      message: `名字最多 ${TETI_DISPLAY_NAME_MAX_CHARACTERS} 个字符。`,
-      characterCount
+      reason: "too_long",
+      characterCount,
+      maximumCharacters: TETI_DISPLAY_NAME_MAX_CHARACTERS
     };
   }
   if (hasControlCharacter(value)) {
-    return { ok: false, message: "名字不能包含控制字符。", characterCount };
+    return { ok: false, reason: "control_character", characterCount };
   }
 
   return { ok: true, value, characterCount };

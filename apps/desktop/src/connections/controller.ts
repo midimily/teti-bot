@@ -12,10 +12,12 @@ import {
 import type { LifecycleBridgeClient } from "../provisioning/bridge-lifecycle.ts";
 import type { TauriNotchWindowController } from "../platform/tauri-notch-window.ts";
 import type { PanelDiagnosticSink } from "../platform/panel-diagnostics.ts";
+import { readStableErrorCode } from "../errors/stable-error-code.ts";
 import {
   initialConnectPanelSnapshot,
   transitionConnectPanel,
   type ConnectPanelEvent,
+  type ConnectPanelMessageCode,
   type ConnectPanelSnapshot
 } from "./connect-panel-state.ts";
 
@@ -191,7 +193,7 @@ export class PeerConnectionController {
     this.snapshotValue.input = normalized;
     this.transitionPanel(
       normalized && !TETI_PUBLIC_ID_CODE_CHARACTERS_PATTERN.test(normalized)
-        ? { type: "VALIDATION_FAILED", message: "请输入正确的 9 位 ID" }
+        ? { type: "VALIDATION_FAILED", messageCode: "invalid_public_id" }
         : { type: "INPUT_CHANGED" }
     );
     this.snapshotValue.highlightedRequestId = undefined;
@@ -280,7 +282,7 @@ export class PeerConnectionController {
   async connect(): Promise<void> {
     if (!["editing", "error"].includes(this.snapshotValue.connectPanel.state)) return;
     if (!TETI_PUBLIC_ID_CODE_PATTERN.test(this.snapshotValue.input)) {
-      this.transitionPanel({ type: "VALIDATION_FAILED", message: "请输入正确的 9 位 ID" });
+      this.transitionPanel({ type: "VALIDATION_FAILED", messageCode: "invalid_public_id" });
       this.onChange();
       return;
     }
@@ -303,7 +305,7 @@ export class PeerConnectionController {
       }
     } catch (error) {
       if (this.disposed) return;
-      this.transitionPanel({ type: "CONNECT_FAILED", message: connectionErrorMessage(error) });
+      this.transitionPanel({ type: "CONNECT_FAILED", messageCode: connectionErrorCode(error) });
       this.onChange();
     }
     if (this.outsideDismissPending && this.snapshotValue.open && !this.disposed) {
@@ -356,22 +358,22 @@ export class PeerConnectionController {
   } {
     const outcome = result.requestOutcome;
     if (!outcome) {
-      return { event: { type: "CONNECT_SUCCEEDED", message: "建联请求已发送" } };
+      return { event: { type: "CONNECT_SUCCEEDED", messageCode: "request_sent" } };
     }
     this.snapshotValue.highlightedRequestId = outcome.requestId;
     switch (outcome.kind) {
       case "created":
       case "alreadyRequested":
       case "confirming":
-        return { event: { type: "CONNECT_SUCCEEDED", message: "建联请求已发送" } };
+        return { event: { type: "CONNECT_SUCCEEDED", messageCode: "request_sent" } };
       case "approvalRequired":
-        return { event: { type: "CONNECT_FAILED", message: "对方正在等待你确认" } };
+        return { event: { type: "CONNECT_FAILED", messageCode: "approval_required" } };
       case "mutualConfirmed":
-        return { event: { type: "CONNECT_SUCCEEDED", message: "已成功建联" } };
+        return { event: { type: "CONNECT_SUCCEEDED", messageCode: "connected" } };
       case "alreadyConfirmed":
-        return { event: { type: "CONNECT_FAILED", message: "你们已经建联" } };
+        return { event: { type: "CONNECT_FAILED", messageCode: "already_connected" } };
       case "blocked":
-        return { event: { type: "CONNECT_FAILED", message: "暂时无法完成建联，请稍后重试" } };
+        return { event: { type: "CONNECT_FAILED", messageCode: "connection_failed" } };
     }
   }
 
@@ -460,12 +462,11 @@ export class PeerConnectionController {
   }
 }
 
-function connectionErrorMessage(error: unknown): string {
-  if (error instanceof Error) {
-    if (error.name === "REQUEST_TIMEOUT") return "连接超时，请稍后重试";
-    if (error.name === "CONNECTION_RESOLVE_FAILED") return "没有找到这个 Teti，请检查 ID";
-  }
-  return "暂时无法完成建联，请稍后重试";
+function connectionErrorCode(error: unknown): ConnectPanelMessageCode {
+  const code = readStableErrorCode(error);
+  if (code === "REQUEST_TIMEOUT") return "connection_timeout";
+  if (code === "CONNECTION_RESOLVE_FAILED") return "identity_not_found";
+  return "connection_failed";
 }
 
 export class BridgePeerConnectionClient implements PeerConnectionClient {

@@ -15,7 +15,7 @@ test("Teti Runtime reaches the local Network through NetworkClient", async () =>
   });
   const networkClient = new HttpTetiNetworkClient({
     baseUrl,
-    clientVersion: "0.3.9",
+    clientVersion: "0.4.0",
     clientPlatform: "macos"
   });
   const directDirectory = await networkClient.listPublicNodes();

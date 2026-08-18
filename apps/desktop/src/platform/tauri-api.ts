@@ -47,6 +47,17 @@ class BrowserPreviewTauriInvoker implements TauriInvoker {
   }
 
   async invoke<T>(command: string): Promise<T> {
+    if (command === "desktop_platform_info") {
+      return {
+        platform: "macos",
+        architecture: "arm64",
+        shell: "notch-panel",
+        lifecycleRuntime: "mock",
+        supportsDockReopen: false,
+        supportsNativeSleepEvents: false,
+        supportsRevealInFileManager: false
+      } as T;
+    }
     if (command === "current_monitor_info") {
       return {
         x: 0,

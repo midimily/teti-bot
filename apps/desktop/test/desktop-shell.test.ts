@@ -4,6 +4,7 @@ import test from "node:test";
 import type { TetiAccount } from "../../../core/account/model.ts";
 import type { FirstLaunchSnapshot } from "../src/first-launch/state-machine.ts";
 import { toFirstLaunchViewModel } from "../src/first-launch/view-model.ts";
+import { createDesktopI18n } from "../src/i18n/index.ts";
 import { RecordingTauriInvoker } from "../src/platform/tauri-api.ts";
 import { TauriNotchWindowController, visualModeForViewModel } from "../src/platform/tauri-notch-window.ts";
 import {
@@ -349,12 +350,12 @@ test("Desktop global update lock is local-policy-owned rather than peer-owned", 
 
   assert.match(appSource, /releaseStatus\?\.state === "update_required"/);
   assert.doesNotMatch(appSource, /blockingPeerCompatibility|hasBlockingPeerCompatibility/);
-  assert.match(appSource, /仅暂停此节点协作/);
-  assert.match(appSource, /版本检测中/);
+  assert.match(appSource, /messages\.connections\.list\.compatibility\.upgradeHint/);
+  assert.match(appSource, /messages\.connections\.list\.compatibility\.checking/);
 });
 
 function visualModeForSnapshot(snapshot: FirstLaunchSnapshot): string {
-  return visualModeForViewModel(toFirstLaunchViewModel(snapshot));
+  return visualModeForViewModel(toFirstLaunchViewModel(snapshot, createDesktopI18n("zh-Hans")));
 }
 
 function createAccount(displayName: string): TetiAccount {

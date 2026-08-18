@@ -11,6 +11,10 @@ import {
   type WorkspaceQuota,
   type WorkspaceSnapshot
 } from "./types.ts";
+import {
+  isSafeAbsoluteLocalPath,
+  type LocalPathPlatform
+} from "../application/local-path.ts";
 
 const SAFE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const SHA256_PATTERN = /^sha256:[a-f0-9]{64}$/;
@@ -91,7 +95,10 @@ export function validateTaskWorkspaceBinding(
   validateWorkspaceAccess(binding.access);
 }
 
-export function validateWorkspaceSnapshot(value: unknown): asserts value is WorkspaceSnapshot {
+export function validateWorkspaceSnapshot(
+  value: unknown,
+  platform?: LocalPathPlatform
+): asserts value is WorkspaceSnapshot {
   const snapshot = exactRecord(value, [
     "schemaVersion",
     "snapshotId",
@@ -108,7 +115,7 @@ export function validateWorkspaceSnapshot(value: unknown): asserts value is Work
   safeId(snapshot.workspaceId, "workspaceId");
   positiveInteger(snapshot.workspaceRevision, "workspaceRevision");
   validateWorkspaceAccess(snapshot.access);
-  if (typeof snapshot.snapshotPath !== "string" || !snapshot.snapshotPath) {
+  if (!isSafeAbsoluteLocalPath(snapshot.snapshotPath, platform)) {
     throw new WorkspaceContractError("Workspace Snapshot path is invalid.");
   }
   timestamp(snapshot.createdAt, "createdAt");

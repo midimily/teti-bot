@@ -1,8 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { chmod, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname } from "node:path";
+import {
+  isSafeAbsoluteLocalPath,
+  localPathBasename
+} from "../../../../../core/application/local-path.ts";
 import type { AgentSurface, ObservationSafeError } from "../../../../../core/observation/types.ts";
-import { BUILTIN_AGENT_DETECTORS, cloneBuiltinAgentDetectors } from "./defaults.ts";
+import type { LifecycleDesktopPlatform } from "../../desktop-platform.ts";
+import { cloneBuiltinAgentDetectors } from "./defaults.ts";
 import type {
   AgentDetectorCatalog,
   AgentDetectorDefinition,
@@ -29,6 +34,7 @@ export interface AgentDetectorConfigLoaderOptions {
   path: string;
   readText?: (path: string) => Promise<string>;
   env?: NodeJS.ProcessEnv;
+  platform?: LifecycleDesktopPlatform;
 }
 
 export async function loadAgentDetectorCatalog(
@@ -43,7 +49,9 @@ export async function loadAgentDetectorCatalog(
       errors: []
     };
   }
-  const builtins = cloneBuiltinAgentDetectors();
+  const builtins = cloneBuiltinAgentDetectors(
+    options.platform ?? (process.platform === "win32" ? "windows" : "macos")
+  );
   let text: string;
   try {
     text = await (options.readText ?? readUtf8)(options.path);
@@ -102,7 +110,11 @@ export async function loadAgentDetectorCatalog(
       const enabled = optionalBoolean(candidate!.enabled, true);
       const pathOverride = candidate!.pathOverride === undefined
         ? undefined
-        : validateBuiltinPathOverride(definition, candidate!.pathOverride);
+        : validateBuiltinPathOverride(
+            definition,
+            candidate!.pathOverride,
+            options.platform ?? (process.platform === "win32" ? "windows" : "macos")
+          );
       if (
         !exactKeys(candidate!, ["id", "enabled", "pathOverride"])
         || enabled === null
@@ -145,9 +157,14 @@ export async function loadAgentDetectorCatalog(
 
 export class FileAgentDetectorConfiguration implements RuntimeAgentConfiguration {
   private readonly path: string;
+  private readonly platform: LifecycleDesktopPlatform;
 
-  constructor(path: string) {
+  constructor(
+    path: string,
+    platform: LifecycleDesktopPlatform = process.platform === "win32" ? "windows" : "macos"
+  ) {
     this.path = path;
+    this.platform = platform;
   }
 
   async getPathOverrides(): Promise<Record<string, string>> {
@@ -156,9 +173,10 @@ export class FileAgentDetectorConfiguration implements RuntimeAgentConfiguration
     for (const entry of root.agents ?? []) {
       const candidate = record(entry);
       if (!candidate || typeof candidate.id !== "string" || typeof candidate.pathOverride !== "string") continue;
-      const definition = BUILTIN_AGENT_DETECTORS.find((item) => item.id === candidate.id);
+      const definition = cloneBuiltinAgentDetectors(this.platform)
+        .find((item) => item.id === candidate.id);
       const pathOverride = definition
-        ? validateBuiltinPathOverride(definition, candidate.pathOverride)
+        ? validateBuiltinPathOverride(definition, candidate.pathOverride, this.platform)
         : null;
       if (pathOverride) result[definition!.id] = pathOverride;
     }
@@ -166,9 +184,12 @@ export class FileAgentDetectorConfiguration implements RuntimeAgentConfiguration
   }
 
   async setPathOverride(agentId: string, path: string | null): Promise<void> {
-    const definition = BUILTIN_AGENT_DETECTORS.find((item) => item.id === agentId);
+    const definition = cloneBuiltinAgentDetectors(this.platform)
+      .find((item) => item.id === agentId);
     if (!definition) throw new AgentDetectorConfigurationError("AGENT_OVERRIDE_UNKNOWN_AGENT");
-    const pathOverride = path === null ? null : validateBuiltinPathOverride(definition, path);
+    const pathOverride = path === null
+      ? null
+      : validateBuiltinPathOverride(definition, path, this.platform);
     if (path !== null && pathOverride === null) {
       throw new AgentDetectorConfigurationError("AGENT_OVERRIDE_PATH_INVALID");
     }
@@ -317,7 +338,8 @@ function validateInstallDetector(value: unknown): AgentInstallDetector | null {
 
 function validateBuiltinPathOverride(
   definition: AgentDetectorDefinition,
-  value: unknown
+  value: unknown,
+  platform: LifecycleDesktopPlatform = "macos"
 ): string | null {
   if (typeof value !== "string") return null;
   const path = value.trim();
@@ -326,11 +348,12 @@ function validateBuiltinPathOverride(
     || path.length > 1_024
     || path !== value
     || /[\u0000-\u001f\u007f]/.test(path)
-    || (!path.startsWith("/") && !path.startsWith("~/"))
-    || path.split("/").includes("..")
+    || (platform === "macos"
+      ? (!path.startsWith("/") && !path.startsWith("~/")) || path.split("/").includes("..")
+      : !isSafeAbsoluteLocalPath(path, "windows"))
   ) return null;
 
-  if (path.endsWith(".app")) {
+  if (platform === "macos" && path.endsWith(".app")) {
     return definition.installDetectors.some((detector) => detector.type === "app_bundle"
       && detector.paths.some((candidate) => basename(candidate) === basename(path)))
       ? path
@@ -339,7 +362,10 @@ function validateBuiltinPathOverride(
   const executableNames = definition.installDetectors.flatMap((detector) =>
     detector.type === "executable" ? detector.names : []
   );
-  return executableNames.includes(basename(path)) ? path : null;
+  const candidateName = localPathBasename(path, platform).replace(/\.exe$/i, "");
+  return executableNames.some((name) => name.replace(/\.exe$/i, "") === candidateName)
+    ? path
+    : null;
 }
 
 function applyBuiltinPathOverride(

@@ -1,7 +1,7 @@
 import { constants } from "node:fs";
 import { access, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, delimiter, join } from "node:path";
+import { basename, delimiter, join, win32 } from "node:path";
 import { execFile } from "node:child_process";
 import type {
   AgentAdapterReadiness
@@ -14,6 +14,9 @@ import {
   classifyCodexFailure,
   decodeCodexArtifact
 } from "./jsonl.ts";
+import { isSafeAbsoluteLocalPath } from "../../../core/application/local-path.ts";
+
+export type CodexHostPlatform = "macos" | "windows";
 
 export const CODEX_CONNECTOR = {
   connectorId: "openai.codex.exec",
@@ -75,6 +78,7 @@ export interface QualifyCodexConnectorOptions {
   now?: () => Date;
   resolveEntrypoint?: () => Promise<string | null>;
   probeLogin?: (entrypoint: string) => Promise<"ready" | "needs_login" | "degraded">;
+  platform?: CodexHostPlatform;
 }
 
 export class CodexConnector implements AgentConnector {
@@ -148,10 +152,12 @@ export async function qualifyCodexConnector(
   const now = options.now ?? (() => new Date());
   const environment = options.environment ?? process.env;
   const homeDirectory = options.homeDirectory ?? homedir();
+  const platform = options.platform ?? (process.platform === "win32" ? "windows" : "macos");
   const entrypoint = await (options.resolveEntrypoint?.() ?? resolveCodexEntrypoint({
     pathOverride: options.pathOverride,
     environment,
-    homeDirectory
+    homeDirectory,
+    platform
   }));
   const checkedAt = now().toISOString();
   if (options.signal?.aborted) {
@@ -171,7 +177,8 @@ export async function qualifyCodexConnector(
     ?? probeCodexLogin(entrypoint, {
       environment,
       homeDirectory,
-      signal: options.signal
+      signal: options.signal,
+      platform
     }));
   if (loginState !== "ready") {
     return {
@@ -197,20 +204,26 @@ export async function resolveCodexEntrypoint(options: {
   pathOverride?: string | null;
   environment?: NodeJS.ProcessEnv;
   homeDirectory?: string;
+  platform?: CodexHostPlatform;
 } = {}): Promise<string | null> {
   const environment = options.environment ?? process.env;
   const homeDirectory = options.homeDirectory ?? homedir();
+  const platform = options.platform ?? (process.platform === "win32" ? "windows" : "macos");
   const configuredOverride = options.pathOverride?.trim();
   const candidates = configuredOverride
     ? [configuredOverride]
-    : codexEntrypointCandidates(environment, homeDirectory);
+    : codexEntrypointCandidates(environment, homeDirectory, platform);
 
   for (const candidate of candidates) {
-    if (basename(candidate) !== "codex") continue;
+    if (!isSafeAbsoluteLocalPath(candidate, platform)) continue;
+    const name = basenameForPlatform(candidate, platform).toLowerCase();
+    if (platform === "windows" ? name !== "codex.exe" : name !== "codex") continue;
     try {
-      await access(candidate, constants.X_OK);
+      await access(candidate, platform === "windows" ? constants.F_OK : constants.X_OK);
       const canonicalPath = await realpath(candidate);
-      if ((await stat(canonicalPath)).isFile()) return canonicalPath;
+      const canonicalName = basenameForPlatform(canonicalPath, platform).toLowerCase();
+      if ((platform === "windows" ? canonicalName === "codex.exe" : canonicalName === "codex")
+        && (await stat(canonicalPath)).isFile()) return canonicalPath;
     } catch {
       // One missing or non-executable candidate is a normal negative signal.
     }
@@ -225,10 +238,12 @@ export async function probeCodexLogin(
     homeDirectory?: string;
     signal?: AbortSignal;
     timeoutMs?: number;
+    platform?: CodexHostPlatform;
   } = {}
 ): Promise<"ready" | "needs_login" | "degraded"> {
   const environment = options.environment ?? process.env;
   const homeDirectory = options.homeDirectory ?? homedir();
+  const platform = options.platform ?? (process.platform === "win32" ? "windows" : "macos");
   return new Promise((resolve) => {
     execFile(entrypoint, ["login", "status"], {
       encoding: "utf8",
@@ -236,13 +251,7 @@ export async function probeCodexLogin(
       maxBuffer: 16 * 1024,
       killSignal: "SIGKILL",
       signal: options.signal,
-      env: {
-        HOME: homeDirectory,
-        PATH: environment.PATH ?? "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
-        LANG: "C.UTF-8",
-        LC_ALL: "C.UTF-8",
-        ...(environment.CODEX_HOME ? { CODEX_HOME: environment.CODEX_HOME } : {})
-      }
+      env: codexProbeEnvironment(environment, homeDirectory, platform)
     }, (error) => {
       if (!error) {
         resolve("ready");
@@ -257,10 +266,28 @@ export async function probeCodexLogin(
   });
 }
 
-function codexEntrypointCandidates(
+export function codexEntrypointCandidates(
   environment: NodeJS.ProcessEnv,
-  homeDirectory: string
+  homeDirectory: string,
+  platform: CodexHostPlatform
 ): string[] {
+  if (platform === "windows") {
+    const pathCandidates = (environment.PATH ?? "")
+      .split(";")
+      .filter(Boolean)
+      .map((directory) => win32.join(directory, "codex.exe"));
+    const localAppData = environment.LOCALAPPDATA;
+    return [...new Set([
+      ...pathCandidates,
+      win32.join(homeDirectory, ".local", "bin", "codex.exe"),
+      ...(localAppData
+        ? [
+            win32.join(localAppData, "Programs", "ChatGPT", "resources", "codex.exe"),
+            win32.join(localAppData, "Programs", "OpenAI", "ChatGPT", "resources", "codex.exe")
+          ]
+        : [])
+    ])];
+  }
   const pathCandidates = (environment.PATH ?? "")
     .split(delimiter)
     .filter(Boolean)
@@ -273,6 +300,43 @@ function codexEntrypointCandidates(
     "/Applications/ChatGPT.app/Contents/Resources/codex",
     join(homeDirectory, "Applications", "ChatGPT.app", "Contents", "Resources", "codex")
   ])];
+}
+
+function basenameForPlatform(value: string, platform: CodexHostPlatform): string {
+  return platform === "windows" ? win32.basename(value) : basename(value);
+}
+
+function codexProbeEnvironment(
+  environment: NodeJS.ProcessEnv,
+  homeDirectory: string,
+  platform: CodexHostPlatform
+): NodeJS.ProcessEnv {
+  if (platform === "windows") {
+    return {
+      USERPROFILE: environment.USERPROFILE ?? homeDirectory,
+      HOME: homeDirectory,
+      ...copyEnvironmentKeys(environment, [
+        "SystemRoot", "SYSTEMROOT", "ComSpec", "LOCALAPPDATA", "APPDATA",
+        "TEMP", "TMP", "PATH", "PATHEXT", "CODEX_HOME"
+      ])
+    };
+  }
+  return {
+    HOME: homeDirectory,
+    PATH: environment.PATH ?? "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+    LANG: "C.UTF-8",
+    LC_ALL: "C.UTF-8",
+    ...(environment.CODEX_HOME ? { CODEX_HOME: environment.CODEX_HOME } : {})
+  };
+}
+
+function copyEnvironmentKeys(
+  environment: NodeJS.ProcessEnv,
+  keys: readonly string[]
+): NodeJS.ProcessEnv {
+  return Object.fromEntries(keys.flatMap((key) =>
+    environment[key] === undefined ? [] : [[key, environment[key]!]]
+  ));
 }
 
 function readiness(

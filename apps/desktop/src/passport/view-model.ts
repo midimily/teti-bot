@@ -17,10 +17,18 @@ import type {
   TetiCapability,
   TetiAvailability
 } from "../../../../core/passport/types.ts";
-import type { PassportControllerSnapshot } from "./controller.ts";
+import type {
+  AgentManagementErrorCode,
+  LocalLogoutErrorCode,
+  NetworkEnvironmentErrorCode,
+  OsaurusNativeErrorCode,
+  PassportControllerSnapshot,
+  PassportSharingErrorCode
+} from "./controller.ts";
 import type { AgentObservation } from "../../../../core/observation/types.ts";
 import { emptyAgentManagementSnapshot } from "../../../../core/observation/management.ts";
 import { TETI_BUILD_INFO } from "../build-info.ts";
+import { createDesktopI18n, formatMessage, type DesktopI18n } from "../i18n/index.ts";
 import { DEFAULT_TETI_NETWORK_BASE_URL } from "../../../../services/network/config.ts";
 
 export type ResourceTone = "free" | "plus" | "pro" | "unknown" | "unavailable";
@@ -37,6 +45,7 @@ export interface ResourceQuotaViewModel {
 
 export interface ResourceViewModel {
   id: string;
+  kind: AiResource["kind"];
   providerName: string;
   productName: string;
   kindLabel: string;
@@ -70,7 +79,7 @@ export interface AgentViewModel {
 export interface CapabilityBindingViewModel {
   agentNames: string[];
   resourceNames: string[];
-  statusLabel: "绑定完整" | "绑定信息不完整";
+  statusLabel: string;
 }
 
 export interface CapabilityViewModel {
@@ -82,10 +91,10 @@ export interface CapabilityViewModel {
   bindings: CapabilityBindingViewModel[];
   stale: boolean;
   computeOffer?: {
-    resourceLabel: "本地算力";
-    executionLabel: "接收端本机执行";
-    concurrencyLabel: "并发 1";
-    approvalLabel: "每次授权";
+    resourceLabel: string;
+    executionLabel: string;
+    concurrencyLabel: string;
+    approvalLabel: string;
   };
 }
 
@@ -137,14 +146,15 @@ export interface PassportSettingsViewModel {
   showOsaurusNativeConfiguration: boolean;
   osaurusNativeAgentId: string;
   osaurusNativeBusy: boolean;
-  osaurusNativeStatus: "未配置" | "安全资格检查中" | "安全资格未通过" | "可调用";
+  osaurusNativeState: "unconfigured" | "checking" | "blocked" | "ready";
+  osaurusNativeStatus: string;
   osaurusNativeReason?: string;
   osaurusNativeError?: string;
   useLocalDevelopmentNetwork: boolean;
   networkEnvironmentBusy: boolean;
   networkEnvironmentEndpoint: string;
   networkEnvironmentNextEndpoint: string;
-  networkEnvironmentActiveLabel: "生产环境" | "本机开发环境";
+  networkEnvironmentActiveLabel: string;
   networkEnvironmentRestartRequired: boolean;
   networkEnvironmentError?: string;
   showLocalDevelopmentNetworkSwitch: boolean;
@@ -185,9 +195,9 @@ export interface ConnectionCardViewModel {
   publicIdCode: string;
   identityLabel: string;
   compatibility: PassportConnectionSnapshot["compatibility"];
-  compatibilityLabel: "兼容" | "需要升级" | "待确认版本";
+  compatibilityLabel: string;
   reachability: PeerReachability;
-  reachabilityLabel: "在线" | "状态检测中" | "离线";
+  reachabilityLabel: string;
   passport: RemotePassportViewModel;
 }
 
@@ -199,49 +209,66 @@ export interface PassportViewModel {
 
 const REMOTE_TETI_HEARTBEAT_FRESH_MS = 20_000;
 const REMOTE_TETI_HEARTBEAT_OFFLINE_MS = 60_000;
+const DEFAULT_PASSPORT_I18N = createDesktopI18n("zh-Hans");
 
 export function toPassportViewModel(
   snapshot: PassportControllerSnapshot,
-  now = new Date()
+  now = new Date(),
+  i18n: DesktopI18n = DEFAULT_PASSPORT_I18N
 ): PassportViewModel {
+  const settingsMessages = i18n.messages.passport.settings;
+  const osaurusNativeState: PassportSettingsViewModel["osaurusNativeState"] =
+    snapshot.osaurusNative?.readiness === "ready"
+      || snapshot.passport.localPassport.agents.some((agent) => agent.id === "osaurus-native-teti")
+      ? "ready"
+      : snapshot.osaurusNative?.readiness === "blocked"
+        ? "blocked"
+        : snapshot.osaurusNative?.agentId
+          ? "checking"
+          : "unconfigured";
   return {
     aiPanel: {
-      title: "AI Passport",
+      title: i18n.messages.passport.title,
       open: snapshot.openPanel === "passport",
-      resources: snapshot.passport.localPassport.resources.map(toResourceViewModel),
-      agents: snapshot.passport.localPassport.agents.map(toAgentViewModel),
+      resources: snapshot.passport.localPassport.resources.map((resource) =>
+        toResourceViewModel(resource, i18n)
+      ),
+      agents: snapshot.passport.localPassport.agents.map((agent) =>
+        toAgentViewModel(agent, i18n)
+      ),
       capabilities: snapshot.passport.localPassport.capabilities.map((capability) =>
-        toCapabilityViewModel(capability)
+        toCapabilityViewModel(capability, [], [], [], false, i18n)
       )
     },
     settings: {
-      title: "设置",
-      identityLabel: formatLocalTetiIdentity(snapshot.passport.identity),
-      ...formatNetworkIdentityStatus(snapshot.passport.networkIdentity),
-      toggleLabel: "Passport 分享",
+      title: settingsMessages.title,
+      identityLabel: formatLocalTetiIdentity(snapshot.passport.identity, i18n),
+      ...formatNetworkIdentityStatus(snapshot.passport.networkIdentity, i18n),
+      toggleLabel: settingsMessages.sharing,
       open: snapshot.openPanel === "sharing",
       enabled: snapshot.passport.sharing.resourceSummary
         && snapshot.passport.sharing.resourceQuota
         && snapshot.passport.sharing.agents
         && snapshot.passport.sharing.capabilities,
       busy: snapshot.sharingBusy,
-      ...(snapshot.sharingError ? { error: snapshot.sharingError } : {}),
-      agentManagement: toAgentManagementViewModel(snapshot),
+      ...(snapshot.sharingErrorCode
+        ? { error: passportErrorMessage(snapshot.sharingErrorCode, i18n) }
+        : {}),
+      agentManagement: toAgentManagementViewModel(snapshot, i18n),
       showOsaurusNativeConfiguration: isOsaurusLocallyAvailable(snapshot),
       osaurusNativeAgentId: snapshot.osaurusNative?.agentId ?? "",
       osaurusNativeBusy: snapshot.osaurusNativeBusy ?? false,
-      osaurusNativeStatus: snapshot.osaurusNative?.readiness === "ready"
-        || snapshot.passport.localPassport.agents.some((agent) => agent.id === "osaurus-native-teti")
-        ? "可调用"
-        : snapshot.osaurusNative?.readiness === "blocked"
-          ? "安全资格未通过"
-          : snapshot.osaurusNative?.agentId
-            ? "安全资格检查中"
-            : "未配置",
+      osaurusNativeState,
+      osaurusNativeStatus: osaurusStatusLabel(osaurusNativeState, i18n),
       ...(snapshot.osaurusNative?.reasonCode
-        ? { osaurusNativeReason: formatOsaurusNativeReason(snapshot.osaurusNative.reasonCode) }
+        ? { osaurusNativeReason: formatOsaurusNativeReason(
+            snapshot.osaurusNative.reasonCode,
+            i18n
+          ) }
         : {}),
-      ...(snapshot.osaurusNativeError ? { osaurusNativeError: snapshot.osaurusNativeError } : {}),
+      ...(snapshot.osaurusNativeErrorCode
+        ? { osaurusNativeError: passportErrorMessage(snapshot.osaurusNativeErrorCode, i18n) }
+        : {}),
       useLocalDevelopmentNetwork: snapshot.networkEnvironment?.useLocalDevelopmentNetwork ?? false,
       networkEnvironmentBusy: snapshot.networkEnvironmentBusy ?? false,
       networkEnvironmentEndpoint: snapshot.networkEnvironment?.activeBaseUrl
@@ -250,66 +277,108 @@ export function toPassportViewModel(
         ?? DEFAULT_TETI_NETWORK_BASE_URL,
       networkEnvironmentActiveLabel:
         snapshot.networkEnvironment?.activeEnvironment === "local_development"
-          ? "本机开发环境"
-          : "生产环境",
+          ? settingsMessages.networkEnvironment.localActive
+          : settingsMessages.networkEnvironment.productionActive,
       networkEnvironmentRestartRequired: snapshot.networkEnvironment?.restartRequired ?? false,
-      ...(snapshot.networkEnvironmentError
-        ? { networkEnvironmentError: snapshot.networkEnvironmentError }
+      ...(snapshot.networkEnvironmentErrorCode
+        ? { networkEnvironmentError: passportErrorMessage(
+            snapshot.networkEnvironmentErrorCode,
+            i18n
+          ) }
         : {}),
       showLocalDevelopmentNetworkSwitch: TETI_BUILD_INFO.localDevelopmentNetworkSwitchEnabled,
-      networkVersionLabel: formatNetworkVersion(snapshot.networkContract),
-      ...formatPresenceStatus(snapshot.presence),
+      networkVersionLabel: formatNetworkVersion(snapshot.networkContract, i18n),
+      ...formatPresenceStatus(snapshot.presence, i18n),
       localLogoutConfirmationRequired: snapshot.localLogoutConfirmationRequired ?? false,
       localLogoutBusy: snapshot.localLogoutBusy ?? false,
-      ...(snapshot.localLogoutError ? { localLogoutError: snapshot.localLogoutError } : {}),
+      ...(snapshot.localLogoutErrorCode
+        ? { localLogoutError: passportErrorMessage(snapshot.localLogoutErrorCode, i18n) }
+        : {}),
       appVersion: TETI_BUILD_INFO.appVersion,
       buildTimestamp: TETI_BUILD_INFO.buildTimestamp
     },
-    connections: snapshot.passport.connections.map((connection) => toConnectionCardViewModel(connection, now))
+    connections: snapshot.passport.connections.map((connection) =>
+      toConnectionCardViewModel(connection, now, i18n)
+    )
   };
 }
 
 function formatNetworkVersion(
-  status: PassportControllerSnapshot["networkContract"]
+  status: PassportControllerSnapshot["networkContract"],
+  i18n: DesktopI18n
 ): string {
-  if (!status || status.state === "checking" || status.state === "disabled") return "检测中";
-  if (status.state !== "compatible") return "暂不可用";
-  return `Protocol ${status.protocolVersion} · Service ${status.serviceVersion}`;
+  const messages = i18n.messages.passport.settings.networkVersion;
+  if (!status || status.state === "checking" || status.state === "disabled") {
+    return messages.checking;
+  }
+  if (status.state !== "compatible") return messages.unavailable;
+  return formatMessage(messages.compatible, {
+    protocol: status.protocolVersion,
+    service: status.serviceVersion
+  });
 }
 
 function formatPresenceStatus(
-  presence: PassportControllerSnapshot["presence"]
+  presence: PassportControllerSnapshot["presence"],
+  i18n: DesktopI18n
 ): Pick<PassportSettingsViewModel, "presenceLabel" | "presenceTone"> {
+  const messages = i18n.messages.passport.settings.presence;
   if (!presence || presence.state === "stopped") {
-    return { presenceLabel: "尚未启动", presenceTone: "pending" };
+    return { presenceLabel: messages.stopped, presenceTone: "pending" };
   }
   if (presence.state === "sleeping") {
-    return { presenceLabel: "系统睡眠 · 已暂停上报", presenceTone: "pending" };
+    return {
+      presenceLabel: messages.sleeping,
+      presenceTone: "pending"
+    };
   }
   if (presence.state === "checking") {
-    return { presenceLabel: "正在连接", presenceTone: "pending" };
+    return { presenceLabel: messages.checking, presenceTone: "pending" };
   }
   if (presence.state === "unavailable") {
     if (presence.errorCode === "NETWORK_UNAUTHORIZED") {
-      return { presenceLabel: "Network 身份认证失败", presenceTone: "error" };
+      return {
+        presenceLabel: messages.unauthorized,
+        presenceTone: "error"
+      };
     }
-    return { presenceLabel: "Network 暂不可用", presenceTone: "error" };
+    return {
+      presenceLabel: messages.unavailable,
+      presenceTone: "error"
+    };
   }
   const mode = presence.mode === "collaborating"
-    ? "AI 协作中"
+    ? messages.modes.collaborating
     : presence.mode === "viewing_connect"
-      ? "正在查看建联面板"
+      ? messages.modes.viewingConnect
       : presence.mode === "background"
-        ? "后台在线"
-        : "在线";
-  return { presenceLabel: `已连接 · ${mode}`, presenceTone: "ok" };
+        ? messages.modes.background
+        : messages.modes.online;
+  return {
+    presenceLabel: formatMessage(messages.connected, { mode }),
+    presenceTone: "ok"
+  };
 }
 
-export function formatOsaurusNativeReason(reasonCode: string): string {
+export function formatOsaurusNativeReason(
+  reasonCode: string,
+  i18n: DesktopI18n = DEFAULT_PASSPORT_I18N
+): string {
   if (reasonCode === "OSAURUS_INSIGHTS_BODY_RETENTION_ACCEPTED") {
-    return "Osaurus Insights 会保留请求正文；已按本机 Agent 信任策略允许调用。";
+    return i18n.messages.passport.settings.osaurus.insightsRetentionAccepted;
   }
   return reasonCode;
+}
+
+function osaurusStatusLabel(
+  state: PassportSettingsViewModel["osaurusNativeState"],
+  i18n: DesktopI18n
+): string {
+  const statuses = i18n.messages.passport.settings.osaurus.statuses;
+  if (state === "ready") return statuses.ready;
+  if (state === "blocked") return statuses.blocked;
+  if (state === "checking") return statuses.checking;
+  return statuses.unconfigured;
 }
 
 const BUILTIN_MANAGED_AGENT_IDS = new Set([
@@ -320,28 +389,33 @@ const BUILTIN_MANAGED_AGENT_IDS = new Set([
   "codebuddy"
 ]);
 
-function toAgentManagementViewModel(snapshot: PassportControllerSnapshot): AgentManagementViewModel {
+function toAgentManagementViewModel(
+  snapshot: PassportControllerSnapshot,
+  i18n: DesktopI18n
+): AgentManagementViewModel {
   const management = snapshot.agentManagement ?? emptyAgentManagementSnapshot();
   const readyToDisplay = management.revision > 0;
   const scanning = snapshot.agentBusy || management.state === "discovering";
   const availableAgents = readyToDisplay
     ? management.agents.filter(isLocallyAvailableAgent)
     : [];
+  const messages = i18n.messages.passport.settings.agentManagement;
   const discoveryLabel = availableAgents.length > 0
-    ? `已发现 ${availableAgents.length}`
-    : "未发现本机 Agent";
+    ? i18n.formatPlural(availableAgents.length, messages.found)
+    : messages.noneFound;
   const statusLabel = !readyToDisplay
-    ? "正在发现本机 Agent…"
+    ? messages.discovering
     : management.state === "discovering"
-      ? "正在重新扫描…"
+      ? messages.rescanning
       : management.state === "disabled"
-        ? "Agent 发现已关闭"
+        ? messages.disabled
         : management.state === "degraded"
-          ? `${discoveryLabel} · 部分检测未完成`
+          ? formatMessage(messages.partiallyComplete, { status: discoveryLabel })
           : discoveryLabel;
-  const safeError = snapshot.agentError
-    ?? (readyToDisplay && management.errors.length > 0
-      ? "部分检测器未完成，不影响其他 Agent。"
+  const safeError = snapshot.agentErrorCode
+    ? passportErrorMessage(snapshot.agentErrorCode, i18n)
+    : (readyToDisplay && management.errors.length > 0
+      ? messages.detectorWarning
       : undefined);
   return {
     readyToDisplay,
@@ -352,12 +426,39 @@ function toAgentManagementViewModel(snapshot: PassportControllerSnapshot): Agent
           .map((agent) => toManagedAgentViewModel(
             agent,
             management.pathOverrides[agent.agentId] ?? "",
-            snapshot.agentBusyId === agent.agentId
+            snapshot.agentBusyId === agent.agentId,
+            i18n
           ))
           .sort(compareManagedAgents)
       : [],
     ...(safeError ? { error: safeError } : {})
   };
+}
+
+function passportErrorMessage(
+  code:
+    | PassportSharingErrorCode
+    | AgentManagementErrorCode
+    | OsaurusNativeErrorCode
+    | NetworkEnvironmentErrorCode
+    | LocalLogoutErrorCode,
+  i18n: DesktopI18n
+): string {
+  const messages = i18n.messages.passport.settings.errors;
+  switch (code) {
+    case "sharing_save_failed":
+      return messages.sharingSave;
+    case "agent_rescan_failed":
+      return messages.agentRescan;
+    case "agent_path_save_failed":
+      return messages.agentPathSave;
+    case "osaurus_native_save_failed":
+      return messages.osaurusSave;
+    case "network_environment_save_failed":
+      return messages.networkEnvironmentSave;
+    case "local_profile_logout_failed":
+      return messages.localReset;
+  }
 }
 
 function isLocallyAvailableAgent(agent: AgentObservation): boolean {
@@ -385,7 +486,8 @@ function compareManagedAgents(left: ManagedAgentViewModel, right: ManagedAgentVi
 function toManagedAgentViewModel(
   observation: AgentObservation,
   pathOverride: string,
-  busy: boolean
+  busy: boolean,
+  i18n: DesktopI18n
 ): ManagedAgentViewModel {
   const agent = toAgentViewModel({
     id: observation.agentId,
@@ -400,44 +502,60 @@ function toManagedAgentViewModel(
       ? {}
       : { processCount: observation.runtime.processCount }),
     observedAt: observation.observedAt
-  });
-  const desktop = observation.surfaces.includes("desktop");
+  }, i18n);
   return {
     ...agent,
     pathOverride,
-    pathPlaceholder: desktop
-      ? `/Applications/${observation.displayName}.app`
-      : `/path/to/${observation.agentId === "claude-code" ? "claude" : observation.agentId.replace(/-cli$/, "")}`,
+    pathPlaceholder: i18n.messages.passport.settings.agentManagement.pathPlaceholder,
     canOverride: BUILTIN_MANAGED_AGENT_IDS.has(observation.agentId),
     busy
   };
 }
 
 function formatNetworkIdentityStatus(
-  status: RuntimePassportSnapshot["networkIdentity"]
+  status: RuntimePassportSnapshot["networkIdentity"],
+  i18n: DesktopI18n
 ): Pick<PassportSettingsViewModel, "networkIdentityLabel" | "networkIdentityTone"> {
+  const messages = i18n.messages.passport.settings.networkIdentityStatus;
   if (status.state === "active") {
-    return { networkIdentityLabel: "已连接 Network", networkIdentityTone: "ok" };
+    return {
+      networkIdentityLabel: messages.active,
+      networkIdentityTone: "ok"
+    };
   }
   if (status.state === "unknown") {
-    return { networkIdentityLabel: "检查中", networkIdentityTone: "pending" };
+    return { networkIdentityLabel: messages.checking, networkIdentityTone: "pending" };
   }
   if (status.state === "pending") {
-    return { networkIdentityLabel: "身份同步中", networkIdentityTone: "pending" };
+    return {
+      networkIdentityLabel: messages.synchronizing,
+      networkIdentityTone: "pending"
+    };
   }
   if (status.state === "unavailable") {
     return {
-      networkIdentityLabel: `Network 暂不可用 [${shortNetworkCode(status.errorCode)}]`,
+      networkIdentityLabel: formatMessage(messages.unavailable, {
+        code: shortNetworkCode(status.errorCode)
+      }),
       networkIdentityTone: "pending"
     };
   }
   if (status.state === "unauthorized") {
-    return { networkIdentityLabel: "Network 身份认证失败", networkIdentityTone: "error" };
+    return {
+      networkIdentityLabel: messages.unauthorized,
+      networkIdentityTone: "error"
+    };
   }
   if (status.state === "revoked") {
-    return { networkIdentityLabel: "Network 客户端已撤销", networkIdentityTone: "error" };
+    return {
+      networkIdentityLabel: messages.revoked,
+      networkIdentityTone: "error"
+    };
   }
-  return { networkIdentityLabel: "Network 身份冲突", networkIdentityTone: "error" };
+  return {
+    networkIdentityLabel: messages.conflict,
+    networkIdentityTone: "error"
+  };
 }
 
 function shortNetworkCode(code: string | undefined): string {
@@ -453,22 +571,30 @@ function shortNetworkCode(code: string | undefined): string {
   return code ? known[code] ?? "NET-DOWN" : "NET-DOWN";
 }
 
-export function formatLocalTetiIdentity(identity: PassportIdentity | null): string {
-  if (!identity) return "暂不可用";
-  const displayName = identity.displayName?.trim() || "未命名";
+export function formatLocalTetiIdentity(
+  identity: PassportIdentity | null,
+  i18n: DesktopI18n = DEFAULT_PASSPORT_I18N
+): string {
+  if (!identity) return i18n.messages.common.unavailable;
+  const displayName = identity.displayName?.trim()
+    || i18n.messages.connections.list.unnamed;
   const publicIdCode = isCanonicalTetiPublicId(identity.tetiId)
     ? identity.tetiId.slice(TETI_PUBLIC_ID_PREFIX.length)
     : isCanonicalTetiRelayChatmailAddress(identity.address)
       ? identity.address.slice(0, TETI_PUBLIC_ID_CODE_LENGTH)
       : null;
-  return publicIdCode
-    ? `${displayName}（${publicIdCode}）`
-    : `${displayName}（ID 暂不可用）`;
+  return formatMessage(
+    publicIdCode
+      ? i18n.messages.connections.list.identity
+      : i18n.messages.connections.list.identityWithoutId,
+    { name: displayName, id: publicIdCode ?? "" }
+  );
 }
 
 export function toConnectionCardViewModel(
   connection: PassportConnectionSnapshot,
-  now = new Date()
+  now = new Date(),
+  i18n: DesktopI18n = DEFAULT_PASSPORT_I18N
 ): ConnectionCardViewModel {
   const lastSeenAt = validPastOrPresentTimestamp(connection.lastSeen, now);
   const confirmationBaseline = validPastOrPresentTimestamp(
@@ -493,21 +619,32 @@ export function toConnectionCardViewModel(
           && confirmationAge < REMOTE_TETI_HEARTBEAT_OFFLINE_MS)
               ? "checking"
               : "unreachable";
+  const messages = i18n.messages.connections;
+  const displayName = connection.identity.displayName?.trim()
+    || messages.list.unnamed;
+  const publicIdCode = publicTetiIdCode(connection.identity);
   return {
     requestId: connection.requestId,
     state: connection.connectionState,
-    displayName: connection.identity.displayName?.trim() || "未命名",
-    publicIdCode: publicTetiIdCode(connection.identity) ?? "ID 暂不可用",
-    identityLabel: formatLocalTetiIdentity(connection.identity),
+    displayName,
+    publicIdCode: publicIdCode ?? messages.list.idUnavailable,
+    identityLabel: formatMessage(
+      publicIdCode ? messages.list.identity : messages.list.identityWithoutId,
+      { name: displayName, id: publicIdCode ?? "" }
+    ),
     compatibility: connection.compatibility,
     compatibilityLabel: connection.compatibility === "compatible"
-      ? "兼容"
+      ? messages.list.compatibility.compatible
       : connection.compatibility === "upgrade_required"
-        ? "需要升级"
-        : "待确认版本",
+        ? messages.list.compatibility.upgradeRequired
+        : messages.list.compatibility.checking,
     reachability,
-    reachabilityLabel: reachability === "reachable" ? "在线" : reachability === "checking" ? "状态检测中" : "离线",
-    passport: toRemotePassportViewModel(connection.passport)
+    reachabilityLabel: reachability === "reachable"
+      ? messages.list.reachability.reachable
+      : reachability === "checking"
+        ? messages.list.reachability.checking
+        : messages.list.reachability.unreachable,
+    passport: toRemotePassportViewModel(connection.passport, i18n)
   };
 }
 
@@ -527,7 +664,10 @@ function validPastOrPresentTimestamp(value: string | null | undefined, now: Date
   return Number.isFinite(timestamp) && timestamp <= now.getTime() ? timestamp : null;
 }
 
-export function toResourceViewModel(resource: AiResource): ResourceViewModel {
+export function toResourceViewModel(
+  resource: AiResource,
+  i18n: DesktopI18n = DEFAULT_PASSPORT_I18N
+): ResourceViewModel {
   const weekly = resource.quotas.find((quota) => quota.period === "week") ?? null;
   const planKey = resource.plan?.key?.toLowerCase() ?? null;
   const unavailable = resource.availability === "unknown" || resource.availability === "unavailable";
@@ -538,45 +678,54 @@ export function toResourceViewModel(resource: AiResource): ResourceViewModel {
       : "unknown";
   return {
     id: resource.id,
-    providerName: formatAgentProvider(resource.provider) || "Provider 未标注",
+    kind: resource.kind,
+    providerName: formatAgentProvider(resource.provider)
+      || i18n.messages.connections.details.providerUnspecified,
     productName: resource.product,
-    kindLabel: formatResourceKind(resource.kind),
-    assuranceLabel: formatResourceAssurance(resource.assurance),
+    kindLabel: formatResourceKind(resource.kind, i18n),
+    assuranceLabel: formatResourceAssurance(resource.assurance, i18n),
     planLabel: unavailable
-      ? "暂时无法确认"
-      : resource.plan?.displayName || "计划未知",
-    availabilityLabel: availabilityLabel(resource.availability),
+      ? i18n.messages.connections.details.planUnavailable
+      : resource.plan?.displayName
+        || i18n.messages.connections.details.planUnknown,
+    availabilityLabel: availabilityLabel(resource.availability, i18n),
     remainingPercent: weekly?.remainingPercent ?? null,
-    resetLabel: formatResetAt(weekly?.resetAt ?? null),
+    resetLabel: formatResetAt(weekly?.resetAt ?? null, i18n),
     inferred: weekly?.identification === "inferred",
     stale: resource.availability === "stale",
     tone,
     icon: resource.id === "openai.codex" ? "codex" : "generic",
     quotas: resource.quotas.map((quota) => ({
-      periodLabel: formatQuotaPeriod(quota.period),
+      periodLabel: formatQuotaPeriod(quota.period, i18n),
       remainingPercent: quota.remainingPercent,
-      resetLabel: formatResetAt(quota.resetAt),
-      windowLabel: formatQuotaWindow(quota.windowSeconds),
+      resetLabel: formatResetAt(quota.resetAt, i18n),
+      windowLabel: formatQuotaWindow(quota.windowSeconds, i18n),
       inferred: quota.identification === "inferred"
     }))
   };
 }
 
-export function toAgentViewModel(agent: AiAgent | CallablePassportAgent): AgentViewModel {
+export function toAgentViewModel(
+  agent: AiAgent | CallablePassportAgent,
+  i18n: DesktopI18n = DEFAULT_PASSPORT_I18N
+): AgentViewModel {
   if (isCallablePassportAgent(agent)) {
     const stale = agent.availability === "stale";
     return {
       id: agent.id,
       name: agent.name,
       providerName: formatAgentProvider(agent.provider),
-      versionLabel: "版本未共享",
-      statusLabel: stale ? "信息已过期" : "可调用",
+      versionLabel: i18n.messages.connections.details.agent.versionNotShared,
+      statusLabel: stale
+        ? i18n.messages.connections.details.agent.informationStale
+        : i18n.messages.connections.details.agent.callable,
       detailLabel: [
         formatAgentProvider(agent.provider),
-        agent.capabilityIds.map(formatCapabilityId).join("、")
+        agent.capabilityIds.map((id) => formatCapabilityId(id, i18n))
+          .join(i18n.messages.connections.details.listSeparator)
       ].filter(Boolean).join(" · "),
-      inputModeLabels: agent.inputModes.map(formatAgentMode),
-      outputModeLabels: agent.outputModes.map(formatAgentMode),
+      inputModeLabels: agent.inputModes.map((mode) => formatAgentMode(mode, i18n)),
+      outputModeLabels: agent.outputModes.map((mode) => formatAgentMode(mode, i18n)),
       capabilityIds: [...agent.capabilityIds],
       tone: stale ? "unknown" : "running"
     };
@@ -592,23 +741,28 @@ export function toAgentViewModel(agent: AiAgent | CallablePassportAgent): AgentV
         ? "absent"
         : "unknown";
   const statusLabel = running
-    ? "运行中"
+    ? i18n.messages.connections.details.agent.running
     : installed
-      ? agent.runtimeStatus === "unknown" ? "已安装 · 状态未知" : "已安装"
+      ? agent.runtimeStatus === "unknown"
+        ? i18n.messages.connections.details.agent.installedUnknown
+        : i18n.messages.connections.details.agent.installed
       : absent
-        ? "未发现"
-        : "未确认";
+        ? i18n.messages.connections.details.agent.notFound
+        : i18n.messages.connections.details.agent.unconfirmed;
   const providerName = formatAgentProvider(agent.provider);
   const details = [
     providerName,
     agent.version?.trim() || "",
-    running && (agent.processCount ?? 0) > 1 ? `${agent.processCount} 个进程` : ""
+    running && (agent.processCount ?? 0) > 1
+      ? i18n.formatPlural(agent.processCount!, i18n.messages.connections.details.agent.processes)
+      : ""
   ].filter(Boolean);
   return {
     id: agent.id,
     name: agent.name,
     providerName,
-    versionLabel: agent.version?.trim() || "版本未知",
+    versionLabel: agent.version?.trim()
+      || i18n.messages.connections.details.agent.versionUnknown,
     statusLabel,
     detailLabel: details.join(" · "),
     inputModeLabels: [],
@@ -623,16 +777,17 @@ export function toCapabilityViewModel(
   bindings: RemotePassportSnapshot["bindings"] = [],
   agents: AgentViewModel[] = [],
   resources: ResourceViewModel[] = [],
-  hasComputeOffer = false
+  hasComputeOffer = false,
+  i18n: DesktopI18n = DEFAULT_PASSPORT_I18N
 ): CapabilityViewModel {
   const agentNames = new Map(agents.map((agent) => [agent.id, agent.name]));
   const resourceNames = new Map(resources.map((resource) => [resource.id, resource.productName]));
   return {
     id: capability.id,
     name: capability.name,
-    categoryLabel: formatCapabilityId(capability.category),
+    categoryLabel: formatCapabilityId(capability.category, i18n),
     description: capability.description.trim(),
-    availabilityLabel: availabilityLabel(capability.availability),
+    availabilityLabel: availabilityLabel(capability.availability, i18n),
     bindings: bindings
       .filter((binding) => binding.capabilityId === capability.id)
       .map((binding) => {
@@ -643,16 +798,18 @@ export function toCapabilityViewModel(
         return {
           agentNames: resolvedAgents,
           resourceNames: resolvedResources,
-          statusLabel: complete ? "绑定完整" : "绑定信息不完整"
+          statusLabel: complete
+            ? i18n.messages.connections.details.binding.complete
+            : i18n.messages.connections.details.binding.incomplete
         };
       }),
     stale: capability.availability === "stale",
     ...(hasComputeOffer ? {
       computeOffer: {
-        resourceLabel: "本地算力" as const,
-        executionLabel: "接收端本机执行" as const,
-        concurrencyLabel: "并发 1" as const,
-        approvalLabel: "每次授权" as const
+        resourceLabel: i18n.messages.connections.details.computeOffer.resource,
+        executionLabel: i18n.messages.connections.details.computeOffer.execution,
+        concurrencyLabel: i18n.messages.connections.details.computeOffer.concurrency,
+        approvalLabel: i18n.messages.connections.details.computeOffer.approval
       }
     } : {})
   };
@@ -664,10 +821,10 @@ function isCallablePassportAgent(
   return "capabilityIds" in agent && "availability" in agent;
 }
 
-function formatCapabilityId(value: string): string {
+function formatCapabilityId(value: string, i18n: DesktopI18n): string {
   const known: Record<string, string> = {
-    coding: "编程",
-    "code-analysis": "代码分析"
+    coding: i18n.messages.connections.details.capabilityCategories.coding,
+    "code-analysis": i18n.messages.connections.details.capabilityCategories.codeAnalysis
   };
   return known[value] ?? value.replace(/[._-]+/g, " ");
 }
@@ -684,52 +841,62 @@ function formatAgentProvider(provider: string | undefined): string {
   return known[value.toLowerCase()] ?? value;
 }
 
-function formatResourceKind(kind: AiResource["kind"]): string {
+function formatResourceKind(kind: AiResource["kind"], i18n: DesktopI18n): string {
   const known: Record<AiResource["kind"], string> = {
-    subscription: "订阅资源",
-    account: "账号资源",
-    local_model: "本地模型",
-    compute: "计算资源"
+    subscription: i18n.messages.connections.details.resourceKinds.subscription,
+    account: i18n.messages.connections.details.resourceKinds.account,
+    local_model: i18n.messages.connections.details.resourceKinds.localModel,
+    compute: i18n.messages.connections.details.resourceKinds.compute
   };
   return known[kind];
 }
 
-function formatResourceAssurance(assurance: AiResource["assurance"]): string {
+function formatResourceAssurance(assurance: AiResource["assurance"], i18n: DesktopI18n): string {
   const known: Record<AiResource["assurance"], string> = {
-    provider_observed: "Provider 已观测",
-    local_observed: "本机已观测",
-    self_declared: "节点声明"
+    provider_observed: i18n.messages.connections.details.assurances.providerObserved,
+    local_observed: i18n.messages.connections.details.assurances.localObserved,
+    self_declared: i18n.messages.connections.details.assurances.selfDeclared
   };
   return known[assurance];
 }
 
-function formatQuotaPeriod(period: string): string {
+function formatQuotaPeriod(period: string, i18n: DesktopI18n): string {
   const known: Record<string, string> = {
-    week: "周额度",
-    day: "日额度",
-    hour: "小时额度"
+    week: i18n.messages.connections.details.quotaPeriods.week,
+    day: i18n.messages.connections.details.quotaPeriods.day,
+    hour: i18n.messages.connections.details.quotaPeriods.hour
   };
-  return known[period.toLowerCase()] ?? formatCapabilityId(period);
+  return known[period.toLowerCase()] ?? formatCapabilityId(period, i18n);
 }
 
-function formatQuotaWindow(windowSeconds: number | null): string {
-  if (windowSeconds === null) return "窗口时长未知";
-  if (windowSeconds % 86_400 === 0) return `${windowSeconds / 86_400} 天窗口`;
-  if (windowSeconds % 3_600 === 0) return `${windowSeconds / 3_600} 小时窗口`;
-  return `${windowSeconds} 秒窗口`;
+function formatQuotaWindow(windowSeconds: number | null, i18n: DesktopI18n): string {
+  if (windowSeconds === null) {
+    return i18n.messages.connections.details.windowUnknown;
+  }
+  if (windowSeconds % 86_400 === 0) {
+    return i18n.formatPlural(windowSeconds / 86_400, i18n.messages.connections.details.daysWindow);
+  }
+  if (windowSeconds % 3_600 === 0) {
+    return i18n.formatPlural(windowSeconds / 3_600, i18n.messages.connections.details.hoursWindow);
+  }
+  return i18n.formatPlural(windowSeconds, i18n.messages.connections.details.secondsWindow);
 }
 
-function formatAgentMode(mode: "text" | "image"): string {
-  return mode === "image" ? "图片" : "文本";
+function formatAgentMode(mode: "text" | "image", i18n: DesktopI18n): string {
+  return mode === "image"
+    ? i18n.messages.connections.details.modes.image
+    : i18n.messages.connections.details.modes.text;
 }
 
 function toProviderViewModels(
   resources: ResourceViewModel[],
-  agents: AgentViewModel[]
+  agents: AgentViewModel[],
+  i18n: DesktopI18n
 ): ProviderViewModel[] {
   const providers = new Map<string, ProviderViewModel>();
   const ensure = (name: string) => {
-    const normalizedName = name.trim() || "Provider 未标注";
+    const normalizedName = name.trim()
+      || i18n.messages.connections.details.providerUnspecified;
     const id = normalizedName.toLowerCase();
     const existing = providers.get(id);
     if (existing) return existing;
@@ -751,27 +918,32 @@ function toProviderViewModels(
   return [...providers.values()];
 }
 
-function toRemotePassportViewModel(passport: RemotePassportSnapshot): RemotePassportViewModel {
+function toRemotePassportViewModel(
+  passport: RemotePassportSnapshot,
+  i18n: DesktopI18n
+): RemotePassportViewModel {
+  const notes = i18n.messages.connections.details.notes;
   const note = passport.state === "stale"
-    ? "AI Passport 已过期"
+    ? notes.stale
     : passport.state === "disabled"
-      ? "对方未分享 AI Passport"
+      ? notes.disabled
       : passport.state === "unknown"
-      ? "暂无 AI Passport"
+      ? notes.empty
         : passport.resources.length === 0
           && passport.agents.length === 0
           && (passport.capabilities?.length ?? 0) === 0
-          ? "暂无 AI Passport"
+          ? notes.empty
           : undefined;
-  const resources = passport.resources.map(toResourceViewModel);
-  const agents = passport.agents.map(toAgentViewModel);
+  const resources = passport.resources.map((resource) => toResourceViewModel(resource, i18n));
+  const agents = passport.agents.map((agent) => toAgentViewModel(agent, i18n));
   const capabilities = (passport.capabilities ?? []).map((capability) =>
     toCapabilityViewModel(
       capability,
       passport.bindings ?? [],
       agents,
       resources,
-      (passport.computeOffers ?? []).some((offer) => offer.capability === capability.id)
+      (passport.computeOffers ?? []).some((offer) => offer.capability === capability.id),
+      i18n
     )
   );
   return {
@@ -780,7 +952,7 @@ function toRemotePassportViewModel(passport: RemotePassportSnapshot): RemotePass
     stale: passport.state === "stale",
     resources,
     agents,
-    providers: toProviderViewModels(resources, agents),
+    providers: toProviderViewModels(resources, agents, i18n),
     capabilities,
     summary: {
       resource: selectSummaryResource(resources),
@@ -799,23 +971,32 @@ function selectSummaryResource(resources: ResourceViewModel[]): ResourceViewMode
       (resource.remainingPercent === null ? 0 : 100)
       + (resource.tone === "unavailable" ? 0 : 20)
       + (resource.stale ? 0 : 10)
-      + (resource.kindLabel === "本地模型" || resource.kindLabel === "计算资源" ? 5 : 0);
+      + (resource.kind === "local_model" || resource.kind === "compute" ? 5 : 0);
     return score(right) - score(left) || left.id.localeCompare(right.id);
   })[0] ?? null;
 }
 
-function availabilityLabel(availability: TetiAvailability): string {
-  if (availability === "available") return "可用";
-  if (availability === "stale") return "数据已过期";
-  if (availability === "unavailable") return "暂不可用";
-  return "暂时无法确认";
+function availabilityLabel(availability: TetiAvailability, i18n: DesktopI18n): string {
+  const messages = i18n.messages.connections.details.availability;
+  if (availability === "available") return messages.available;
+  if (availability === "stale") return messages.stale;
+  if (availability === "unavailable") return messages.unavailable;
+  return messages.unknown;
 }
 
-export function formatResetAt(resetAt: string | null): string {
-  if (!resetAt) return "重置时间暂不可用";
+export function formatResetAt(
+  resetAt: string | null,
+  i18n: DesktopI18n = DEFAULT_PASSPORT_I18N
+): string {
+  const unavailable = i18n.messages.connections.details.resetUnavailable;
+  if (!resetAt) return unavailable;
   const date = new Date(resetAt);
-  if (Number.isNaN(date.getTime())) return "重置时间暂不可用";
-  const minutes = String(date.getMinutes()).padStart(2, "0");
-  const hours = String(date.getHours()).padStart(2, "0");
-  return `${date.getMonth() + 1}/${date.getDate()} ${hours}:${minutes} 重置`;
+  if (Number.isNaN(date.getTime())) return unavailable;
+  const display = i18n.formatDateTime(date, {
+    month: "numeric",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit"
+  });
+  return formatMessage(i18n.messages.connections.details.resetAt, { date: display });
 }

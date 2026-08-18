@@ -236,10 +236,10 @@ function transportSpawnError(error: Error): ChatmailTransportError {
     return new ChatmailTransportError("CM_RPC_NOT_FOUND", "deltachat-rpc-server was not found.");
   }
   if (code === "EACCES" || code === "EPERM") {
-    return new ChatmailTransportError("CM_RPC_DENIED", "macOS denied execution of deltachat-rpc-server.");
+    return new ChatmailTransportError("CM_RPC_DENIED", "The operating system denied execution of deltachat-rpc-server.");
   }
   if (code === "ENOEXEC") {
-    return new ChatmailTransportError("CM_RPC_INCOMPATIBLE", "deltachat-rpc-server is not executable on this Mac.");
+    return new ChatmailTransportError("CM_RPC_INCOMPATIBLE", "deltachat-rpc-server is not compatible with this computer.");
   }
   return new ChatmailTransportError("CM_RPC_IO", `deltachat-rpc-server could not start: ${error.message}`);
 }

@@ -4,6 +4,7 @@ import {
   CodexImageOutputError,
   persistCodexGeneratedImages
 } from "./codex-image-output.ts";
+import { isSafeAbsoluteLocalPath } from "../../../../../core/application/local-path.ts";
 
 const MAX_INPUT_BYTES = 24 * 1024;
 // imageGeneration.result carries the generated image as a string in addition
@@ -124,7 +125,7 @@ process.once("SIGINT", terminate);
 
 try {
   await request("initialize", {
-    clientInfo: { name: "teti-image-connector", title: "Teti", version: "0.3.9" },
+    clientInfo: { name: "teti-image-connector", title: "Teti", version: "0.4.0" },
     capabilities: { experimentalApi: true }
   });
   notify("initialized", {});
@@ -222,8 +223,10 @@ function parseArguments(values: string[]): { codex: string; workspace: string; i
     else if (name === "--image") images.push(value);
     else throw new Error("CODEX_IMAGE_ARGUMENT_INVALID");
   }
-  if (!codex.startsWith("/") || !workspace.startsWith("/") || images.length > 4
-    || images.some((path) => !path.startsWith("/"))) {
+  if (!isSafeAbsoluteLocalPath(codex)
+    || !isSafeAbsoluteLocalPath(workspace)
+    || images.length > 4
+    || images.some((path) => !isSafeAbsoluteLocalPath(path))) {
     throw new Error("CODEX_IMAGE_ARGUMENT_INVALID");
   }
   return { codex, workspace, images };
@@ -266,7 +269,7 @@ function collectResult(items: ProjectedCompletedItem[]): { text: string; savedPa
     }
     if (item.type === "imageGeneration"
       && typeof item.savedPath === "string"
-      && item.savedPath.startsWith("/")) {
+      && isSafeAbsoluteLocalPath(item.savedPath)) {
       savedPaths.push(item.savedPath);
     }
   }
@@ -287,8 +290,7 @@ function projectCompletedItem(value: unknown): ProjectedCompletedItem | null {
   if (value.type === "imageGeneration"
     && typeof value.status === "string"
     && typeof value.savedPath === "string"
-    && value.savedPath.startsWith("/")
-    && !value.savedPath.includes("\0")) {
+    && isSafeAbsoluteLocalPath(value.savedPath)) {
     return {
       type: "imageGeneration",
       status: value.status,

@@ -1,4 +1,5 @@
 import type { AgentDetectorDefinition } from "./types.ts";
+import type { LifecycleDesktopPlatform } from "../../desktop-platform.ts";
 
 const SAFE_PRIVACY = {
   collectPaths: false,
@@ -186,6 +187,32 @@ export const BUILTIN_AGENT_DETECTORS: readonly AgentDetectorDefinition[] = Objec
   } satisfies AgentDetectorDefinition)
 ]);
 
-export function cloneBuiltinAgentDetectors(): AgentDetectorDefinition[] {
-  return structuredClone([...BUILTIN_AGENT_DETECTORS]);
+export function cloneBuiltinAgentDetectors(
+  platform: LifecycleDesktopPlatform = "macos"
+): AgentDetectorDefinition[] {
+  const definitions = structuredClone([...BUILTIN_AGENT_DETECTORS]);
+  if (platform === "macos") return definitions;
+  return definitions
+    .filter((definition) => definition.id !== "osaurus")
+    .map((definition) => ({
+      ...definition,
+      installDetectors: [
+        ...(definition.id === "codex"
+          ? [{
+              type: "executable_path" as const,
+              paths: [
+                "%LOCALAPPDATA%\\Programs\\ChatGPT\\resources\\codex.exe",
+                "%LOCALAPPDATA%\\Programs\\OpenAI\\ChatGPT\\resources\\codex.exe",
+                "%USERPROFILE%\\.local\\bin\\codex.exe"
+              ],
+              expectedNames: ["codex", "codex.exe"]
+            }]
+          : []),
+        ...definition.installDetectors.filter((detector) => detector.type !== "app_bundle")
+      ],
+      processDetectors: definition.processDetectors.map((detector) => ({
+        ...detector,
+        names: [...new Set(detector.names.map((name) => name.replace(/\.exe$/i, "")))]
+      }))
+    }));
 }

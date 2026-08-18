@@ -312,16 +312,19 @@ test("Osaurus Agent transport posts only to the fixed /agents/{id}/run route", a
 });
 
 test("sidecar watches policy changes and Settings exposes one fixed Agent ID control", async () => {
-  const [main, view, protocol] = await Promise.all([
+  const [main, view, protocol, chineseCatalog] = await Promise.all([
     readFile(new URL("../lifecycle-sidecar/main.ts", import.meta.url), "utf8"),
     readFile(new URL("../src/passport/view.ts", import.meta.url), "utf8"),
-    readFile(new URL("../src/lifecycle-bridge/protocol.ts", import.meta.url), "utf8")
+    readFile(new URL("../src/lifecycle-bridge/protocol.ts", import.meta.url), "utf8"),
+    readFile(new URL("../src/i18n/locales/zh-hans.ts", import.meta.url), "utf8")
   ]);
   assert.match(main, /waitForNativeAgentChange/);
   assert.match(main, /hostAgent\.unregisterConnector\(OSAURUS_NATIVE_CHILD\.connectorId\)/);
   assert.match(main, /nextDigest !== registeredDigest/);
-  assert.match(view, /固定 Osaurus Agent UUID/);
-  assert.match(view, /Teti 不修改 Tools、Osaurus Memory 与 Autonomous Exec/);
+  assert.match(view, /messages\.uuidLabel/);
+  assert.match(view, /messages\.policy/);
+  assert.match(chineseCatalog, /固定 Osaurus Agent UUID/);
+  assert.match(chineseCatalog, /Teti 不修改 Tools、Osaurus Memory 与 Autonomous Exec/);
   assert.match(protocol, /"osaurus\.native\.get"/);
   assert.match(protocol, /"osaurus\.native\.set"/);
 });

@@ -33,8 +33,8 @@ function readPackageVersion(): string {
   const value = JSON.parse(readFileSync(resolve(desktopRoot, "package.json"), "utf8")) as {
     version?: unknown;
   };
-  if (typeof value.version !== "string" || !/^\d+\.\d+\.\d+$/.test(value.version)) {
-    throw new Error("Desktop package version must use major.minor.patch.");
+  if (typeof value.version !== "string" || !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(value.version)) {
+    throw new Error("Desktop package version must use semantic versioning.");
   }
   return value.version;
 }

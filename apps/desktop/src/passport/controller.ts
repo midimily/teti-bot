@@ -19,6 +19,12 @@ import {
 
 const PASSPORT_READ_INTERVAL_MS = 3_000;
 
+export type PassportSharingErrorCode = "sharing_save_failed";
+export type AgentManagementErrorCode = "agent_rescan_failed" | "agent_path_save_failed";
+export type OsaurusNativeErrorCode = "osaurus_native_save_failed";
+export type NetworkEnvironmentErrorCode = "network_environment_save_failed";
+export type LocalLogoutErrorCode = "local_profile_logout_failed";
+
 export interface PassportClient {
   getSnapshot(): Promise<RuntimePassportSnapshot>;
   setSharing(policy: PassportSharingPolicy): Promise<RuntimePassportSnapshot>;
@@ -43,17 +49,17 @@ export interface PassportControllerSnapshot {
   osaurusNativeBusy?: boolean;
   agentBusyId?: string;
   openPanel: "passport" | "sharing" | null;
-  sharingError?: string;
-  agentError?: string;
-  osaurusNativeError?: string;
+  sharingErrorCode?: PassportSharingErrorCode;
+  agentErrorCode?: AgentManagementErrorCode;
+  osaurusNativeErrorCode?: OsaurusNativeErrorCode;
   networkEnvironment?: TetiNetworkEnvironmentSettingsDto;
   networkContract?: RuntimeNetworkContractStatusDto;
   presence?: RuntimePresenceStatusDto;
   networkEnvironmentBusy?: boolean;
-  networkEnvironmentError?: string;
+  networkEnvironmentErrorCode?: NetworkEnvironmentErrorCode;
   localLogoutConfirmationRequired?: boolean;
   localLogoutBusy?: boolean;
-  localLogoutError?: string;
+  localLogoutErrorCode?: LocalLogoutErrorCode;
 }
 
 export class PassportController {
@@ -165,7 +171,7 @@ export class PassportController {
     };
     this.sharingRevision += 1;
     this.snapshotValue.sharingBusy = true;
-    this.snapshotValue.sharingError = undefined;
+    this.snapshotValue.sharingErrorCode = undefined;
     this.notifyChange();
     this.sharingWrite ??= this.flushSharingWrites();
     return this.sharingWrite;
@@ -175,12 +181,12 @@ export class PassportController {
     if (this.snapshotValue.agentBusy) return;
     this.snapshotValue.agentBusy = true;
     this.snapshotValue.agentBusyId = undefined;
-    this.snapshotValue.agentError = undefined;
+    this.snapshotValue.agentErrorCode = undefined;
     this.notifyChange();
     try {
       this.snapshotValue.agentManagement = await this.client.rescanAgents();
     } catch {
-      this.snapshotValue.agentError = "Agent 重新扫描暂时失败。";
+      this.snapshotValue.agentErrorCode = "agent_rescan_failed";
     } finally {
       this.snapshotValue.agentBusy = false;
       this.notifyChange();
@@ -191,7 +197,7 @@ export class PassportController {
     if (this.snapshotValue.agentBusy) return;
     this.snapshotValue.agentBusy = true;
     this.snapshotValue.agentBusyId = agentId;
-    this.snapshotValue.agentError = undefined;
+    this.snapshotValue.agentErrorCode = undefined;
     this.notifyChange();
     try {
       this.snapshotValue.agentManagement = await this.client.setAgentPathOverride(
@@ -199,7 +205,7 @@ export class PassportController {
         path.trim() || null
       );
     } catch {
-      this.snapshotValue.agentError = "路径无效或本机 Agent 配置暂时无法保存。";
+      this.snapshotValue.agentErrorCode = "agent_path_save_failed";
     } finally {
       this.snapshotValue.agentBusy = false;
       this.snapshotValue.agentBusyId = undefined;
@@ -210,7 +216,7 @@ export class PassportController {
   async setOsaurusNativeChildAgentId(agentId: string | null): Promise<void> {
     if (this.snapshotValue.osaurusNativeBusy) return;
     this.snapshotValue.osaurusNativeBusy = true;
-    this.snapshotValue.osaurusNativeError = undefined;
+    this.snapshotValue.osaurusNativeErrorCode = undefined;
     this.notifyChange();
     try {
       if (!this.client.setOsaurusNativeChildAgentId) throw new Error("unavailable");
@@ -219,7 +225,7 @@ export class PassportController {
       );
       await this.refreshAfterMutation();
     } catch {
-      this.snapshotValue.osaurusNativeError = "固定 Agent ID 无效，或本机配置暂时无法保存。";
+      this.snapshotValue.osaurusNativeErrorCode = "osaurus_native_save_failed";
     } finally {
       this.snapshotValue.osaurusNativeBusy = false;
       this.notifyChange();
@@ -231,14 +237,14 @@ export class PassportController {
       return this.networkEnvironmentWrite ?? Promise.resolve();
     }
     this.snapshotValue.networkEnvironmentBusy = true;
-    this.snapshotValue.networkEnvironmentError = undefined;
+    this.snapshotValue.networkEnvironmentErrorCode = undefined;
     this.notifyChange();
     const write = (async () => {
       try {
         if (!this.client.setLocalDevelopmentNetwork) throw new Error("unavailable");
         this.snapshotValue.networkEnvironment = await this.client.setLocalDevelopmentNetwork(enabled);
       } catch {
-        this.snapshotValue.networkEnvironmentError = "Network 开发环境设置暂时无法保存。";
+        this.snapshotValue.networkEnvironmentErrorCode = "network_environment_save_failed";
       } finally {
         this.snapshotValue.networkEnvironmentBusy = false;
         this.networkEnvironmentWrite = undefined;
@@ -253,7 +259,7 @@ export class PassportController {
     if (this.snapshotValue.localLogoutBusy
       || this.snapshotValue.localLogoutConfirmationRequired) return;
     this.snapshotValue.localLogoutConfirmationRequired = true;
-    this.snapshotValue.localLogoutError = undefined;
+    this.snapshotValue.localLogoutErrorCode = undefined;
     this.notifyChange();
   }
 
@@ -269,7 +275,7 @@ export class PassportController {
       || !this.snapshotValue.localLogoutConfirmationRequired) return;
     this.snapshotValue.localLogoutConfirmationRequired = false;
     this.snapshotValue.localLogoutBusy = true;
-    this.snapshotValue.localLogoutError = undefined;
+    this.snapshotValue.localLogoutErrorCode = undefined;
     this.stop();
     this.notifyChange();
     try {
@@ -277,7 +283,7 @@ export class PassportController {
       await this.client.logoutLocalProfile();
     } catch {
       this.snapshotValue.localLogoutBusy = false;
-      this.snapshotValue.localLogoutError = "本机 Teti Profile 暂时无法清理，请退出 App 后重试。";
+      this.snapshotValue.localLogoutErrorCode = "local_profile_logout_failed";
       this.start();
       this.notifyChange();
     }
@@ -296,7 +302,7 @@ export class PassportController {
         this.snapshotValue.passport.sharing = desiredSharing;
       } else {
         this.persistedSharing = { ...passport.sharing };
-        this.snapshotValue.sharingError = undefined;
+        this.snapshotValue.sharingErrorCode = undefined;
       }
       const presentationKey = this.presentationKey();
       if (presentationKey !== this.lastPresentationKey) {
@@ -328,13 +334,13 @@ export class PassportController {
       }
       if (osaurusNative.status === "fulfilled" && !this.snapshotValue.osaurusNativeBusy) {
         this.snapshotValue.osaurusNative = osaurusNative.value;
-        this.snapshotValue.osaurusNativeError = undefined;
+        this.snapshotValue.osaurusNativeErrorCode = undefined;
       }
       if (networkEnvironment.status === "fulfilled"
         && networkEnvironment.value
         && !this.snapshotValue.networkEnvironmentBusy) {
         this.snapshotValue.networkEnvironment = networkEnvironment.value;
-        this.snapshotValue.networkEnvironmentError = undefined;
+        this.snapshotValue.networkEnvironmentErrorCode = undefined;
       }
       if (networkContract.status === "fulfilled" && networkContract.value) {
         this.snapshotValue.networkContract = networkContract.value;
@@ -364,13 +370,13 @@ export class PassportController {
           this.persistedSharing = { ...passport.sharing };
           if (revision === this.sharingRevision) {
             this.snapshotValue.passport = passport;
-            this.snapshotValue.sharingError = undefined;
+            this.snapshotValue.sharingErrorCode = undefined;
             return;
           }
         } catch {
           if (revision === this.sharingRevision) {
             this.snapshotValue.passport.sharing = { ...this.persistedSharing };
-            this.snapshotValue.sharingError = "Passport 分享设置暂时无法保存。";
+            this.snapshotValue.sharingErrorCode = "sharing_save_failed";
             return;
           }
         }

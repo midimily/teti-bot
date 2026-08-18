@@ -233,10 +233,10 @@ test("onboarding reset target list excludes the Chatmail credential directory", 
 
 test("connection input uses the privacy-safe nine-star community ID placeholder", async () => {
   const appSource = await readFile(new URL("../src/app.ts", import.meta.url), "utf8");
-  const stateSource = await readFile(new URL("../src/connections/connect-panel-state.ts", import.meta.url), "utf8");
+  const chineseCatalog = await readFile(new URL("../src/i18n/locales/zh-hans.ts", import.meta.url), "utf8");
   const styles = await readFile(new URL("../src/styles.css", import.meta.url), "utf8");
 
-  assert.match(appSource, /input\.placeholder = CONNECT_PANEL_PLACEHOLDER/);
-  assert.match(stateSource, /CONNECT_PANEL_PLACEHOLDER = "\*{9}（teti\.bot 社区9位ID）"/);
+  assert.match(appSource, /input\.placeholder = i18n\.messages\.connections\.panel\.placeholder/);
+  assert.match(chineseCatalog, /placeholder: "\*{9}（teti\.bot 社区 9 位 ID）"/);
   assert.match(styles, /\.teti-connect-input::placeholder[\s\S]*opacity: 0\.48/);
 });

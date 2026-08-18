@@ -1,4 +1,5 @@
 import type { TetiAccount } from "../../../../core/account/model.ts";
+import type { DisplayNameValidationReason } from "../../../../core/account/display-name.ts";
 
 export type FirstLaunchStateName =
   | "booting"
@@ -29,13 +30,14 @@ export type FirstLaunchErrorKind =
   | "local_persistence_failure"
   | "network_identity_failure"
   | "loaded_account_verification_failure"
+  | "unknown_failure"
   | "unrecoverable_internal_state";
 
 export interface FirstLaunchError {
   kind: FirstLaunchErrorKind;
-  message: string;
   recoverable: boolean;
-  diagnosticCode?: string;
+  diagnosticCode: string;
+  validationReason?: DisplayNameValidationReason;
 }
 
 export interface FirstLaunchSnapshot {
@@ -249,17 +251,32 @@ export class FirstLaunchStateMachine {
 
 export function createFirstLaunchError(
   kind: FirstLaunchErrorKind,
-  message: string,
-  recoverable = true,
-  diagnosticCode?: string
+  options: {
+    recoverable?: boolean;
+    diagnosticCode?: string;
+    validationReason?: DisplayNameValidationReason;
+  } = {}
 ): FirstLaunchError {
   return {
     kind,
-    message,
-    recoverable,
-    ...(diagnosticCode ? { diagnosticCode } : {})
+    recoverable: options.recoverable ?? true,
+    diagnosticCode: options.diagnosticCode ?? DEFAULT_DIAGNOSTIC_CODES[kind],
+    ...(options.validationReason ? { validationReason: options.validationReason } : {})
   };
 }
+
+const DEFAULT_DIAGNOSTIC_CODES: Record<FirstLaunchErrorKind, string> = {
+  invalid_name: "FL-NAME",
+  temporary_account_load_failure: "FL-LOAD",
+  corrupt_account: "FL-CORRUPT",
+  partial_account: "FL-PARTIAL",
+  chatmail_provisioning_failure: "FL-CHATMAIL",
+  local_persistence_failure: "FL-PERSIST",
+  network_identity_failure: "FL-NETWORK",
+  loaded_account_verification_failure: "FL-VERIFY",
+  unknown_failure: "FL-UNKNOWN",
+  unrecoverable_internal_state: "FL-INTERNAL"
+};
 
 function cloneSnapshot(snapshot: FirstLaunchSnapshot): FirstLaunchSnapshot {
   return {

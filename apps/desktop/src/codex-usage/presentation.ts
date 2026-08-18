@@ -1,4 +1,5 @@
 import type { AiToolStatusSnapshot } from "../../../../core/ai-status/types.ts";
+import { createDesktopI18n, type DesktopI18n } from "../i18n/index.ts";
 import type { CodexUsageSnapshot, CodexUsageState } from "./types.ts";
 
 export const CODEX_TOOL_ID = "openai.codex";
@@ -16,13 +17,18 @@ export interface CodexUsagePresentation {
   unavailableReason: "signed-out" | "unknown-plan" | "unavailable" | null;
 }
 
-export function presentCodexUsage(state: CodexUsageState): CodexUsagePresentation {
+export function presentCodexUsage(
+  state: CodexUsageState,
+  i18n: DesktopI18n = createDesktopI18n("zh-Hans")
+): CodexUsagePresentation {
   if (state.status === "unavailable") {
     const signedOut = ["AUTH_FILE_NOT_FOUND", "AUTH_TOKEN_MISSING"].includes(state.error.code);
     return {
       tone: "unavailable",
       planKey: null,
-      planLabel: signedOut ? "未登录" : "暂不可用",
+      planLabel: signedOut
+        ? i18n.messages.passport.usage.signedOut
+        : i18n.messages.passport.usage.unavailable,
       remainingPercent: null,
       resetAt: null,
       inferred: false,
@@ -35,7 +41,7 @@ export function presentCodexUsage(state: CodexUsageState): CodexUsagePresentatio
   return {
     tone: plan?.key ?? "unknown",
     planKey: plan?.key ?? null,
-    planLabel: plan?.label ?? "计划未知",
+    planLabel: plan?.label ?? i18n.messages.passport.usage.unknownPlan,
     remainingPercent: state.snapshot.weekly?.remainingPercent ?? null,
     resetAt: state.snapshot.weekly?.resetAt ?? null,
     inferred: state.snapshot.weekly?.identification === "inferred",

@@ -69,7 +69,7 @@ test("controller starts with the connect panel idle and opens it only through th
   assert.equal(controller.snapshot.connectPanel.state, "opening");
   scheduler.runDelay(CONNECT_PANEL_OPEN_MS);
   assert.equal(controller.snapshot.connectPanel.state, "editing");
-  assert.equal(controller.snapshot.connectPanel.message, "");
+  assert.equal(controller.snapshot.connectPanel.messageCode, undefined);
 });
 
 test("confirmed peer details persist in controller state and Escape returns to the list row", () => {
@@ -127,7 +127,7 @@ test("peer identity input trims pasted-style whitespace, folds case, and caps at
   controller.updateInput("abc-12345");
   assert.equal(controller.snapshot.input, "abc-12345");
   assert.equal(controller.snapshot.connectPanel.state, "error");
-  assert.equal(controller.snapshot.connectPanel.message, "请输入正确的 9 位 ID");
+  assert.equal(controller.snapshot.connectPanel.messageCode, "invalid_public_id");
 });
 
 test("an incomplete ID never reaches the real connection client", async () => {
@@ -139,7 +139,7 @@ test("an incomplete ID never reaches the real connection client", async () => {
 
   assert.deepEqual(client.requestCalls, []);
   assert.equal(controller.snapshot.connectPanel.state, "error");
-  assert.equal(controller.snapshot.connectPanel.message, "请输入正确的 9 位 ID");
+  assert.equal(controller.snapshot.connectPanel.messageCode, "invalid_public_id");
 });
 
 test("a valid ID enters connecting immediately and duplicate submits are ignored", async () => {
@@ -150,7 +150,7 @@ test("a valid ID enters connecting immediately and duplicate submits are ignored
 
   const request = controller.connect();
   assert.equal(controller.snapshot.connectPanel.state, "connecting");
-  assert.equal(controller.snapshot.connectPanel.message, "正在建立连接…");
+  assert.equal(controller.snapshot.connectPanel.messageCode, "connecting");
   assert.equal(controller.snapshot.busy, true);
   void controller.connect();
   assert.deepEqual(deferred.requestCalls, ["076bm9evq"]);
@@ -158,7 +158,7 @@ test("a valid ID enters connecting immediately and duplicate submits are ignored
   deferred.finish(emptyResult);
   await request;
   assert.equal(controller.snapshot.connectPanel.state, "success");
-  assert.equal(controller.snapshot.connectPanel.message, "建联请求已发送");
+  assert.equal(controller.snapshot.connectPanel.messageCode, "request_sent");
 });
 
 test("connecting defers outside focus loss without interrupting the request", async () => {
@@ -209,7 +209,7 @@ test("a mutually confirmed request shows true success then automatically returns
   await controller.connect();
 
   assert.equal(controller.snapshot.connectPanel.state, "success");
-  assert.equal(controller.snapshot.connectPanel.message, "已成功建联");
+  assert.equal(controller.snapshot.connectPanel.messageCode, "connected");
   assert.equal(controller.snapshot.highlightedRequestId, connection.requestId);
   assert.equal(controller.snapshot.connections.length, 1);
   scheduler.runDelay(CONNECT_PANEL_SUCCESS_MS);
@@ -217,7 +217,7 @@ test("a mutually confirmed request shows true success then automatically returns
   scheduler.runDelay(CONNECT_PANEL_CLOSE_MS);
   assert.equal(controller.snapshot.connectPanel.state, "idle");
   assert.equal(controller.snapshot.input, "");
-  assert.equal(controller.snapshot.connectPanel.message, "");
+  assert.equal(controller.snapshot.connectPanel.messageCode, undefined);
 });
 
 test("success can be closed early with Escape", async () => {
@@ -247,7 +247,7 @@ test("failed connection keeps the input, restores editing, and can retry", async
   await controller.connect();
 
   assert.equal(controller.snapshot.connectPanel.state, "error");
-  assert.equal(controller.snapshot.connectPanel.message, "暂时无法完成建联，请稍后重试");
+  assert.equal(controller.snapshot.connectPanel.messageCode, "connection_failed");
   assert.equal(controller.snapshot.input, "076bm9evq");
   assert.equal(controller.snapshot.busy, false);
 
@@ -258,8 +258,8 @@ test("failed connection keeps the input, restores editing, and can retry", async
 
 test("known timeout and lookup errors map only from trustworthy error codes", async () => {
   for (const [name, expected] of [
-    ["REQUEST_TIMEOUT", "连接超时，请稍后重试"],
-    ["CONNECTION_RESOLVE_FAILED", "没有找到这个 Teti，请检查 ID"]
+    ["REQUEST_TIMEOUT", "connection_timeout"],
+    ["CONNECTION_RESOLVE_FAILED", "identity_not_found"]
   ] as const) {
     const error = new Error(name);
     error.name = name;
@@ -270,7 +270,7 @@ test("known timeout and lookup errors map only from trustworthy error codes", as
     await controller.connect();
 
     assert.equal(controller.snapshot.connectPanel.state, "error");
-    assert.equal(controller.snapshot.connectPanel.message, expected);
+    assert.equal(controller.snapshot.connectPanel.messageCode, expected);
   }
 });
 
@@ -287,7 +287,7 @@ test("an already-confirmed peer stays visible and returns a recoverable scoped e
   assert.equal(controller.snapshot.input, "076bm9evq");
   assert.equal(controller.snapshot.highlightedRequestId, connection.requestId);
   assert.equal(controller.snapshot.connectPanel.state, "error");
-  assert.equal(controller.snapshot.connectPanel.message, "你们已经建联");
+  assert.equal(controller.snapshot.connectPanel.messageCode, "already_connected");
   assert.equal(controller.snapshot.connections.length, 1);
 });
 
@@ -305,8 +305,8 @@ test("an outgoing request is acknowledged without falsely claiming the peer is c
   await controller.connect();
 
   assert.equal(controller.snapshot.connectPanel.state, "success");
-  assert.equal(controller.snapshot.connectPanel.message, "建联请求已发送");
-  assert.notEqual(controller.snapshot.connectPanel.message, "已成功建联");
+  assert.equal(controller.snapshot.connectPanel.messageCode, "request_sent");
+  assert.notEqual(controller.snapshot.connectPanel.messageCode, "connected");
 });
 
 test("editing and error close through the eyes or Escape and clear only after closing", async () => {
@@ -397,22 +397,22 @@ test("disposing the controller cancels opening, success, and collapse timers", a
 });
 
 test("connection UI keeps status inside the input and closes on clicks outside its controls", async () => {
-  const [appSource, stateSource, styles] = await Promise.all([
+  const [appSource, chineseCatalog, styles] = await Promise.all([
     readFile(new URL("../src/app.ts", import.meta.url), "utf8"),
-    readFile(new URL("../src/connections/connect-panel-state.ts", import.meta.url), "utf8"),
+    readFile(new URL("../src/i18n/locales/zh-hans.ts", import.meta.url), "utf8"),
     readFile(new URL("../src/styles.css", import.meta.url), "utf8")
   ]);
 
   assert.match(appSource, /stage\.append\(face\);\s*\n\s*if \(panelState !== "idle"\)/);
   assert.doesNotMatch(appSource, /textContent\s*=\s*"连接另一个 Teti"/);
   assert.doesNotMatch(appSource, /还没有建联记录/);
-  assert.match(appSource, /input\.placeholder = CONNECT_PANEL_PLACEHOLDER/);
-  assert.match(stateSource, /CONNECT_PANEL_PLACEHOLDER = "\*{9}（teti\.bot 社区9位ID）"/);
+  assert.match(appSource, /input\.placeholder = i18n\.messages\.connections\.panel\.placeholder/);
+  assert.match(chineseCatalog, /placeholder: "\*{9}（teti\.bot 社区 9 位 ID）"/);
   assert.match(appSource, /maxLength = 9/);
   assert.match(appSource, /pasted\.trim\(\)/);
   assert.match(appSource, /aria-controls", "teti-connect-panel"/);
   assert.match(appSource, /aria-expanded/);
-  assert.match(appSource, /aria-label", "建立连接"/);
+  assert.match(appSource, /messages\.connections\.panel\.connectAction/);
   assert.match(appSource, /aria-live", "polite"/);
   assert.match(appSource, /inlineStatus\.textContent = hasInlineStatus/);
   assert.match(appSource, /target\.closest\("\.teti-connect-input-shell"\)/);

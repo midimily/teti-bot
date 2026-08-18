@@ -6,6 +6,8 @@ import type {
   AgentConnector,
   AgentConnectorContext
 } from "../../../core/callability/agent-core.ts";
+import { isSafeAbsoluteLocalPath } from "../../../core/application/local-path.ts";
+import type { LocalPathPlatform } from "../../../core/application/local-path.ts";
 
 export const CODEX_IMAGE_CONNECTOR = {
   connectorId: "openai.codex.imagegen",
@@ -127,7 +129,10 @@ export class CodexImageConnector implements AgentConnector {
   }
 }
 
-export function parseRunnerManifest(stdout: string): CodexImageRunnerManifest {
+export function parseRunnerManifest(
+  stdout: string,
+  platform?: LocalPathPlatform
+): CodexImageRunnerManifest {
   let value: unknown;
   try {
     value = JSON.parse(stdout);
@@ -147,8 +152,7 @@ export function parseRunnerManifest(stdout: string): CodexImageRunnerManifest {
     if (!isRecord(image)
       || Object.keys(image).some((key) => key !== "path")
       || typeof image.path !== "string"
-      || !image.path.startsWith("/")
-      || image.path.includes("\0")) {
+      || !isSafeAbsoluteLocalPath(image.path, platform)) {
       throw new Error("CODEX_IMAGE_OUTPUT_INVALID");
     }
     return { path: image.path };

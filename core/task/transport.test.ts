@@ -36,7 +36,7 @@ test("Task receipt is strict, identity-bound metadata with advertised versions",
   );
 });
 
-test("Beta 0.3.9 Task negotiation requires an explicit v7 advertisement and never downgrades", () => {
+test("Beta 0.4.0 Task negotiation requires an explicit v7 advertisement and never downgrades", () => {
   assert.equal(selectTaskProtocolVersion(), null);
   assert.equal(selectTaskProtocolVersion([2, 1]), null);
   assert.equal(selectTaskProtocolVersion([2]), null);

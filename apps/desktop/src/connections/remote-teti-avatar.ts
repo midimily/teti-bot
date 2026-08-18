@@ -7,7 +7,8 @@ export type RemoteTetiReachability = "reachable" | "checking" | "unreachable";
 
 export interface RemoteTetiAvatarOptions {
   reachability: RemoteTetiReachability;
-  label?: string;
+  label: string;
+  ariaLabel: string;
   size?: number;
   className?: string;
 }
@@ -20,10 +21,9 @@ export function createRemoteTetiAvatar(options: RemoteTetiAvatarOptions): HTMLEl
   }
   avatar.style.setProperty("--teti-remote-avatar-size", `${options.size ?? 28}px`);
   avatar.style.setProperty("--teti-remote-avatar-mask", `url("${remoteTetiSilhouetteUrl}")`);
-  const label = options.label ?? defaultReachabilityLabel(options.reachability);
   avatar.setAttribute("role", "img");
-  avatar.setAttribute("aria-label", `对方${label}`);
-  avatar.title = label;
+  avatar.setAttribute("aria-label", options.ariaLabel);
+  avatar.title = options.label;
 
   const silhouette = document.createElement("span");
   silhouette.className = "teti-remote-avatar-silhouette";
@@ -36,10 +36,4 @@ export function createRemoteTetiAvatar(options: RemoteTetiAvatarOptions): HTMLEl
     avatar.append(indicator);
   }
   return avatar;
-}
-
-function defaultReachabilityLabel(reachability: RemoteTetiReachability): string {
-  if (reachability === "reachable") return "在线";
-  if (reachability === "checking") return "状态检测中";
-  return "离线";
 }

@@ -117,7 +117,7 @@ function validatePayload(type: TetiApplicationMessageType, payload: Record<strin
     try {
       validateTaskProtocolVersions(payload.taskProtocolVersions);
       if (payload.taskProtocolVersions.length !== 1 || payload.taskProtocolVersions[0] !== 7) {
-        throw new Error("Beta 0.3.9 requires Task protocol v7.");
+        throw new Error("Beta 0.4.0 requires Task protocol v7.");
       }
     } catch {
       throw new TetiApplicationProtocolError("Presence task protocol versions are invalid.");
@@ -148,7 +148,7 @@ function validatePayload(type: TetiApplicationMessageType, payload: Record<strin
   if (type === "teti.task.request") {
     try {
       if (payload.schemaVersion !== 7) {
-        throw new Error("Beta 0.3.9 requires Task protocol v7.");
+        throw new Error("Beta 0.4.0 requires Task protocol v7.");
       }
       validateCollaborationTaskRequest(payload);
     } catch {
