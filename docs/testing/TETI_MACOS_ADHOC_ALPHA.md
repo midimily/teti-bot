@@ -59,3 +59,61 @@ Use an Apple Silicon Mac running macOS 15 or later, preferably a fresh local mac
 11. Record relevant Console or crash logs.
 
 Never use `xattr -dr com.apple.quarantine` or `sudo spctl --master-disable` as part of this validation. Official Beta artifacts are published at <https://github.com/midimily/teti-bot/releases>; do not install repackaged copies from unofficial mirrors.
+
+## Mac Studio GitHub Release upload exception
+
+This development Mac has a host-specific fallback for large GitHub Release
+uploads. Use it only after the normal `gh release upload` path repeatedly fails
+with long-connection TLS errors such as `bad record MAC`, `unexpected EOF`, or a
+broken pipe.
+
+On this Mac, verify the hardware mapping before every use:
+
+```bash
+/usr/sbin/networksetup -listallhardwareports
+/sbin/ifconfig en1
+```
+
+The expected mapping is `Hardware Port: Wi-Fi` to `Device: en1`, and `en1` must
+report `status: active`. Do not assume the device name will remain stable after
+network hardware or macOS configuration changes.
+
+For the affected asset upload process only, pass the physical Wi-Fi interface to
+the system curl client:
+
+```text
+/usr/bin/curl \
+  --config <temporary-0600-github-auth-config> \
+  --interface en1 \
+  --http1.1 \
+  --request POST \
+  --header "Content-Type: application/x-apple-diskimage" \
+  --data-binary @<absolute-dmg-path> \
+  "https://uploads.github.com/repos/midimily/teti-bot/releases/<release-id>/assets?name=<asset-name>"
+```
+
+The wrapper invoking curl must obtain the token from `gh auth token`, write it
+only to a newly created temporary config file with mode `0600`, avoid printing
+the token, and remove the config in a `finally` cleanup. Before retrying, query
+the release assets and stop if the same asset name already exists. Never delete
+or replace a remote asset without explicit approval.
+
+This exception binds one process to `en1`; it must not disable `utun4`, alter the
+default route, disconnect a VPN, or make any other system network change. It is
+specific to `uploads.github.com`. Do not use it as a general GitHub download
+override because `release-assets.githubusercontent.com` may not be reachable on
+the same bound path.
+
+After upload, require all of the following evidence from GitHub before declaring
+success:
+
+- asset state is `uploaded`;
+- remote byte size equals the local file size;
+- remote `sha256` digest equals the local digest;
+- the release remains a prerelease and targets the intended commit.
+
+Validation on 2026-08-19 confirmed that Wi-Fi still maps to active `en1` and
+that `https://uploads.github.com` completes TLS and returns HTTP `302` through
+that interface. The `v0.4.1-beta.2` DMG itself finished uploading through the
+rate-limited HTTP/1.1 retry immediately before the fallback was applied, so the
+release record must not claim that `en1` was required for that particular asset.
