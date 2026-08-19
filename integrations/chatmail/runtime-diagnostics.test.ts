@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import test from "node:test";
 import { inspectChatmailRpcRuntime, resolveExecutablePath } from "./runtime-diagnostics.ts";
 
@@ -71,7 +71,8 @@ test("runtime diagnostics can perform non-destructive JSON-RPC health", async ()
     await chmod(binary, 0o755);
 
     const report = await inspectChatmailRpcRuntime({
-      rpcServerPath: binary,
+      rpcServerPath: process.execPath,
+      rpcServerArgs: [binary],
       accountsPath: join(root, "accounts")
     });
 
@@ -88,14 +89,10 @@ test("runtime diagnostics can perform non-destructive JSON-RPC health", async ()
 });
 
 test("RPC executable resolution honors PATH", async () => {
-  const root = await mkdtemp(join(tmpdir(), "teti-rpc-path-"));
-  const binary = join(root, "deltachat-rpc-server");
-  try {
-    await writeFile(binary, "#!/bin/sh\nexit 0\n", "utf8");
-    await chmod(binary, 0o755);
-
-    assert.equal(await resolveExecutablePath("deltachat-rpc-server", { PATH: root }), binary);
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
+  assert.equal(
+    await resolveExecutablePath(basename(process.execPath), {
+      PATH: dirname(process.execPath)
+    }),
+    process.execPath
+  );
 });

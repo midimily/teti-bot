@@ -8,12 +8,12 @@ mod window;
 mod windows_job;
 #[cfg(target_os = "windows")]
 mod windows_native;
+#[cfg(target_os = "windows")]
+mod windows_tray;
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-#[cfg(target_os = "macos")]
-use tauri::Emitter;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 use tauri_plugin_opener::OpenerExt;
 
 use crate::native_error::NativeCommandError;
@@ -36,16 +36,68 @@ struct PanelDiagnosticEntry {
 }
 
 pub fn run() {
-    let builder = tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    #[cfg(target_os = "windows")]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+        if let Some(window) = app.get_webview_window("island") {
+            let _ = window.show();
+            let _ = window.set_focus();
+        } else {
+            lifecycle_bridge::append_sanitized_log_line(
+                "desktop",
+                "event=window.recreate state=requested reason=second-instance",
+            );
+            let app = app.clone();
+            std::thread::spawn(move || match window::create_island_window(&app) {
+                Ok(window) => {
+                    let _ = window.set_focus();
+                    lifecycle_bridge::append_sanitized_log_line(
+                        "desktop",
+                        "event=window.recreate state=completed reason=second-instance",
+                    );
+                }
+                Err(_) => lifecycle_bridge::append_sanitized_log_line(
+                    "desktop",
+                    "event=window.recreate state=failed reason=second-instance",
+                ),
+            });
+        }
+        let _ = app.emit("teti://dock-activate", ());
+    }));
+    let builder = builder
         .plugin(tauri_plugin_opener::init())
-        .manage(lifecycle_bridge::LifecycleBridge::default());
+        .manage(lifecycle_bridge::LifecycleBridge::default())
+        .on_window_event(|window, event| {
+            #[cfg(target_os = "windows")]
+            if window.label() == "island" {
+                match event {
+                    tauri::WindowEvent::CloseRequested { api, .. } => {
+                        api.prevent_close();
+                        lifecycle_bridge::append_sanitized_log_line(
+                            "desktop",
+                            "event=window.close state=prevented platform=windows",
+                        );
+                        let _ = window.show();
+                    }
+                    tauri::WindowEvent::Destroyed => {
+                        lifecycle_bridge::append_sanitized_log_line(
+                            "desktop",
+                            "event=window.destroyed platform=windows",
+                        );
+                    }
+                    _ => {}
+                }
+            }
+        });
     #[cfg(target_os = "macos")]
     let builder = builder.plugin(tauri_nspanel::init());
 
     let app = builder
         .setup(|app| {
             platform::configure_process_environment(app.handle()).map_err(std::io::Error::other)?;
-            window::create_island_window(app)?;
+            window::create_island_window(app.handle())?;
+            #[cfg(target_os = "windows")]
+            windows_tray::install(app)?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

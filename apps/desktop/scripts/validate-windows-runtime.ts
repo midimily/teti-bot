@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
+import { validateTetiDisplayName } from "../../../core/account/display-name.ts";
 import { inspectChatmailRpcRuntime } from "../../../integrations/chatmail/runtime-diagnostics.ts";
 import {
   resolveWindowsRuntimePaths,
@@ -29,7 +30,15 @@ async function main(): Promise<void> {
   const paths = resolveWindowsRuntimePaths(repoRoot);
   const profileRoot = readArgument("--profile")
     ?? await mkdtemp(join(tmpdir(), "teti-real-provisioning-windows-"));
-  const displayName = readArgument("--display-name") ?? `Teti Windows ${Date.now().toString(36).slice(-6)}`;
+  const requestedDisplayName = readArgument("--display-name")
+    ?? `TetiWin${Date.now().toString(36).slice(-3)}`;
+  const displayNameValidation = validateTetiDisplayName(requestedDisplayName);
+  if (!displayNameValidation.ok) {
+    throw new Error(
+      `--display-name must contain 1-10 Unicode characters (${displayNameValidation.reason}).`
+    );
+  }
+  const displayName = displayNameValidation.value;
 
   const rpc = await inspectChatmailRpcRuntime({
   rpcServerPath: paths.rpc,
@@ -107,6 +116,7 @@ if (!rpc.targetCompatible || !rpc.jsonRpcHealth || !rpc.cleanShutdown || rpc.err
 }
 
 class LifecycleLineClient {
+  private readonly child: ChildProcessWithoutNullStreams;
   private sequence = 0;
   private readonly pending = new Map<string, {
     resolve(value: LifecycleResponse): void;
@@ -114,7 +124,8 @@ class LifecycleLineClient {
     timeout: NodeJS.Timeout;
   }>();
 
-  constructor(private readonly child: ChildProcessWithoutNullStreams) {
+  constructor(child: ChildProcessWithoutNullStreams) {
+    this.child = child;
     const lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
     lines.on("line", (line) => {
       let response: LifecycleResponse;

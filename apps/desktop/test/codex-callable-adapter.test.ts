@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, copyFile, mkdtemp, rm } from "node:fs/promises";
+import { chmod, copyFile, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -25,6 +25,8 @@ const sourceFixture = join(
   "fixtures",
   "fake-codex-cli.mjs"
 );
+const macTest = process.platform === "darwin" ? test : test.skip;
+const windowsTest = process.platform === "win32" ? test : test.skip;
 
 test("Codex Connector uses a fixed non-interactive, ephemeral, read-only JSONL entrypoint", () => {
   const connector = new CodexConnector({
@@ -113,7 +115,7 @@ test("Codex image Connector fixes the app-server runner and accepts only image m
     schemaVersion: 1,
     text: "图片编辑已完成。",
     images: [{ path: "/private/tmp/teti-image-task/output-image-1.img" }]
-  })), {
+  }), "macos"), {
     schemaVersion: 1,
     text: "图片编辑已完成。",
     images: [{ path: "/private/tmp/teti-image-task/output-image-1.img" }]
@@ -122,12 +124,12 @@ test("Codex image Connector fixes the app-server runner and accepts only image m
     schemaVersion: 1,
     text: "只有文字，不应算图片结果。",
     images: []
-  })), /CODEX_IMAGE_OUTPUT_INVALID/);
+  }), "macos"), /CODEX_IMAGE_OUTPUT_INVALID/);
   assert.throws(() => parseRunnerManifest(JSON.stringify({
     schemaVersion: 1,
     text: "路径越界。",
     images: [{ path: "relative-output.png" }]
-  })), /CODEX_IMAGE_OUTPUT_INVALID/);
+  }), "macos"), /CODEX_IMAGE_OUTPUT_INVALID/);
   assert.equal(connector.classifyFailure(JSON.stringify({
     schemaVersion: 1,
     error: { code: "CODEX_IMAGE_RESULT_NOT_READY" }
@@ -201,7 +203,27 @@ test("explicit Codex path override refuses an executable with a different filena
   assert.equal(await resolveCodexEntrypoint({ pathOverride: process.execPath }), null);
 });
 
-test("fake Codex CLI recovers transport errors and proves stdin, JSONL, and Artifact filtering", async () => {
+windowsTest("Windows Codex Desktop cache is preferred over protected WindowsApps paths", async () => {
+  const root = await mkdtemp(join(tmpdir(), "teti-codex-desktop-"));
+  const executable = join(root, "OpenAI", "Codex", "bin", "39633208fb6e0c47", "codex.exe");
+  try {
+    await mkdir(dirname(executable), { recursive: true });
+    await writeFile(executable, "fixture", "utf8");
+    const resolved = await resolveCodexEntrypoint({
+      environment: {
+        LOCALAPPDATA: root,
+        PATH: "C:\\Program Files\\WindowsApps\\OpenAI.Codex_current\\resources"
+      },
+      homeDirectory: root,
+      platform: "windows"
+    });
+    assert.equal(resolved, await realpath(executable));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+macTest("fake Codex CLI recovers transport errors and proves stdin, JSONL, and Artifact filtering", async () => {
   const fixture = await createExecutableFakeCodex();
   try {
     assert.equal(await probeCodexLogin(fixture.path, {

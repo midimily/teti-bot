@@ -59,7 +59,7 @@ npm run desktop:icon:verify
 npm test
 cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
 npm run desktop:runtime:windows:verify
-npm run desktop:runtime:windows:exit-gate -- --display-name "Teti Windows Alpha 3"
+npm run desktop:runtime:windows:exit-gate -- --display-name "TetiWinA3"
 npm run desktop:tauri-build:windows:shell
 & .\apps\desktop\src-tauri\target\release\teti-desktop.exe
 ```

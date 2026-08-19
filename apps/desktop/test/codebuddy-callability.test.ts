@@ -20,6 +20,7 @@ const sourceFixture = join(
   "fixtures",
   "fake-codebuddy-cli.mjs"
 );
+const macTest = process.platform === "darwin" ? test : test.skip;
 
 test("CodeBuddy CN Desktop stays detected but non-callable without CodeBuddy Code CLI", async () => {
   const qualification = await qualifyCodeBuddyConnector({
@@ -104,7 +105,7 @@ test("CodeBuddy qualification reports not_detected only when neither surface exi
   assert.equal(qualification.connector, null);
 });
 
-test("CodeBuddy entrypoint resolver accepts official CLI names and rejects buddycn editor launcher", async () => {
+macTest("CodeBuddy entrypoint resolver accepts official CLI names and rejects buddycn editor launcher", async () => {
   const root = await mkdtemp(join(tmpdir(), "teti-codebuddy-entrypoint-"));
   try {
     const codebuddy = join(root, "codebuddy");
@@ -121,7 +122,7 @@ test("CodeBuddy entrypoint resolver accepts official CLI names and rejects buddy
   }
 });
 
-test("fake CodeBuddy proves login probe, stdin task, JSONL decode, and Kernel execution", async () => {
+macTest("fake CodeBuddy proves login probe, stdin task, JSONL decode, and Kernel execution", async () => {
   const fixture = await createExecutableFakeCodeBuddy();
   try {
     assert.equal(await probeCodeBuddyLogin(fixture.path, {

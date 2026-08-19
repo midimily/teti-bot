@@ -7,12 +7,14 @@ export interface CodexWeeklyUsage {
 }
 
 /**
- * The plan value reported by the internal Codex/agentic usage endpoint.
+ * A plan value observed either from the internal Codex usage endpoint or from
+ * bounded, account-matched local Codex auth claims when that endpoint is not
+ * reachable. Local observations never carry quota data and may be stale.
  * `membershipVerified` is intentionally always false: this is not an
  * independent billing or ChatGPT membership verification result.
  */
 export interface CodexUsageSnapshot {
-  source: "live";
+  source: "live" | "local_auth";
   planTypeRaw: string | null;
   planDisplayName: string | null;
   membershipVerified: false;

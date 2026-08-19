@@ -175,8 +175,8 @@ export class FileTaskAttachmentStore implements TaskAttachmentStore {
     if (bytes.byteLength <= 0 || bytes.byteLength > MAX_TASK_ARTIFACT_BYTES) {
       throw new Error("TASK_ARTIFACT_SIZE_INVALID");
     }
-    const safeFileName = `${artifact.artifactId}.teti-artifact.json`;
-    const path = join(this.root, "artifact-document", taskId, safeFileName);
+    const safeFileName = `${storageSegment(artifact.artifactId)}.teti-artifact.json`;
+    const path = join(this.root, "artifact-document", storageSegment(taskId), safeFileName);
     await requireGlobalStoreQuota(this.root, path, bytes.byteLength);
     await atomicPrivateWrite(this.root, path, bytes);
     return {
@@ -219,10 +219,11 @@ export class FileTaskAttachmentStore implements TaskAttachmentStore {
 
   async removeTask(taskId: string): Promise<void> {
     requireSafeTaskId(taskId);
+    const taskSegment = storageSegment(taskId);
     await Promise.all([
-      rm(join(this.root, "input", taskId), { recursive: true, force: true }),
-      rm(join(this.root, "artifact", taskId), { recursive: true, force: true }),
-      rm(join(this.root, "artifact-document", taskId), { recursive: true, force: true })
+      rm(join(this.root, "input", taskSegment), { recursive: true, force: true }),
+      rm(join(this.root, "artifact", taskSegment), { recursive: true, force: true }),
+      rm(join(this.root, "artifact-document", taskSegment), { recursive: true, force: true })
     ]);
   }
 
@@ -243,7 +244,12 @@ export class FileTaskAttachmentStore implements TaskAttachmentStore {
     purpose: StoredTaskAttachmentPurpose,
     part: TaskImagePart
   ): string {
-    return join(this.root, purpose, taskId, `${part.attachmentId}${extensionFor(part.mimeType)}`);
+    return join(
+      this.root,
+      purpose,
+      storageSegment(taskId),
+      `${storageSegment(part.attachmentId)}${extensionFor(part.mimeType)}`
+    );
   }
 }
 
@@ -566,6 +572,17 @@ function requireBoundedBytes(bytes: Buffer): void {
 
 function requireSafeTaskId(taskId: string): void {
   if (!SAFE_ID_PATTERN.test(taskId)) throw new Error("TASK_ID_INVALID");
+}
+
+function storageSegment(value: string): string {
+  if (process.platform !== "win32" || isWindowsSafeStorageSegment(value)) return value;
+  return `~${Buffer.from(value, "utf8").toString("base64url")}`;
+}
+
+function isWindowsSafeStorageSegment(value: string): boolean {
+  if (/[<>:"/\\|?*\u0000-\u001f]/.test(value) || /[ .]$/.test(value)) return false;
+  const stem = value.split(".", 1)[0]!.toUpperCase();
+  return !/^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/.test(stem);
 }
 
 function safeFileName(part: TaskImagePart): string {

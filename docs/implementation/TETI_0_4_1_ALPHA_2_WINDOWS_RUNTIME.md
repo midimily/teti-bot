@@ -41,7 +41,7 @@ npm run desktop:runtime:windows:verify
 npm run desktop:typecheck
 npm run desktop:test
 cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
-npm run desktop:runtime:windows:exit-gate -- --display-name "Teti Windows Alpha 2"
+npm run desktop:runtime:windows:exit-gate -- --display-name "TetiWinA2"
 npm run desktop:tauri-build:windows:shell
 ```
 

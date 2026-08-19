@@ -169,6 +169,19 @@ textarea {
   background: transparent;
 }
 
+:root[data-platform="windows"] .teti-shell--collapsed {
+  overflow: hidden;
+  border-radius: 0 0 12px 12px;
+}
+
+:root[data-platform="windows"] :is(
+  .teti-shell--expanded,
+  .teti-shell--protocol-blocked
+) {
+  overflow: hidden;
+  border-radius: 0 0 var(--teti-radius-island) var(--teti-radius-island);
+}
+
 .teti-shell--protocol-blocked {
   background: var(--teti-notch-bg);
 }

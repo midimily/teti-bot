@@ -54,7 +54,9 @@ test("Peer Passport protocol capabilities are stored independently and survive r
       passportSchemaVersions: [4],
       observedAt: "2026-07-27T01:00:00.000Z"
     });
-    assert.equal((await stat(path)).mode & 0o777, 0o600);
+    if (process.platform !== "win32") {
+      assert.equal((await stat(path)).mode & 0o777, 0o600);
+    }
     assert.doesNotMatch(await readFile(path, "utf8"), /token|password|address/i);
   } finally {
     await rm(root, { recursive: true, force: true });

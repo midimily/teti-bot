@@ -165,7 +165,13 @@ function confirmedPeer(
 function cssBlock(styles: string, selector: string): string {
   const start = styles.indexOf(`${selector} {`);
   assert.notEqual(start, -1, `${selector} should exist`);
-  const end = styles.indexOf("}\n", start);
-  assert.notEqual(end, -1, `${selector} should have a closing brace`);
-  return styles.slice(start, end + 1);
+  const openingBrace = styles.indexOf("{", start);
+  let depth = 0;
+  for (let index = openingBrace; index < styles.length; index += 1) {
+    if (styles[index] === "{") depth += 1;
+    if (styles[index] !== "}") continue;
+    depth -= 1;
+    if (depth === 0) return styles.slice(start, index + 1);
+  }
+  assert.fail(`${selector} should have a closing brace`);
 }

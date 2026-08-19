@@ -13,6 +13,7 @@ import {
 
 const INSTANCE_ID = "11111111-1111-4111-8111-111111111111";
 const NOW = new Date("2026-07-29T04:00:00.000Z");
+const macTest = process.platform === "darwin" ? test : test.skip;
 
 test("macOS process identity selects the kernel executable among many mapped text files", () => {
   const executable = "/Applications/osaurus.app/Contents/MacOS/osaurus";
@@ -31,7 +32,7 @@ test("macOS process identity selects the kernel executable among many mapped tex
   ));
 });
 
-test("Osaurus identity binds fresh shared config, listener PID, app bundle, and signature", async () => {
+macTest("Osaurus identity binds fresh shared config, listener PID, app bundle, and signature", async () => {
   const fixture = await runtimeFixture();
   try {
     const system = fakeSystem(fixture.executablePath);
@@ -67,7 +68,7 @@ test("Osaurus identity binds fresh shared config, listener PID, app bundle, and 
   }
 });
 
-test("localhost metadata cannot bless a port owned by a differently signed process", async () => {
+macTest("localhost metadata cannot bless a port owned by a differently signed process", async () => {
   const fixture = await runtimeFixture();
   try {
     const system = fakeSystem(fixture.executablePath, {
@@ -89,7 +90,7 @@ test("localhost metadata cannot bless a port owned by a differently signed proce
   }
 });
 
-test("canonical Osaurus bundle matching accepts the provider's lowercase app name", async () => {
+macTest("canonical Osaurus bundle matching accepts the provider's lowercase app name", async () => {
   const fixture = await runtimeFixture({}, "osaurus.app");
   try {
     const verifier = new OsaurusRuntimeIdentityVerifier({
@@ -105,7 +106,7 @@ test("canonical Osaurus bundle matching accepts the provider's lowercase app nam
   }
 });
 
-test("a modified Osaurus signature remains blocked with a precise diagnostic", async () => {
+macTest("a modified Osaurus signature remains blocked with a precise diagnostic", async () => {
   const fixture = await runtimeFixture();
   try {
     const verifier = new OsaurusRuntimeIdentityVerifier({
@@ -125,7 +126,7 @@ test("a modified Osaurus signature remains blocked with a precise diagnostic", a
   }
 });
 
-test("an old shared-config timestamp remains eligible when the signed listener is live", async () => {
+macTest("an old shared-config timestamp remains eligible when the signed listener is live", async () => {
   const fixture = await runtimeFixture({ updatedAt: "2025-07-29T04:00:00.000Z" });
   try {
     const verifier = new OsaurusRuntimeIdentityVerifier({
@@ -140,7 +141,7 @@ test("an old shared-config timestamp remains eligible when the signed listener i
   }
 });
 
-test("exposed, hostname, future-dated, and wrong-PID runtime claims fail closed", async () => {
+macTest("exposed, hostname, future-dated, and wrong-PID runtime claims fail closed", async () => {
   for (const mutation of [
     { exposeToNetwork: true },
     { updatedAt: "2026-07-29T04:01:00.000Z" },

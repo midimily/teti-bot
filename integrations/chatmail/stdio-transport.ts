@@ -82,7 +82,7 @@ export class StdioJsonRpcTransport implements JsonRpcConnection {
     config: ChatmailRuntimeConfig,
     options: StdioTransportOptions = {}
   ): StdioJsonRpcTransport {
-    const child = spawn(config.rpcServerPath, {
+    const child = spawn(config.rpcServerPath, config.rpcServerArgs ?? [], {
       cwd: config.workingDirectory,
       env: {
         ...process.env,

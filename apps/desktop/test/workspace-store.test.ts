@@ -75,10 +75,11 @@ test("Snapshot commits are optimistic and reject stale concurrent revisions", as
 
 test("Workspace commit rejects symlink escape and enforces byte quota", async (context) => {
   const { root, store, workspaceId } = await workspaceFixture("security", context, { maxBytes: 4, maxFiles: 2 });
-  const outside = join(root, "outside-secret.txt");
-  await writeFile(outside, "secret", "utf8");
+  const outside = join(root, "outside");
+  await mkdir(outside);
+  await writeFile(join(outside, "secret.txt"), "secret", "utf8");
   const linked = await store.createSnapshot({ workspaceId, workspaceRevision: 1, access: ["read", "write"] });
-  await symlink(outside, join(linked.snapshotPath, "escape"));
+  await symlink(outside, join(linked.snapshotPath, "escape"), process.platform === "win32" ? "junction" : "dir");
   await assert.rejects(() => store.commitSnapshot(linked), (error: unknown) =>
     error instanceof WorkspaceStoreError && error.code === "WORKSPACE_SYMLINK_FORBIDDEN"
   );

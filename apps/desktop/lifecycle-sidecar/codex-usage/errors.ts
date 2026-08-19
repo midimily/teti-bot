@@ -2,7 +2,7 @@ import type { SafeUsageError, SafeUsageErrorCode } from "../../src/codex-usage/t
 
 const SAFE_MESSAGES: Record<SafeUsageErrorCode, string> = {
   NOT_STARTED: "Codex usage has not been refreshed yet.",
-  AUTH_FILE_NOT_FOUND: "Codex authentication is not available on this Mac.",
+  AUTH_FILE_NOT_FOUND: "Codex authentication is not available on this device.",
   AUTH_FILE_PERMISSION_DENIED: "Teti cannot read the local Codex authentication file.",
   AUTH_FILE_READ_FAILED: "Teti could not read the local Codex authentication file.",
   AUTH_FILE_INVALID_JSON: "The local Codex authentication file is not valid JSON.",

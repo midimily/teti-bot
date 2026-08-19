@@ -48,7 +48,7 @@ test("launch specs require an absolute fixed entrypoint and bounded argv/environ
     executable: "/usr/bin/true",
     args: ["--safe"],
     environment: { TETI_MODE: "test" }
-  }));
+  }, undefined, "macos"));
   assert.throws(
     () => validateCallableAdapterLaunchSpec({ executable: "agent", args: [] }),
     /absolute local path/
@@ -56,7 +56,8 @@ test("launch specs require an absolute fixed entrypoint and bounded argv/environ
   assert.throws(
     () => validateCallableAdapterLaunchSpec(
       { executable: "/usr/bin/false", args: [] },
-      "/usr/bin/true"
+      "/usr/bin/true",
+      "macos"
     ),
     /fixed entrypoint/
   );
@@ -65,7 +66,7 @@ test("launch specs require an absolute fixed entrypoint and bounded argv/environ
       executable: "/usr/bin/true",
       args: [],
       environment: { "BAD-NAME": "value" }
-    }),
+    }, undefined, "macos"),
     /environment/
   );
 });

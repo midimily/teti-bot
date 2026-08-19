@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { chmod, copyFile, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import test from "node:test";
@@ -30,6 +30,7 @@ const runnerPath = join(
   "codex-image-runner.ts"
 );
 const fakeServerFixture = join(testRoot, "fixtures", "fake-codex-image-app-server.mjs");
+const macTest = process.platform === "darwin" ? test : test.skip;
 
 test("Codex image output waits for a settling file and persists a verified private copy", async () => {
   const root = await mkdtemp(join(tmpdir(), "teti-codex-image-settling-"));
@@ -54,7 +55,7 @@ test("Codex image output waits for a settling file and persists a verified priva
     await completedWrite;
 
     assert.equal(images.length, 1);
-    assert.equal(images[0]!.path.startsWith(`${workspacePath}/.teti-image-output/`), true);
+    assert.equal(images[0]!.path.startsWith(`${join(workspacePath, ".teti-image-output")}${sep}`), true);
     assert.deepEqual((await readFile(images[0]!.path)).subarray(0, 8), complete.subarray(0, 8));
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -94,7 +95,7 @@ test("Codex image output separates invalid files from files that never become re
   }
 });
 
-test("Codex image runner projects savedPath from a result larger than two MiB", async () => {
+macTest("Codex image runner projects savedPath from a result larger than two MiB", async () => {
   const root = await mkdtemp(join(tmpdir(), "teti-codex-image-server-exit-"));
   try {
     const workspacePath = join(root, "workspace");
@@ -125,14 +126,17 @@ test("Codex image runner projects savedPath from a result larger than two MiB", 
     assert.equal(manifest.images.length, 1);
     assert.equal(result.stdout.includes("must-not-project"), false);
     assert.equal(Buffer.byteLength(result.stdout, "utf8") < 64 * 1024, true);
-    assert.equal(manifest.images[0]!.path.startsWith(`${workspacePath}/.teti-image-output/`), true);
+    assert.equal(
+      manifest.images[0]!.path.startsWith(`${join(workspacePath, ".teti-image-output")}${sep}`),
+      true
+    );
     assert.equal((await readFile(manifest.images[0]!.path)).subarray(0, 8).toString("hex"), "89504e470d0a1a0a");
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
 
-test("Codex image runner reports the dedicated safe code above eight MiB", async () => {
+macTest("Codex image runner reports the dedicated safe code above eight MiB", async () => {
   const root = await mkdtemp(join(tmpdir(), "teti-codex-image-protocol-limit-"));
   try {
     const workspacePath = join(root, "workspace");
@@ -164,7 +168,7 @@ test("Codex image runner reports the dedicated safe code above eight MiB", async
   }
 });
 
-test("real Codex image runner completes through Host Agent and Artifact Store", async () => {
+macTest("real Codex image runner completes through Host Agent and Artifact Store", async () => {
   const root = await mkdtemp(join(tmpdir(), "teti-codex-image-full-pipeline-"));
   const workspaceRoot = join(root, "workspaces");
   const fakeCodexPath = join(root, "codex");

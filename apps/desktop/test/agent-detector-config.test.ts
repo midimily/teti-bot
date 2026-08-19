@@ -14,6 +14,7 @@ const CONFIG_PATH = "/tmp/teti-agent-detectors.override.json";
 test("missing or malformed override config keeps the six safe built-in detectors", async () => {
   const missing = await loadAgentDetectorCatalog({
     path: CONFIG_PATH,
+    platform: "macos",
     async readText() {
       throw Object.assign(new Error("missing"), { code: "ENOENT" });
     }
@@ -26,6 +27,7 @@ test("missing or malformed override config keeps the six safe built-in detectors
 
   const malformed = await loadAgentDetectorCatalog({
     path: CONFIG_PATH,
+    platform: "macos",
     async readText() { return "{"; }
   });
   assert.deepEqual(
@@ -38,6 +40,7 @@ test("missing or malformed override config keeps the six safe built-in detectors
 test("override can disable built-ins and the custom-detector kill switch blocks custom entries", async () => {
   const result = await loadAgentDetectorCatalog({
     path: CONFIG_PATH,
+    platform: "macos",
     async readText() {
       return JSON.stringify({
         schemaVersion: 1,
@@ -62,6 +65,7 @@ test("override can disable built-ins and the custom-detector kill switch blocks 
 test("valid custom detectors are declarative and cannot add commands or unsafe app paths", async () => {
   const valid = await loadAgentDetectorCatalog({
     path: CONFIG_PATH,
+    platform: "macos",
     async readText() {
       return JSON.stringify({
         schemaVersion: 1,
@@ -85,6 +89,7 @@ test("valid custom detectors are declarative and cannot add commands or unsafe a
   unsafe.versionProbe = { type: "fixed_args", args: ["--version"] };
   const rejected = await loadAgentDetectorCatalog({
     path: CONFIG_PATH,
+    platform: "macos",
     async readText() {
       return JSON.stringify({
         schemaVersion: 1,
@@ -100,6 +105,7 @@ test("valid custom detectors are declarative and cannot add commands or unsafe a
 test("global discovery kill switch returns no detector definitions", async () => {
   const result = await loadAgentDetectorCatalog({
     path: CONFIG_PATH,
+    platform: "macos",
     async readText() {
       return JSON.stringify({
         schemaVersion: 1,
@@ -112,6 +118,7 @@ test("global discovery kill switch returns no detector definitions", async () =>
 
   const environmentDisabled = await loadAgentDetectorCatalog({
     path: CONFIG_PATH,
+    platform: "macos",
     env: { [TETI_AGENT_DISCOVERY_DISABLED]: "1" },
     async readText() {
       throw new Error("the kill switch must short-circuit a broken config reader");
@@ -125,6 +132,7 @@ test("global discovery kill switch returns no detector definitions", async () =>
 test("built-in path overrides stay declarative and retain fixed Agent identity", async () => {
   const result = await loadAgentDetectorCatalog({
     path: CONFIG_PATH,
+    platform: "macos",
     async readText() {
       return JSON.stringify({
         schemaVersion: 1,
@@ -152,6 +160,7 @@ test("built-in path overrides stay declarative and retain fixed Agent identity",
 
   const rejected = await loadAgentDetectorCatalog({
     path: CONFIG_PATH,
+    platform: "macos",
     async readText() {
       return JSON.stringify({
         schemaVersion: 1,
@@ -166,7 +175,7 @@ test("built-in path overrides stay declarative and retain fixed Agent identity",
 test("file-backed path override is private, atomic, removable, and refuses damaged config", async () => {
   const root = await mkdtemp(join(tmpdir(), "teti-agent-config-"));
   const path = join(root, "agent-detectors.override.json");
-  const store = new FileAgentDetectorConfiguration(path);
+  const store = new FileAgentDetectorConfiguration(path, "macos");
   try {
     await store.setPathOverride("gemini-cli", "/opt/homebrew/bin/gemini");
     assert.deepEqual(await store.getPathOverrides(), {

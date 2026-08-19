@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -16,6 +16,18 @@ test("Windows Runtime policy pins Node, DeltaChat source, and an explicit DLL al
   assert.equal(WINDOWS_RUNTIME_POLICY.node.sha256.length, 64);
   assert.equal(WINDOWS_RUNTIME_POLICY.deltaChat.revision.length, 40);
   assert.deepEqual(WINDOWS_RUNTIME_POLICY.allowedDlls, []);
+});
+
+test("Windows Runtime exit gate stays executable by Node 22 strip-types", async () => {
+  const source = await readFile(
+    new URL("../scripts/validate-windows-runtime.ts", import.meta.url),
+    "utf8"
+  );
+  assert.doesNotMatch(
+    source,
+    /constructor\s*\(\s*(?:private|public|protected|readonly)\b/,
+    "Node 22 strip-types does not support TypeScript parameter properties"
+  );
 });
 
 test("portable executable validation accepts x64 PE and rejects other input", async () => {

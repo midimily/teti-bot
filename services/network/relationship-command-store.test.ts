@@ -31,7 +31,9 @@ test("Relationship command store durably preserves exact command bytes and remov
   });
 
   assert.equal((await store.load()).pending?.rawBody, rawBody);
-  assert.equal((await stat(path)).mode & 0o777, 0o600);
+  if (process.platform !== "win32") {
+    assert.equal((await stat(path)).mode & 0o777, 0o600);
+  }
   assert.equal((await readFile(path, "utf8")).includes("privateKey"), false);
 
   await store.save({ schemaVersion: 1 });

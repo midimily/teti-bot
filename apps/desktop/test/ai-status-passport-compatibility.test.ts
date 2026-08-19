@@ -54,6 +54,21 @@ test("legacy teti.ai.status.sync payload remains valid and Agent discovery is no
   assert.equal(DEFAULT_PASSPORT_SHARING_POLICY.capabilities, false);
 });
 
+test("local auth plan evidence is explicitly local-observed and has no fabricated quota", () => {
+  const resource = mapCodexUsageResource({
+    status: "ready",
+    snapshot: {
+      ...readyUsage().snapshot,
+      source: "local_auth",
+      weekly: null
+    }
+  }, OBSERVED_AT);
+  assert.equal(resource.availability, "available");
+  assert.equal(resource.plan?.key, "plus");
+  assert.equal(resource.assurance, "local_observed");
+  assert.deepEqual(resource.quotas, []);
+});
+
 function readyUsage(): CodexUsageState {
   return {
     status: "ready",

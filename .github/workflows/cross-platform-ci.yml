@@ -1,0 +1,88 @@
+name: Cross-platform CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cross-platform-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTUP_TOOLCHAIN: 1.92.0
+
+jobs:
+  validate:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x64 hosted compatibility
+            runner: windows-2025
+            node_platform: win32
+            node_arch: x64
+          - name: macOS 15 arm64
+            runner: macos-15
+            node_platform: darwin
+            node_arch: arm64
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22.22.3
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      - name: Verify runner platform
+        env:
+          EXPECTED_NODE_PLATFORM: ${{ matrix.node_platform }}
+          EXPECTED_NODE_ARCH: ${{ matrix.node_arch }}
+        run: |
+          node -e "const os = require('node:os'); const expectedPlatform = process.env.EXPECTED_NODE_PLATFORM; const expectedArch = process.env.EXPECTED_NODE_ARCH; if (process.platform !== expectedPlatform || process.arch !== expectedArch) throw new Error('Expected ' + expectedPlatform + '/' + expectedArch + ', got ' + process.platform + '/' + process.arch); console.log({ platform: process.platform, arch: process.arch, release: os.release(), version: os.version(), machine: os.machine() });"
+
+      - name: Install desktop dependencies
+        run: npm ci --prefix apps/desktop
+
+      - name: Type-check desktop
+        run: npm run desktop:typecheck
+
+      - name: Run localized-copy and icon guards
+        run: |
+          npm run desktop:i18n-check
+          npm run desktop:icon:verify
+
+      - name: Run full repository tests
+        run: npm test
+
+      - name: Build renderer
+        run: npm --prefix apps/desktop exec -- vite build
+
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install 1.92.0 --profile minimal --component rustfmt
+          rustc --version
+          cargo --version
+
+      - name: Check Rust formatting
+        run: cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml -- --check
+
+      - name: Check and test native shell
+        run: |
+          cargo check --locked --all-targets --manifest-path apps/desktop/src-tauri/Cargo.toml
+          cargo test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml
