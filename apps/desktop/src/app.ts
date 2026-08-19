@@ -11,6 +11,11 @@ import type { TauriInvoker } from "./platform/tauri-api.ts";
 import type { DesktopPlatformInfo } from "./platform/contract.ts";
 import { createPanelDiagnosticSink } from "./platform/panel-diagnostics.ts";
 import { DockActivationGuard } from "./platform/dock-activation-guard.ts";
+import {
+  isWindowsLaunchFocusGuardActive,
+  shouldRevealMainPanelOnLaunch,
+  WINDOWS_LAUNCH_FOCUS_GUARD_MS
+} from "./platform/launch-presentation.ts";
 import { TETI_BUILD_INFO } from "./build-info.ts";
 import {
   LifecycleBridgeClient
@@ -151,6 +156,7 @@ export async function createDesktopApp(options: DesktopAppOptions): Promise<Desk
   let preserveStateForBrandOpen = false;
   let brandOpenGuardTimer: number | undefined;
   let localAppUpdateRequired = false;
+  let windowsLaunchFocusGuardDeadline = Number.NEGATIVE_INFINITY;
   const languageSettings: AppLanguageSettings | undefined = options.onLocalePreferenceChange
     ? {
         preference: options.localePreference ?? "auto",
@@ -324,6 +330,14 @@ export async function createDesktopApp(options: DesktopAppOptions): Promise<Desk
         return;
       }
       if (!focused) {
+        if (isWindowsLaunchFocusGuardActive(windowsLaunchFocusGuardDeadline)) {
+          panelDiagnostic({
+            level: "debug",
+            event: "panel.dismiss.ignored",
+            fields: { reason: "windows_launch_focus_guard" }
+          });
+          return;
+        }
         if (preserveStateForBrandOpen) {
           panelDiagnostic({
             level: "debug",
@@ -449,15 +463,25 @@ export async function createDesktopApp(options: DesktopAppOptions): Promise<Desk
   };
 
   await release.start();
-  await coordinator.initialize();
+  const initialSnapshot = await coordinator.initialize();
   setPresenceSignal("foreground", options.root.ownerDocument.hasFocus());
   setPresenceSignal("panel_visible", connections.snapshot.open);
   passport.start();
   tasks.start();
   await memory.start();
+  if (shouldRevealMainPanelOnLaunch(options.platform, initialSnapshot)) {
+    windowsLaunchFocusGuardDeadline = Date.now() + WINDOWS_LAUNCH_FOCUS_GUARD_MS;
+    connections.open("windows-app-launch");
+  }
   app.render();
   await notchWindow.setMode(
-    visualModeForViewModel(toFirstLaunchViewModel(coordinator.snapshot, options.i18n)),
+    tasks.snapshot.open
+      ? "task"
+      : connections.snapshot.open
+        ? connections.snapshot.expandedRequestId
+          ? "connection_detail"
+          : "onboarding"
+        : visualModeForViewModel(toFirstLaunchViewModel(coordinator.snapshot, options.i18n)),
     "initial-render"
   );
 

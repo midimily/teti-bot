@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  REPO_LOCAL_RPC_EXECUTABLE,
+  REPO_LOCAL_RPC_TARGET,
   repoLocalRpcServerPath,
   resolveChatmailRuntimeConfig,
   TETI_CHATMAIL_ACCOUNTS_PATH,
@@ -20,9 +22,12 @@ test("runtime config honors explicit RPC env path before repo-local fallback", (
   assert.equal(config.accountsPath, "/tmp/teti-accounts");
 });
 
-test("repo-local RPC path is deterministic for new Mac bootstrap", () => {
-  assert.match(
-    repoLocalRpcServerPath(),
-    /\/\.tools\/deltachat-rpc-server\/aarch64-apple-darwin\/deltachat-rpc-server$/
+test("repo-local RPC path is deterministic for the host bootstrap", () => {
+  const normalized = repoLocalRpcServerPath().replaceAll("\\", "/");
+  assert.equal(
+    normalized.endsWith(
+      `/.tools/deltachat-rpc-server/${REPO_LOCAL_RPC_TARGET}/${REPO_LOCAL_RPC_EXECUTABLE}`
+    ),
+    true
   );
 });

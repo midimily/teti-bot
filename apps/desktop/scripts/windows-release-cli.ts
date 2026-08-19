@@ -22,8 +22,14 @@ if (!signTool?.isFile()) throw new Error("Configured signtool.exe does not exist
 const generatedAt = resolveReleaseTimestamp();
 
 if (command === "build") {
-  const tauri = join(desktopRoot, "node_modules", "@tauri-apps", "cli", "tauri.js");
-  await run(process.execPath, [tauri, "build", "--bundles", "nsis"], {
+  const tauriBuild = join(desktopRoot, "scripts", "tauri-build.ts");
+  await run(process.execPath, [
+    "--experimental-strip-types",
+    tauriBuild,
+    "--release-flavor",
+    "--bundles",
+    "nsis"
+  ], {
     ...process.env,
     TETI_BUILD_TYPE: "release",
     TETI_BUILD_TIMESTAMP: generatedAt,

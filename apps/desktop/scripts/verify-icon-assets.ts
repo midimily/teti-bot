@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { inflateSync } from "node:zlib";
 
-const root = new URL("../../..", import.meta.url).pathname;
+const root = fileURLToPath(new URL("../../..", import.meta.url));
 const desktopRoot = join(root, "apps", "desktop");
 const tauriMacosConfigPath = join(desktopRoot, "src-tauri", "tauri.macos.conf.json");
 const tauriWindowsConfigPath = join(desktopRoot, "src-tauri", "tauri.windows.conf.json");

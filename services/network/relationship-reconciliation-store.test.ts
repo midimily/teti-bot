@@ -31,7 +31,9 @@ test("Relationship reconciliation file store writes atomically with private perm
       tetiId: "teti_aaaaaaaaa",
       checkpoint: "rcp_checkpoint"
     });
-    assert.equal((await stat(path)).mode & 0o777, 0o600);
+    if (process.platform !== "win32") {
+      assert.equal((await stat(path)).mode & 0o777, 0o600);
+    }
     assert.match(await readFile(path, "utf8"), /rcp_checkpoint/);
     assert.deepEqual(await store.load(), {
       schemaVersion: 1,

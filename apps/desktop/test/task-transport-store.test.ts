@@ -15,7 +15,9 @@ test("Task transport store is private, atomic, and fails closed on corruption", 
   try {
     await store.save(emptyTaskTransportStoreState());
     const metadata = await stat(path);
-    assert.equal(metadata.mode & 0o777, 0o600);
+    if (process.platform !== "win32") {
+      assert.equal(metadata.mode & 0o777, 0o600);
+    }
     assert.doesNotMatch(await readFile(path, "utf8"), /token|credential|privateKey/);
 
     await writeFile(path, '{"schemaVersion":2,"records":"damaged","peers":[]}\n', "utf8");

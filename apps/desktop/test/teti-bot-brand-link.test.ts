@@ -2,13 +2,14 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import {
   openTetiBotWebsite,
   TETI_BOT_BRAND,
   TETI_BOT_URL
 } from "../src/brand/teti-bot-website.ts";
 
-const repoRoot = new URL("../../..", import.meta.url).pathname;
+const repoRoot = fileURLToPath(new URL("../../..", import.meta.url));
 const desktopRoot = join(repoRoot, "apps", "desktop");
 
 test("Teti.bot website action always uses the fixed production URL", async () => {

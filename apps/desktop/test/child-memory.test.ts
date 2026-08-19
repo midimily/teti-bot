@@ -138,7 +138,9 @@ test("deletion and expiry immediately invalidate retrieval while export stays re
     });
     const exported = await service.export();
     assert.equal(exported.recordCount, 1);
-    assert.equal((await stat(exported.path)).mode & 0o777, 0o600);
+    if (process.platform !== "win32") {
+      assert.equal((await stat(exported.path)).mode & 0o777, 0o600);
+    }
     assert.match(await readFile(exported.path, "utf8"), /"actor": "local_user"/);
 
     now = new Date(now.getTime() + CHILD_MEMORY_LIMITS.defaultRetentionMs + 1);

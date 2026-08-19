@@ -8,7 +8,8 @@ use windows_sys::Win32::{
         Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass},
         WindowsAndMessaging::{
             PBT_APMRESUMEAUTOMATIC, PBT_APMRESUMECRITICAL, PBT_APMRESUMESUSPEND, PBT_APMSUSPEND,
-            WM_DISPLAYCHANGE, WM_DPICHANGED, WM_NCDESTROY, WM_POWERBROADCAST, WM_SETTINGCHANGE,
+            WM_CLOSE, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_NCDESTROY, WM_POWERBROADCAST,
+            WM_SETTINGCHANGE,
         },
     },
 };
@@ -89,6 +90,13 @@ unsafe extern "system" fn teti_window_subclass_proc(
 ) -> LRESULT {
     let app = &*(callback_data as *const AppHandle);
     match message {
+        WM_CLOSE => {
+            crate::lifecycle_bridge::append_sanitized_log_line(
+                "desktop",
+                "event=window.wm_close state=prevented platform=windows",
+            );
+            return 0;
+        }
         WM_POWERBROADCAST => handle_power_broadcast(app, wparam as u32),
         WM_DISPLAYCHANGE | WM_DPICHANGED | WM_SETTINGCHANGE => {
             crate::window::schedule_non_macos_reposition(app.clone());

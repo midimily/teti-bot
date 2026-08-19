@@ -82,7 +82,7 @@ test("a first failure is unavailable and does not fabricate a snapshot", async (
     status: "unavailable",
     error: {
       code: "AUTH_FILE_NOT_FOUND",
-      message: "Codex authentication is not available on this Mac.",
+      message: "Codex authentication is not available on this device.",
       recoverable: true
     }
   });

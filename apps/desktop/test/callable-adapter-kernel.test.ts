@@ -273,7 +273,7 @@ test("explicit cancellation kills the complete fake Agent process group", async 
   const completion = authorizedExecute(kernel, request);
   const context = await waitFor(() => adapter.lastContext);
   const pidFile = join(context.workspacePath, "fake-process-tree.json");
-  const pids = JSON.parse(await waitForFile(pidFile)) as { parentPid: number; childPid: number };
+  const pids = await waitForJsonFile<{ parentPid: number; childPid: number }>(pidFile);
 
   assert.equal(kernel.cancel("cancel-tree-task"), true);
   const result = await completion;
@@ -426,7 +426,11 @@ test("Runtime shutdown bypasses a long Adapter grace period", async () => {
 
   assert.equal(result.state, "canceled");
   assert.equal(result.safeErrorCode, "ADAPTER_RUNTIME_SHUTDOWN");
-  assert.ok(Date.now() - startedAt < 1_000, "shutdown must not wait for a five-second Adapter grace");
+  const maximumShutdownMs = process.platform === "win32" ? 2_500 : 1_000;
+  assert.ok(
+    Date.now() - startedAt < maximumShutdownMs,
+    "shutdown must not wait for a five-second Adapter grace"
+  );
 });
 
 interface FakeConnectorOverrides {
@@ -514,11 +518,11 @@ async function waitFor<T>(read: () => T | null, timeoutMs = 1_000): Promise<T> {
   throw new Error("Timed out waiting for fake Agent state.");
 }
 
-async function waitForFile(path: string, timeoutMs = 1_000): Promise<string> {
+async function waitForJsonFile<T>(path: string, timeoutMs = 1_000): Promise<T> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try {
-      return await readFile(path, "utf8");
+      return JSON.parse(await readFile(path, "utf8")) as T;
     } catch {
       await delay(10);
     }

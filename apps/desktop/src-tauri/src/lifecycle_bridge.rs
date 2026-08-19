@@ -23,6 +23,10 @@ use crate::windows_job::WindowsJob;
 
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+#[cfg(target_os = "windows")]
+use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
 
 const PROTOCOL_VERSION: u8 = 1;
 const MAX_LINE_BYTES: usize = 64 * 1024;
@@ -416,9 +420,17 @@ fn spawn_sidecar(app: &AppHandle) -> Result<ManagedSidecar, String> {
             }
         });
     let mut command = Command::new(node_path);
+    command.arg("--experimental-strip-types");
+    #[cfg(target_os = "windows")]
+    {
+        let sidecar_argument = sidecar_path
+            .strip_prefix(&resource_dir)
+            .unwrap_or(sidecar_path.as_path());
+        command.current_dir(&resource_dir).arg(sidecar_argument);
+    }
+    #[cfg(not(target_os = "windows"))]
+    command.arg(sidecar_path);
     command
-        .arg("--experimental-strip-types")
-        .arg(sidecar_path)
         .env("TETI_DESKTOP_NATIVE_PROVISIONING", "1")
         .env("TETI_PROVISIONING_MODE", "real")
         .env("TETI_DESKTOP_PLATFORM", platform_info.platform.as_str())
@@ -433,6 +445,8 @@ fn spawn_sidecar(app: &AppHandle) -> Result<ManagedSidecar, String> {
         .stderr(Stdio::piped());
     #[cfg(unix)]
     command.process_group(0);
+    #[cfg(target_os = "windows")]
+    command.creation_flags(CREATE_NO_WINDOW);
     if env::var_os("TETI_DELTACHAT_RPC_PATH").is_none() && bundled_rpc.exists() {
         command.env("TETI_DELTACHAT_RPC_PATH", bundled_rpc);
     }

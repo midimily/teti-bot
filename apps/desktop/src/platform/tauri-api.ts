@@ -1,3 +1,7 @@
+import { invoke, isTauri } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+
 export interface TauriInvoker {
   readonly runtime?: "native" | "preview" | "test";
   invoke<T>(command: string, args?: Record<string, unknown>): Promise<T>;
@@ -8,23 +12,18 @@ export interface TauriInvoker {
 }
 
 export async function createTauriInvoker(): Promise<TauriInvoker> {
-  if (typeof window !== "undefined" && !("__TAURI_INTERNALS__" in window)) {
+  if (!isTauri()) {
     return new BrowserPreviewTauriInvoker();
   }
 
-  const [api, windowApi, eventApi] = await Promise.all([
-    import("@tauri-apps/api/core"),
-    import("@tauri-apps/api/window"),
-    import("@tauri-apps/api/event")
-  ]);
-  const currentWindow = windowApi.getCurrentWindow();
+  const currentWindow = getCurrentWindow();
   return {
     runtime: "native",
-    invoke: api.invoke,
+    invoke,
     onFocusChanged: async (handler) => currentWindow.onFocusChanged(({ payload }) => handler(payload)),
-    onDockActivate: async (handler) => eventApi.listen("teti://dock-activate", handler),
-    onSystemSleep: async (handler) => eventApi.listen("teti://system-sleep", handler),
-    onSystemWake: async (handler) => eventApi.listen("teti://system-wake", handler)
+    onDockActivate: async (handler) => listen("teti://dock-activate", handler),
+    onSystemSleep: async (handler) => listen("teti://system-sleep", handler),
+    onSystemWake: async (handler) => listen("teti://system-wake", handler)
   };
 }
 

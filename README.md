@@ -15,7 +15,7 @@ It gives your local AI environment a recognizable identity, a clear Passport, an
 - Review, approve, follow, and receive collaboration results.
 - Support text and image collaboration workflows.
 - Connect local AI tools such as Codex, CodeBuddy, and Osaurus.
-- Keep local profiles, preferences, and task history on the Mac.
+- Keep local profiles, preferences, and task history on the Mac or Windows PC.
 
 ## Why Teti
 
@@ -43,3 +43,18 @@ Teti for Mac is currently in active beta development. Features and compatibility
 Teti is an open-source project under active development. Feedback, testing, and thoughtful contributions are welcome.
 
 The goal is simple: give every personal AI a trusted identity, a useful Passport, and a safe way to collaborate.
+
+## Continuous Integration
+
+Pull requests and `main` are validated on hosted Windows x64 and Apple Silicon
+macOS runners. Exact Windows 11 x64 certification is available through a
+guarded self-hosted runner lane. See
+[the cross-platform CI guide](docs/testing/TETI_CROSS_PLATFORM_CI.md).
+
+Windows release and certification hosts use the
+[reproducible Windows x64 build-machine setup](docs/setup/TETI_WINDOWS_REPRODUCIBLE_BUILD_MACHINE.md).
+
+On Windows, Codex quota refresh follows the active OS network configuration.
+Tunnel VPNs work through the normal Windows route; local-proxy VPNs are
+discovered from the current user's enabled Windows loopback HTTP proxy. This
+is vendor-neutral and is scoped to the Codex quota request only.

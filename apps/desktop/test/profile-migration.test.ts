@@ -51,7 +51,9 @@ test("0.2 profile migration preserves identity, Chatmail contacts, and confirmed
     });
     const archivedTaskStore = join(profile.legacyArchiveDir, "tasks.json");
     assert.match(await readFile(archivedTaskStore, "utf8"), /"schemaVersion":1/);
-    assert.equal((await stat(archivedTaskStore)).mode & 0o777, 0o400);
+    if (process.platform !== "win32") {
+      assert.equal((await stat(archivedTaskStore)).mode & 0o777, 0o400);
+    }
     assert.equal(
       await readFile(join(profile.legacyArchiveDir, "task-attachments", "input", "legacy-task", "image.png"), "utf8"),
       "legacy"

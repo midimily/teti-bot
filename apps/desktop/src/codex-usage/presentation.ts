@@ -52,22 +52,25 @@ export function presentCodexUsage(
 
 export function createShareableCodexStatus(state: CodexUsageState, now = new Date()): AiToolStatusSnapshot {
   const snapshot = state.status === "ready" || state.status === "stale" ? state.snapshot : null;
-  const plan = normalizeCodexPlan(snapshot?.planTypeRaw ?? null);
+  const providerSnapshot = snapshot?.source === "live" ? snapshot : null;
+  const plan = normalizeCodexPlan(providerSnapshot?.planTypeRaw ?? null);
   return {
     toolId: CODEX_TOOL_ID,
-    status: state.status === "ready" ? "ready" : state.status === "stale" ? "stale" : "unavailable",
+    status: providerSnapshot
+      ? state.status === "ready" ? "ready" : "stale"
+      : "unavailable",
     plan: {
       key: plan?.key ?? null,
       membershipVerified: false
     },
-    quotas: snapshot?.weekly ? [{
+    quotas: providerSnapshot?.weekly ? [{
       period: "week",
-      remainingPercent: Math.round(snapshot.weekly.remainingPercent),
-      resetAt: snapshot.weekly.resetAt,
-      windowSeconds: snapshot.weekly.windowSeconds,
-      identification: snapshot.weekly.identification
+      remainingPercent: Math.round(providerSnapshot.weekly.remainingPercent),
+      resetAt: providerSnapshot.weekly.resetAt,
+      windowSeconds: providerSnapshot.weekly.windowSeconds,
+      identification: providerSnapshot.weekly.identification
     }] : [],
-    observedAt: snapshot?.observedAt ?? now.toISOString()
+    observedAt: providerSnapshot?.observedAt ?? now.toISOString()
   };
 }
 

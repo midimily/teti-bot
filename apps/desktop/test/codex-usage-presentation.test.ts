@@ -59,3 +59,27 @@ test("shareable data is rounded and excludes raw account and response metadata",
   const json = JSON.stringify(shared);
   assert.doesNotMatch(json, /planDisplayName|planTypeRaw|fetchedAt|usedPercent|account|token|must-not-be-shared/);
 });
+
+test("local auth confirms the local Passport plan without presenting it as provider-shared usage", () => {
+  const state: CodexUsageState = {
+    status: "ready",
+    snapshot: {
+      source: "local_auth",
+      planTypeRaw: "plus",
+      planDisplayName: null,
+      membershipVerified: false,
+      weekly: null,
+      observedAt: "2026-07-18T01:00:00.000Z",
+      fetchedAt: "2026-07-18T01:00:01.000Z",
+      stale: false
+    }
+  };
+  assert.equal(presentCodexUsage(state).planLabel, "Plus");
+  assert.deepEqual(createShareableCodexStatus(state, new Date("2026-07-18T02:00:00.000Z")), {
+    toolId: "openai.codex",
+    status: "unavailable",
+    plan: { key: null, membershipVerified: false },
+    quotas: [],
+    observedAt: "2026-07-18T02:00:00.000Z"
+  });
+});

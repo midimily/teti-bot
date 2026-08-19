@@ -24,10 +24,6 @@
     "windows": {
       "allowDowngrades": false,
       "digestAlgorithm": "sha256",
-      "signCommand": {
-        "cmd": "node",
-        "args": ["--experimental-strip-types", "scripts/windows-sign-command.ts", "%1"]
-      },
       "webviewInstallMode": {
         "type": "embedBootstrapper",
         "silent": true

@@ -81,7 +81,7 @@ export async function auditCloudflareFreeRuntime(
   for (const file of files) {
     if (file === SCRIPT_PATH || file.endsWith(".test.ts")) continue;
     const content = await readFile(file, "utf8");
-    const relativePath = relative(repoRoot, file);
+    const relativePath = relative(repoRoot, file).replaceAll("\\", "/");
     if (!relativePath.startsWith("services/network/")
       && /["'`]\/v1\/(?:bootstrap|public\/nodes|public\/stats|identity|relay-bindings|relays|profile\/self|client-instances|presence|relationships)/.test(content)) {
       violations.push(`${relativePath}: formal Network route escaped services/network`);
