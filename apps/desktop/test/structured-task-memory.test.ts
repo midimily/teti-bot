@@ -13,7 +13,7 @@ import {
   StructuredTaskMemoryStoreError
 } from "../lifecycle-sidecar/runtime/memory/structured-task-sqlite.ts";
 
-test("SQLite structured memory is owner-only, durable, and idempotent per stage", async () => {
+test("SQLite structured memory is durable, idempotent, and private on POSIX", async () => {
   const root = await mkdtemp(join(tmpdir(), "teti-structured-memory-"));
   const path = join(root, "collaboration-memory-v2.sqlite");
   const now = () => new Date("2026-08-20T00:00:00.000Z");
@@ -28,8 +28,14 @@ test("SQLite structured memory is owner-only, durable, and idempotent per stage"
     assert.equal(snapshot.recordCount, 1);
     assert.equal(snapshot.latestStageIndex, 1);
     assert.equal(snapshot.records[0]?.contentPreview, "Stage handoff result");
-    assert.equal((await stat(path)).mode & 0o777, 0o600);
-    assert.equal((await stat(root)).mode & 0o777, 0o700);
+    const databaseStats = await stat(path);
+    const rootStats = await stat(root);
+    assert.equal(databaseStats.isFile(), true);
+    assert.equal(rootStats.isDirectory(), true);
+    if (process.platform !== "win32") {
+      assert.equal(databaseStats.mode & 0o777, 0o600);
+      assert.equal(rootStats.mode & 0o777, 0o700);
+    }
   } finally {
     await store.close();
   }

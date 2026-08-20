@@ -58,7 +58,7 @@ test("Task draft survives focus collapse and sends only staged descriptors", asy
 });
 
 test("Task headings prefer the peer nickname and include an exact local timestamp", () => {
-  const timestamp = "2026-07-27T12:34:56+08:00";
+  const timestamp = new Date(2026, 6, 27, 12, 34, 56).toISOString();
   assert.equal(formatTaskTimestamp(timestamp, chinese), "2026/07/27 12:34:56");
   assert.equal(taskPeerHeading(
     "outgoing",
