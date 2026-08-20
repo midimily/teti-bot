@@ -19,6 +19,7 @@ import type {
   DelegationTargetOption,
   DelegationTargetSelection
 } from "../../../core/delegation/types.ts";
+import type { LongHorizonTaskMemorySnapshot } from "../../../core/memory/structured-task.ts";
 
 const chinese = createDesktopI18n("zh-Hans");
 const english = createDesktopI18n("en");
@@ -323,11 +324,13 @@ test("long-horizon detail loads execution and delegation targets without a seria
   await flushMicrotasks();
   assert.ok(client.started.includes("execution"));
   assert.ok(client.started.includes("delegation"));
+  assert.ok(client.started.includes("structured-memory"));
   assert.equal(controller.snapshot.screen, "detail");
 
   client.releaseEnrichment();
   await selecting;
   assert.equal(controller.snapshot.delegationTargets.length, 2);
+  assert.equal(controller.snapshot.selectedStructuredMemory?.status, "ready");
   controller.dispose();
 });
 
@@ -736,6 +739,18 @@ class RecordingTaskClient implements TaskClient {
     return structuredClone(this.record);
   }
 
+  async getStructuredMemory(taskId: string): Promise<LongHorizonTaskMemorySnapshot> {
+    return {
+      schemaVersion: 1,
+      taskId,
+      status: "ready",
+      recordCount: 0,
+      latestStageIndex: null,
+      updatedAt: null,
+      records: []
+    };
+  }
+
   async resolveImage(): Promise<string> { return this.staged.path; }
   async stageImage(): Promise<typeof this.staged> { return structuredClone(this.staged); }
 
@@ -851,6 +866,12 @@ class DeferredDetailTaskClient extends RecordingTaskClient {
     this.started.push("delegation");
     await this.enrichment;
     return super.delegationTargets();
+  }
+
+  override async getStructuredMemory(taskId: string): Promise<LongHorizonTaskMemorySnapshot> {
+    this.started.push("structured-memory");
+    await this.enrichment;
+    return super.getStructuredMemory(taskId);
   }
 }
 

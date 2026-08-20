@@ -943,6 +943,21 @@ textarea {
   background: rgba(26, 136, 255, 0.08);
 }
 
+.teti-task-structured-memory {
+  display: grid;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid color-mix(in srgb, var(--teti-accent) 24%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--teti-accent) 7%, transparent);
+}
+
+.teti-task-structured-memory > small,
+.teti-task-structured-memory > p {
+  margin: 0;
+  color: var(--teti-text-muted);
+}
+
 .teti-task-delegation-approval {
   display: grid;
   gap: 8px;

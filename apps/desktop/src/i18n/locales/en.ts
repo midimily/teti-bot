@@ -519,6 +519,14 @@ export const EN_MESSAGES = {
       aggregationDetail: "Deterministic Artifact aggregation · {state}",
       budget: "Workspace r{revision} · {seconds}s · Output limit {kib} KiB",
       stage: "Stage {stage} · {agent}",
+      structuredMemory: {
+        title: "Local ongoing-collaboration memory",
+        automaticNote: "Only successfully committed local stages from ongoing collaborations enter SQLite; legacy Memory is neither read nor migrated.",
+        loading: "Reading local memory status…",
+        unavailable: "Local memory is unavailable. Task results remain intact, and Runtime will retry on a later read.",
+        ready: "SQLite contains {count} saved stages",
+        stage: "Stage {stage} · {agent}"
+      },
       phase: {
         pending_approval: "Awaiting approval",
         queued: "Queued",

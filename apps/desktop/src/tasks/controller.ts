@@ -16,6 +16,7 @@ import type {
 } from "../../../../core/delegation/types.ts";
 import { readStableErrorCode } from "../errors/stable-error-code.ts";
 import type { AppMessages } from "../i18n/index.ts";
+import type { LongHorizonTaskMemorySnapshot } from "../../../../core/memory/structured-task.ts";
 
 export const TASK_REFRESH_DELAYS_MS = {
   visibleActive: 2_000,
@@ -56,6 +57,7 @@ export interface TaskControllerSnapshot {
   summary: CollaborationTaskSummarySnapshot;
   selectedTask: CollaborationTaskTransportRecord | null;
   selectedExecution: ExecutionHandle | null;
+  selectedStructuredMemory: LongHorizonTaskMemorySnapshot | null;
   delegationTargets: DelegationTargetOption[];
   delegationSelections: DelegationTargetSelection[];
   selectedImagePaths: Record<string, string>;
@@ -79,6 +81,7 @@ export interface TaskCloseOptions {
 export interface TaskClient {
   summaries(): Promise<CollaborationTaskSummarySnapshot>;
   get(taskId: string): Promise<CollaborationTaskTransportRecord>;
+  getStructuredMemory(taskId: string): Promise<LongHorizonTaskMemorySnapshot>;
   resolveImage(taskId: string, attachmentId: string): Promise<string>;
   stageImage(path: string): Promise<StagedTaskImageDto>;
   send(input: SendCollaborationTaskInput): Promise<CollaborationTaskTransportRecord>;
@@ -151,6 +154,7 @@ export class TaskController {
     summary: structuredClone(EMPTY_SUMMARY),
     selectedTask: null,
     selectedExecution: null,
+    selectedStructuredMemory: null,
     delegationTargets: [],
     delegationSelections: [],
     selectedImagePaths: {},
@@ -279,6 +283,7 @@ export class TaskController {
     this.snapshotValue.screen = "inbox";
     this.snapshotValue.selectedTask = null;
     this.snapshotValue.selectedExecution = null;
+    this.snapshotValue.selectedStructuredMemory = null;
     this.snapshotValue.delegationTargets = [];
     this.snapshotValue.delegationSelections = [];
     this.snapshotValue.selectedImagePaths = {};
@@ -361,13 +366,15 @@ export class TaskController {
         images: [],
         executionMode: "single_stage"
       };
-      const [execution, imagePaths, summary] = await Promise.all([
+      const [execution, structuredMemory, imagePaths, summary] = await Promise.all([
         this.readExecution(record.request.taskId),
+        this.readStructuredMemory(record),
         this.resolveSelectedImagePaths(record),
         this.client.summaries()
       ]);
       if (this.isSelected(record.request.taskId)) {
         this.snapshotValue.selectedExecution = execution;
+        this.snapshotValue.selectedStructuredMemory = structuredMemory;
         this.snapshotValue.selectedImagePaths = imagePaths;
       }
       this.snapshotValue.summary = summary;
@@ -397,13 +404,15 @@ export class TaskController {
       this.beginDetail(record);
       this.snapshotValue.screen = "detail";
       this.onChange();
-      const [execution, imagePaths, delegation] = await Promise.all([
+      const [execution, structuredMemory, imagePaths, delegation] = await Promise.all([
         executionPromise,
+        this.readStructuredMemory(record),
         this.resolveSelectedImagePaths(record),
         this.readDelegationState(record)
       ]);
       if (!this.isSelected(taskId)) return;
       this.snapshotValue.selectedExecution = execution;
+      this.snapshotValue.selectedStructuredMemory = structuredMemory;
       this.snapshotValue.selectedImagePaths = imagePaths;
       this.snapshotValue.delegationTargets = delegation.targets;
       this.snapshotValue.delegationSelections = delegation.selections;
@@ -454,13 +463,15 @@ export class TaskController {
       this.snapshotValue.delegationSelections = [];
       this.onChange();
       const record = this.snapshotValue.selectedTask;
-      const [execution, imagePaths, summary] = await Promise.all([
+      const [execution, structuredMemory, imagePaths, summary] = await Promise.all([
         this.readExecution(taskId),
+        this.readStructuredMemory(record),
         this.resolveSelectedImagePaths(record),
         this.client.summaries()
       ]);
       if (this.isSelected(taskId)) {
         this.snapshotValue.selectedExecution = execution;
+        this.snapshotValue.selectedStructuredMemory = structuredMemory;
         this.snapshotValue.selectedImagePaths = imagePaths;
       }
       this.snapshotValue.summary = summary;
@@ -515,13 +526,15 @@ export class TaskController {
       const record = await operation(taskId);
       this.snapshotValue.selectedTask = record;
       this.onChange();
-      const [execution, imagePaths, summary] = await Promise.all([
+      const [execution, structuredMemory, imagePaths, summary] = await Promise.all([
         this.readExecution(taskId),
+        this.readStructuredMemory(record),
         this.resolveSelectedImagePaths(record),
         this.client.summaries()
       ]);
       if (this.isSelected(taskId)) {
         this.snapshotValue.selectedExecution = execution;
+        this.snapshotValue.selectedStructuredMemory = structuredMemory;
         this.snapshotValue.selectedImagePaths = imagePaths;
       }
       this.snapshotValue.summary = summary;
@@ -546,7 +559,15 @@ export class TaskController {
         : undefined;
       const summaryPromise = this.client.summaries();
       const detailPromise = taskId
-        ? Promise.all([this.client.get(taskId), this.readExecution(taskId)] as const)
+        ? Promise.all([
+          this.client.get(taskId),
+          this.readExecution(taskId),
+          this.snapshotValue.selectedTask?.direction === "incoming"
+            && this.snapshotValue.selectedTask.request.executionMode === "long_horizon"
+            && Boolean(this.snapshotValue.selectedTask.longHorizon)
+            ? this.client.getStructuredMemory(taskId).catch(() => null)
+            : Promise.resolve(null)
+        ] as const)
         : null;
       const [summaryResult, detailResult] = await Promise.all([
         summaryPromise.then(
@@ -555,7 +576,12 @@ export class TaskController {
         ),
         detailPromise
           ? detailPromise.then(
-            ([record, execution]) => ({ ok: true as const, record, execution }),
+            ([record, execution, structuredMemory]) => ({
+              ok: true as const,
+              record,
+              execution,
+              structuredMemory
+            }),
             () => ({ ok: false as const })
           )
           : Promise.resolve(null)
@@ -564,6 +590,7 @@ export class TaskController {
       if (taskId && detailResult?.ok && this.isVisibleDetail(taskId)) {
         this.snapshotValue.selectedTask = detailResult.record;
         this.snapshotValue.selectedExecution = detailResult.execution;
+        this.snapshotValue.selectedStructuredMemory = detailResult.structuredMemory;
         this.snapshotValue.selectedImagePaths = await this.resolveSelectedImagePaths(
           detailResult.record
         );
@@ -636,6 +663,19 @@ export class TaskController {
     }
   }
 
+  private async readStructuredMemory(
+    record: CollaborationTaskTransportRecord
+  ): Promise<LongHorizonTaskMemorySnapshot | null> {
+    if (record.direction !== "incoming"
+      || record.request.executionMode !== "long_horizon"
+      || !record.longHorizon) return null;
+    try {
+      return await this.client.getStructuredMemory(record.request.taskId);
+    } catch {
+      return null;
+    }
+  }
+
   private async readDelegationState(record: CollaborationTaskTransportRecord): Promise<{
     targets: DelegationTargetOption[];
     selections: DelegationTargetSelection[];
@@ -659,6 +699,7 @@ export class TaskController {
   private beginDetail(record: CollaborationTaskTransportRecord): void {
     this.snapshotValue.selectedTask = record;
     this.snapshotValue.selectedExecution = null;
+    this.snapshotValue.selectedStructuredMemory = null;
     this.snapshotValue.delegationTargets = [];
     this.snapshotValue.delegationSelections = [];
     this.snapshotValue.selectedImagePaths = {};
@@ -722,6 +763,7 @@ export class TaskController {
         },
         resumeCapability: execution.resumeCapability
       } : null,
+      selectedStructuredMemory: detailVisible ? this.snapshotValue.selectedStructuredMemory : null,
       selectedImagePaths: detailVisible ? this.snapshotValue.selectedImagePaths : {}
     });
   }
@@ -771,6 +813,10 @@ export class BridgeTaskClient implements TaskClient {
 
   get(taskId: string): Promise<CollaborationTaskTransportRecord> {
     return this.bridge.request("task.get", { taskId }) as Promise<CollaborationTaskTransportRecord>;
+  }
+
+  getStructuredMemory(taskId: string): Promise<LongHorizonTaskMemorySnapshot> {
+    return this.bridge.request("task.memory.get", { taskId }) as Promise<LongHorizonTaskMemorySnapshot>;
   }
 
   async resolveImage(taskId: string, attachmentId: string): Promise<string> {
@@ -849,6 +895,7 @@ export class BridgeTaskClient implements TaskClient {
 export class MockTaskClient implements TaskClient {
   async summaries(): Promise<CollaborationTaskSummarySnapshot> { return structuredClone(EMPTY_SUMMARY); }
   async get(): Promise<CollaborationTaskTransportRecord> { throw new Error("TASK_NOT_FOUND"); }
+  async getStructuredMemory(): Promise<LongHorizonTaskMemorySnapshot> { throw new Error("MEMORY_STORE_UNAVAILABLE"); }
   async resolveImage(): Promise<string> { throw new Error("TASK_ATTACHMENT_NOT_FOUND"); }
   async stageImage(_path: string): Promise<StagedTaskImageDto> { throw new Error("TASK_ATTACHMENTS_UNAVAILABLE"); }
   async send(): Promise<CollaborationTaskTransportRecord> { throw new Error("TASK_TRANSPORT_UNAVAILABLE"); }
