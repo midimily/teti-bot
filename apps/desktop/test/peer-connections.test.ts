@@ -11,7 +11,8 @@ import {
   CONNECTION_DETAILS_TRANSITION_MS,
   PeerConnectionController,
   type PeerConnectionClient,
-  type PeerConnectionCommandResult
+  type PeerConnectionCommandResult,
+  type PeerConnectionMutationResult
 } from "../src/connections/controller.ts";
 import type { PassportConnectionSnapshot } from "../../../core/passport/snapshot.ts";
 import type {
@@ -159,6 +160,74 @@ test("a valid ID enters connecting immediately and duplicate submits are ignored
   await request;
   assert.equal(controller.snapshot.connectPanel.state, "success");
   assert.equal(controller.snapshot.connectPanel.messageCode, "request_sent");
+});
+
+test("accept shows row progress immediately and commits before Passport refresh finishes", async () => {
+  const connection = pendingConnection("accept-fast-feedback");
+  const client = new DeferredMutationPeerConnectionClient(connection);
+  let finishRefresh!: () => void;
+  const refreshGate = new Promise<void>((resolve) => { finishRefresh = resolve; });
+  let refreshFinished = false;
+  let controller: PeerConnectionController;
+  controller = new PeerConnectionController({
+    client,
+    notchWindow: new TauriNotchWindowController(new RecordingTauriInvoker()),
+    onChange: () => undefined,
+    refreshPassport: async () => {
+      await refreshGate;
+      refreshFinished = true;
+      controller.syncPassportConnections(client.connections);
+    }
+  });
+  controller.syncPassportConnections([connection]);
+  controller.open();
+
+  let operationFinished = false;
+  const operation = controller.accept(connection.requestId).then(() => { operationFinished = true; });
+  assert.equal(controller.snapshot.busy, true);
+  assert.deepEqual(controller.snapshot.mutation, {
+    requestId: connection.requestId,
+    kind: "accept"
+  });
+  assert.equal(controller.snapshot.connections[0]?.connectionState, "PendingApproval");
+
+  client.finishAccept();
+  await flushPromises();
+  assert.equal(operationFinished, true, "accept must not await the follow-up Passport read");
+  assert.equal(refreshFinished, false);
+  assert.equal(controller.snapshot.busy, false);
+  assert.equal(controller.snapshot.mutation, undefined);
+  assert.equal(controller.snapshot.connections[0]?.connectionState, "Confirmed");
+
+  controller.syncPassportConnections([connection]);
+  assert.equal(
+    controller.snapshot.connections[0]?.connectionState,
+    "Confirmed",
+    "a stale in-flight Passport read must not revert the committed result"
+  );
+
+  finishRefresh();
+  await operation;
+  await flushPromises();
+  assert.equal(refreshFinished, true);
+  assert.equal(controller.snapshot.connections[0]?.connectionState, "Confirmed");
+  controller.dispose();
+});
+
+test("failed accept restores actions and exposes a safe row-level retry state", async () => {
+  const connection = pendingConnection("accept-safe-error");
+  const client = new FailingMutationPeerConnectionClient(connection);
+  const { controller } = makeHarness(client);
+  controller.syncPassportConnections([connection]);
+
+  await controller.accept(connection.requestId);
+
+  assert.equal(controller.snapshot.busy, false);
+  assert.equal(controller.snapshot.connections[0]?.connectionState, "PendingApproval");
+  assert.deepEqual(controller.snapshot.mutationError, {
+    requestId: connection.requestId,
+    kind: "accept"
+  });
 });
 
 test("connecting defers outside focus loss without interrupting the request", async () => {
@@ -397,8 +466,9 @@ test("disposing the controller cancels opening, success, and collapse timers", a
 });
 
 test("connection UI keeps status inside the input and closes on clicks outside its controls", async () => {
-  const [appSource, chineseCatalog, styles] = await Promise.all([
+  const [appSource, englishCatalog, chineseCatalog, styles] = await Promise.all([
     readFile(new URL("../src/app.ts", import.meta.url), "utf8"),
+    readFile(new URL("../src/i18n/locales/en.ts", import.meta.url), "utf8"),
     readFile(new URL("../src/i18n/locales/zh-hans.ts", import.meta.url), "utf8"),
     readFile(new URL("../src/styles.css", import.meta.url), "utf8")
   ]);
@@ -425,6 +495,10 @@ test("connection UI keeps status inside the input and closes on clicks outside i
   assert.match(styles, /@keyframes teti-connect-close/);
   assert.match(styles, /@keyframes teti-connect-search/);
   assert.match(styles, /@media \(prefers-reduced-motion: reduce\)/);
+  assert.match(englishCatalog, /accepting: "Accepting…"/);
+  assert.match(englishCatalog, /acceptFailed: "Couldn’t accept\. Try again"/);
+  assert.match(chineseCatalog, /accepting: "正在接受…"/);
+  assert.match(chineseCatalog, /acceptFailed: "接受失败，请重试"/);
 });
 
 test("connection UI renders the complete semantic row list inside a bounded scroller", async () => {
@@ -443,6 +517,9 @@ test("connection UI renders the complete semantic row list inside a bounded scro
   assert.match(styles, /Beta 0\.2\.1 connection-list integration:[\s\S]*\.teti-connection-row\.is-confirmed \.teti-connection-row-main\s*\{[\s\S]*height:\s*64px/);
   assert.match(styles, /\.teti-island--connections\.has-peer-details \.teti-connection-list\s*\{[\s\S]*max-height:/);
   assert.match(styles, /\.teti-pending-indicator\s*\{/);
+  assert.match(appSource, /teti-connection-mutation-spinner/);
+  assert.match(appSource, /messages\.connections\.list\.accepting/);
+  assert.match(styles, /@keyframes teti-connection-spin/);
   assert.match(styles, /data-has-notch="true"\]\s+\.teti-header\s*\{[\s\S]*grid-template-columns/);
   assert.match(styles, /data-has-notch="true"\]\s+\.teti-island--connections\s*\{[\s\S]*safe-top-inset/);
 });
@@ -505,6 +582,15 @@ function confirmedConnection(requestId: string): PassportConnectionSnapshot {
     updatedAt: "2026-07-17T00:00:01.000Z",
     lastSeen: null,
     passport: { state: "unknown", resources: [], agents: [] }
+  };
+}
+
+function pendingConnection(requestId: string): PassportConnectionSnapshot {
+  return {
+    ...confirmedConnection(requestId),
+    connectionState: "PendingApproval",
+    direction: "incoming",
+    confirmedAt: undefined
   };
 }
 
@@ -603,8 +689,72 @@ class StaticPeerConnectionClient implements TestPeerConnectionClient {
     return this.requestResult;
   }
 
-  async accept(_requestId: string): Promise<void> { return undefined; }
-  async reject(_requestId: string): Promise<void> { return undefined; }
+  async accept(requestId: string): Promise<PeerConnectionMutationResult> {
+    return {
+      requestId,
+      connectionState: "Confirmed",
+      updatedAt: "2026-07-17T00:00:02.000Z",
+      confirmedAt: "2026-07-17T00:00:02.000Z"
+    };
+  }
+
+  async reject(requestId: string): Promise<PeerConnectionMutationResult> {
+    return {
+      requestId,
+      connectionState: "Rejected",
+      updatedAt: "2026-07-17T00:00:02.000Z"
+    };
+  }
+}
+
+class DeferredMutationPeerConnectionClient implements TestPeerConnectionClient {
+  readonly requestCalls: string[] = [];
+  readonly connections: PassportConnectionSnapshot[];
+  private resolveAccept?: (result: PeerConnectionMutationResult) => void;
+
+  constructor(connection: PassportConnectionSnapshot) {
+    this.connections = [structuredClone(connection)];
+  }
+
+  async resolve(): Promise<PublicTetiIdentity> { return identity; }
+  async request(): Promise<PeerConnectionCommandResult> { return {}; }
+
+  accept(requestId: string): Promise<PeerConnectionMutationResult> {
+    return new Promise((resolve) => { this.resolveAccept = resolve; });
+  }
+
+  async reject(requestId: string): Promise<PeerConnectionMutationResult> {
+    return {
+      requestId,
+      connectionState: "Rejected",
+      updatedAt: "2026-07-17T00:00:02.000Z"
+    };
+  }
+
+  finishAccept(): void {
+    const connection = this.connections[0]!;
+    connection.connectionState = "Confirmed";
+    connection.updatedAt = "2026-07-17T00:00:02.000Z";
+    connection.confirmedAt = connection.updatedAt;
+    this.resolveAccept?.({
+      requestId: connection.requestId,
+      connectionState: "Confirmed",
+      updatedAt: connection.updatedAt,
+      confirmedAt: connection.confirmedAt
+    });
+  }
+}
+
+class FailingMutationPeerConnectionClient extends StaticPeerConnectionClient {
+  constructor(connection: PassportConnectionSnapshot) {
+    super({ connections: [connection] });
+  }
+
+  override async accept(): Promise<PeerConnectionMutationResult> {
+    const error = new Error("private transport detail");
+    error.name = "CONNECTION_REQUEST_FAILED";
+    throw error;
+  }
 }
 
 class SequencedPeerConnectionClient extends StaticPeerConnectionClient {

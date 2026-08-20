@@ -253,6 +253,7 @@ export class PeerConnectionRuntime implements PeerConnectionService {
   private readonly heartbeatSent = new Map<string, string>();
   private readonly heartbeatReceived = new Map<string, string>();
   private readonly heartbeatRetries = new Map<string, ChatmailHeartbeatRetryState>();
+  private readonly heartbeatDeliveryInFlight = new Set<string>();
   private readonly aiStatusSent = new Map<string, { at: string; signature: string }>();
   private readonly remoteAiStatus = new Map<string, RemoteAiStatusSnapshot>();
   private readonly identityCache = new Map<string, TetiIdentity>();
@@ -541,20 +542,61 @@ export class PeerConnectionRuntime implements PeerConnectionService {
   }
 
   accept(requestId: string): Promise<PeerConnectionResult> {
+    const enqueuedAt = Date.now();
     return this.serial(async () => {
-      await this.ensureReady();
-      if (this.relationshipService) {
-        const id = requireRequestId(requestId);
-        const result = await this.relationshipService.accept(id);
-        await this.applyNetworkRelationship(result.document);
-        await this.sendDueHeartbeats();
-        await this.sendDueAiStatus(true);
-        return this.snapshot();
+      const startedAt = Date.now();
+      let authorityMs = 0;
+      let projectionMs = 0;
+      let presenceMs = 0;
+      try {
+        await this.ensureReady();
+        if (this.relationshipService) {
+          const id = requireRequestId(requestId);
+          const authorityStartedAt = Date.now();
+          const result = await this.relationshipService.accept(id);
+          authorityMs = Date.now() - authorityStartedAt;
+          const projectionStartedAt = Date.now();
+          await this.applyNetworkRelationship(result.document);
+          projectionMs = Date.now() - projectionStartedAt;
+        } else {
+          const authorityStartedAt = Date.now();
+          await acceptConnection(requireRequestId(requestId), this.handshakeOptions());
+          authorityMs = Date.now() - authorityStartedAt;
+        }
+
+        // Relationship authority and the local projection are the user-visible
+        // commit point. Publish the first presence message so the peer can prove
+        // protocol compatibility immediately, but observe remote delivery in the
+        // background. Passport broadcasting remains owned by the next poll.
+        const presenceStartedAt = Date.now();
+        const heartbeatCount = await this.sendDueHeartbeats();
+        presenceMs = Date.now() - presenceStartedAt;
+        const snapshotStartedAt = Date.now();
+        const snapshot = await this.snapshot(0, heartbeatCount);
+        writeRuntimeDiagnostic("connection.accept", {
+          result: "confirmed",
+          queueWaitMs: startedAt - enqueuedAt,
+          authorityMs,
+          projectionMs,
+          presenceMs,
+          snapshotMs: Date.now() - snapshotStartedAt,
+          totalMs: Date.now() - enqueuedAt,
+          deliveryObservation: "deferred",
+          passportBroadcast: "deferred"
+        });
+        return snapshot;
+      } catch (error) {
+        writeRuntimeDiagnostic("connection.accept", {
+          result: "failed",
+          queueWaitMs: startedAt - enqueuedAt,
+          authorityMs,
+          projectionMs,
+          presenceMs,
+          totalMs: Date.now() - enqueuedAt,
+          code: readErrorCode(error) ?? "CONNECTION_REQUEST_FAILED"
+        });
+        throw error;
       }
-      await acceptConnection(requireRequestId(requestId), this.handshakeOptions());
-      await this.sendDueHeartbeats();
-      await this.sendDueAiStatus(true);
-      return this.snapshot();
     });
   }
 
@@ -1203,6 +1245,7 @@ export class PeerConnectionRuntime implements PeerConnectionService {
     const now = this.now();
     for (const connection of await this.connectionStorage.loadAll()) {
       if (!this.isAuthorizedConnection(connection)) continue;
+      if (this.heartbeatDeliveryInFlight.has(connection.requestId)) continue;
       const retry = this.heartbeatRetries.get(connection.requestId);
       if (retry && now.getTime() < retry.nextAttemptAt) continue;
       const previous = this.heartbeatSent.get(connection.requestId);
@@ -1216,46 +1259,74 @@ export class PeerConnectionRuntime implements PeerConnectionService {
           taskProtocolVersions: [...TETI_SUPPORTED_TASK_PROTOCOL_VERSIONS],
           passportSchemaVersions: [...TETI_SUPPORTED_PASSPORT_SCHEMA_VERSIONS]
         });
-        const account = await this.requireAccount();
-        await this.chatmailAdapter.waitForDelivery?.({
-          accountId: account.chatmailAccountId,
-          messageId: delivery.messageId
-        });
         this.heartbeatSent.set(connection.requestId, timestamp);
-        const recovered = this.heartbeatRetries.get(connection.requestId);
-        this.heartbeatRetries.delete(connection.requestId);
-        if (recovered) {
-          this.onHeartbeatDeliveryDiagnostic({
-            result: "recovered",
-            peerTetiId: connection.remoteTetiId,
-            attempt: recovered.attempt
-          });
-        }
         sent += 1;
+        if (this.chatmailAdapter.waitForDelivery) {
+          const account = await this.requireAccount();
+          this.observeHeartbeatDelivery(
+            connection,
+            account.chatmailAccountId,
+            delivery.messageId
+          );
+        } else {
+          this.recordHeartbeatDeliverySuccess(connection);
+        }
       } catch (error) {
-        const attempt = (retry?.attempt ?? 0) + 1;
-        const nextRetryMs = CHATMAIL_HEARTBEAT_RETRY_DELAYS_MS[
-          Math.min(attempt - 1, CHATMAIL_HEARTBEAT_RETRY_DELAYS_MS.length - 1)
-        ];
-        this.heartbeatRetries.set(connection.requestId, {
-          attempt,
-          nextAttemptAt: now.getTime() + nextRetryMs
-        });
-        const code = readErrorCode(error);
-        this.onHeartbeatDeliveryDiagnostic({
-          result: "failed",
-          peerTetiId: connection.remoteTetiId,
-          attempt,
-          nextRetryMs,
-          ...(code ? { code } : {}),
-          message: redactSecretLikeText(error instanceof Error ? error.message : String(error))
-        });
+        this.recordHeartbeatDeliveryFailure(connection, error, now);
         // One unavailable peer must not delay heartbeats for the remaining
         // confirmed connections. Bounded backoff prevents a failed Relay from
         // creating one permanently failed DeltaChat row on every Runtime poll.
       }
     }
     return sent;
+  }
+
+  private observeHeartbeatDelivery(
+    connection: TetiConnectionRecord,
+    accountId: number,
+    messageId: number
+  ): void {
+    this.heartbeatDeliveryInFlight.add(connection.requestId);
+    void this.chatmailAdapter.waitForDelivery!({ accountId, messageId })
+      .then(() => this.recordHeartbeatDeliverySuccess(connection))
+      .catch((error) => this.recordHeartbeatDeliveryFailure(connection, error, this.now()))
+      .finally(() => this.heartbeatDeliveryInFlight.delete(connection.requestId));
+  }
+
+  private recordHeartbeatDeliverySuccess(connection: TetiConnectionRecord): void {
+    const recovered = this.heartbeatRetries.get(connection.requestId);
+    this.heartbeatRetries.delete(connection.requestId);
+    if (!recovered) return;
+    this.onHeartbeatDeliveryDiagnostic({
+      result: "recovered",
+      peerTetiId: connection.remoteTetiId,
+      attempt: recovered.attempt
+    });
+  }
+
+  private recordHeartbeatDeliveryFailure(
+    connection: TetiConnectionRecord,
+    error: unknown,
+    observedAt: Date
+  ): void {
+    const retry = this.heartbeatRetries.get(connection.requestId);
+    const attempt = (retry?.attempt ?? 0) + 1;
+    const nextRetryMs = CHATMAIL_HEARTBEAT_RETRY_DELAYS_MS[
+      Math.min(attempt - 1, CHATMAIL_HEARTBEAT_RETRY_DELAYS_MS.length - 1)
+    ];
+    this.heartbeatRetries.set(connection.requestId, {
+      attempt,
+      nextAttemptAt: observedAt.getTime() + nextRetryMs
+    });
+    const code = readErrorCode(error);
+    this.onHeartbeatDeliveryDiagnostic({
+      result: "failed",
+      peerTetiId: connection.remoteTetiId,
+      attempt,
+      nextRetryMs,
+      ...(code ? { code } : {}),
+      message: redactSecretLikeText(error instanceof Error ? error.message : String(error))
+    });
   }
 
   private async sendDueAiStatus(force = false): Promise<number> {

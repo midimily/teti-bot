@@ -24,6 +24,7 @@ import {
 import type {
   ChatmailAdapter,
   ChatmailIdentity,
+  ChatmailMessageStatus,
   ChatmailPublicIdentity,
   ChatmailReceivedMessage,
   ChatmailSentMessage,
@@ -31,7 +32,8 @@ import type {
   DeleteChatmailAccountInput,
   LoadChatmailAccountInput,
   ReceiveChatmailMessagesInput,
-  SendChatmailMessageInput
+  SendChatmailMessageInput,
+  WaitForChatmailDeliveryInput
 } from "../../../integrations/chatmail/types.ts";
 import type { TetiPublicDirectoryReader } from "../../../services/discovery/client.ts";
 import type { TetiPublicDirectoryIdentity } from "../../../services/discovery/types.ts";
@@ -82,6 +84,7 @@ test("two Teti runtimes confirm a Chatmail handshake and exchange alpha heartbea
 
   const heartbeatReturn = await runtimeB.poll();
   assert.ok(heartbeatReturn.connections[0]?.lastHeartbeatReceivedAt);
+  assert.ok(heartbeatReturn.connections[0]?.lastHeartbeatSentAt);
 
   const repeated = await runtimeA.request("beta00002");
   assert.equal(repeated.requestOutcome?.kind, "alreadyConfirmed");
@@ -104,6 +107,33 @@ test("a due heartbeat is sent before polling a peer backlog", async () => {
   await runtimeA.poll();
 
   assert.deepEqual(relay.eventsFor(accountA.address).slice(0, 2), ["send", "receive"]);
+});
+
+test("heartbeat delivery observation cannot block the serialized connection queue", async () => {
+  const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
+  const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
+  const directory = new StaticDirectory([toIdentity(accountA), toIdentity(accountB)]);
+  const relay = new MemoryChatmailRelay();
+  let nowMs = Date.now() + 1_000;
+  const now = () => new Date(nowMs);
+  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), directory, undefined, { now });
+  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), directory, undefined, { now });
+  await confirmPeers(runtimeA, runtimeB, "beta00002");
+
+  nowMs += 5_000;
+  const deliveryWaitsBeforePoll = relay.deliveryWaitCount();
+  relay.setDeliveryBlocked(true);
+
+  const poll = runtimeA.poll();
+  const snapshot = await Promise.race([
+    poll,
+    new Promise<never>((_resolve, reject) => {
+      setTimeout(() => reject(new Error("poll was blocked by delivery observation")), 100);
+    })
+  ]);
+
+  assert.ok(relay.deliveryWaitCount() > deliveryWaitsBeforePoll);
+  assert.equal(snapshot.connections[0]?.state, "Confirmed");
 });
 
 test("reciprocal intent accepts a relayed request and confirms both Teti instances", async () => {
@@ -2282,6 +2312,8 @@ class MemoryChatmailRelay {
   private readonly attachmentDownloadRequests = new Map<number, number>();
   private nextMessageId = 1;
   private lastReceivedAtMs = Date.now();
+  private deliveryBlocked = false;
+  private deliveryWaitCalls = 0;
   private readonly deferredAttachments: boolean;
   private readonly hideAttachmentTextUntilDone: boolean;
   private readonly initialAttachmentDownloadState: "Available" | "Failure";
@@ -2298,6 +2330,22 @@ class MemoryChatmailRelay {
 
   adapter(fromAddress: string): ChatmailAdapter {
     return new RelayAdapter(this, fromAddress);
+  }
+
+  setDeliveryBlocked(blocked: boolean): void {
+    this.deliveryBlocked = blocked;
+  }
+
+  deliveryWaitCount(): number {
+    return this.deliveryWaitCalls;
+  }
+
+  async waitForDelivery(messageId: number): Promise<ChatmailMessageStatus> {
+    this.deliveryWaitCalls += 1;
+    if (this.deliveryBlocked) {
+      return new Promise<ChatmailMessageStatus>(() => undefined);
+    }
+    return { messageId, state: 26 };
   }
 
   send(fromAddress: string, input: SendChatmailMessageInput): ChatmailSentMessage {
@@ -2951,6 +2999,9 @@ class RelayAdapter implements ChatmailAdapter {
   }
   async sendMessage(input: SendChatmailMessageInput): Promise<ChatmailSentMessage> {
     return this.relay.send(this.address, input);
+  }
+  async waitForDelivery(input: WaitForChatmailDeliveryInput): Promise<ChatmailMessageStatus> {
+    return this.relay.waitForDelivery(input.messageId);
   }
   async receiveMessages(input: ReceiveChatmailMessagesInput): Promise<ChatmailReceivedMessage[]> {
     return this.relay.receive(this.address, input.limit);

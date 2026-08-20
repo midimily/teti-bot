@@ -154,6 +154,10 @@ export interface AppMessages {
       };
       readonly accept: string;
       readonly reject: string;
+      readonly accepting: string;
+      readonly rejecting: string;
+      readonly acceptFailed: string;
+      readonly rejectFailed: string;
       readonly waitingApproval: string;
       readonly rejected: string;
       readonly expandDetails: string;
