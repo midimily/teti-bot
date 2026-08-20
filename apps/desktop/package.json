@@ -7,6 +7,7 @@
     "dev": "vite --host 127.0.0.1",
     "tauri:dev": "tauri dev",
     "tauri:dev:windows": "tauri dev",
+    "build:renderer": "vite build",
     "build": "node --experimental-strip-types scripts/build-desktop.ts",
     "build:release": "TETI_BUILD_TYPE=release node --experimental-strip-types scripts/build-desktop.ts",
     "runtime:bundle": "node --experimental-strip-types scripts/bundle-runtime.ts",

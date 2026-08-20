@@ -71,7 +71,7 @@ jobs:
         run: npm test
 
       - name: Build renderer
-        run: npm --prefix apps/desktop exec -- vite build
+        run: npm --prefix apps/desktop run build:renderer
 
       - name: Install pinned Rust toolchain
         run: |
