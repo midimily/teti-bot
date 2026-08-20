@@ -1,4 +1,6 @@
 import { chmod, copyFile, mkdir, readFile, readdir, rm, stat } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
@@ -28,6 +30,7 @@ const buildDefines = {
   __TETI_BUILD_TYPE__: JSON.stringify(buildType)
 };
 const runtimeSource = await resolveRuntimeSource();
+await verifySqliteRuntime(runtimeSource.node);
 
 await rm(resourcesRoot, { recursive: true, force: true });
 await mkdir(dirname(sidecarOutput), { recursive: true });
@@ -80,6 +83,28 @@ console.log(`Bundled Teti ${runtimeSource.target} lifecycle Runtime in ${resourc
 async function copyExecutable(source: string, destination: string): Promise<void> {
   await copyFile(source, destination);
   if (process.platform !== "win32") await chmod(destination, 0o755);
+}
+
+async function verifySqliteRuntime(nodePath: string): Promise<void> {
+  const run = promisify(execFile);
+  const script = [
+    'import { DatabaseSync } from "node:sqlite";',
+    'const database = new DatabaseSync(":memory:");',
+    'database.exec("CREATE TABLE memory_probe (id INTEGER PRIMARY KEY) STRICT");',
+    'const row = database.prepare("SELECT sqlite_version() AS version").get();',
+    'database.close();',
+    'process.stdout.write(String(row.version));'
+  ].join("\n");
+  try {
+    const { stdout } = await run(nodePath, ["--input-type=module", "--eval", script], {
+      windowsHide: true,
+      timeout: 5_000,
+      maxBuffer: 16 * 1_024
+    });
+    if (!/^3\.\d+\.\d+$/.test(stdout.trim())) throw new Error("SQLite version probe was invalid.");
+  } catch {
+    throw new Error("Bundled Node Runtime must provide a working node:sqlite DatabaseSync implementation.");
+  }
 }
 
 async function resolveRuntimeSource(): Promise<{
