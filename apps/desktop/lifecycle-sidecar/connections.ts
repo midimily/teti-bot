@@ -120,11 +120,16 @@ import {
 import type { CollaborationWorkspaceStore } from "./runtime/workspaces/store.ts";
 import type { ExecutionHandle } from "../../../core/callability/execution.ts";
 import type {
+  LongHorizonTaskMemorySnapshot,
+  StructuredTaskMemoryStore
+} from "../../../core/memory/structured-task.ts";
+import type {
   DelegationTargetOption,
   DelegationTargetSelection
 } from "../../../core/delegation/types.ts";
 import { writeRuntimeDiagnostic } from "./diagnostics.ts";
 import { redactSecretLikeText } from "./security.ts";
+import { SqliteStructuredTaskMemoryStore } from "./runtime/memory/structured-task-sqlite.ts";
 
 const HEARTBEAT_INTERVAL_MS = 5_000;
 export const CHATMAIL_HEARTBEAT_RETRY_DELAYS_MS = [
@@ -154,6 +159,7 @@ export class RelationshipAuthorizationDeniedError extends Error {
 }
 
 export interface PeerConnectionService {
+  close?(): Promise<void>;
   resolve(query: string): Promise<PublicTetiIdentity>;
   request(query: string): Promise<PeerConnectionResult>;
   list(): Promise<PeerConnectionResult>;
@@ -169,6 +175,7 @@ export interface PeerConnectionService {
   listTasks?(): Promise<CollaborationTaskTransportSnapshot>;
   listTaskSummaries?(): Promise<CollaborationTaskSummarySnapshot>;
   getTask?(taskId: string): Promise<CollaborationTaskTransportRecord>;
+  getLongHorizonTaskMemory?(taskId: string): Promise<LongHorizonTaskMemorySnapshot>;
   stageTaskImage?(sourcePath: string): Promise<StagedTaskImage>;
   resolveTaskImage?(taskId: string, attachmentId: string): Promise<string>;
   approveTask?(taskId: string): Promise<CollaborationTaskTransportRecord>;
@@ -209,6 +216,7 @@ interface PeerConnectionRuntimeOptions {
   taskIdFactory?: () => string;
   taskAttachmentStore?: FileTaskAttachmentStore;
   workspaceStore?: CollaborationWorkspaceStore;
+  structuredTaskMemoryStore?: StructuredTaskMemoryStore;
   taskExecutor?: TaskExecutionBridge;
   relationshipService?: TetiNetworkRelationshipService;
   allowLegacyRelationshipAuthorityForTests?: true;
@@ -238,6 +246,7 @@ export class PeerConnectionRuntime implements PeerConnectionService {
   private readonly applicationManager: TetiApplicationManager;
   private readonly messagingAdapter: ChatmailConnectionMessagingAdapter;
   private readonly taskTransport: TaskTransportRuntime;
+  private readonly structuredTaskMemoryStore?: StructuredTaskMemoryStore;
   private readonly taskInitialization: Promise<void>;
   private readonly startIo?: (accountId: number) => Promise<void>;
   private readonly now: () => Date;
@@ -298,6 +307,7 @@ export class PeerConnectionRuntime implements PeerConnectionService {
       now: () => this.now().toISOString(),
       authorizePeer: (peerTetiId) => this.requireNetworkAuthorization(peerTetiId)
     });
+    this.structuredTaskMemoryStore = options.structuredTaskMemoryStore;
     this.taskTransport = new TaskTransportRuntime({
       accountStorage: this.accountStorage,
       connectionStorage: this.connectionStorage,
@@ -307,6 +317,7 @@ export class PeerConnectionRuntime implements PeerConnectionService {
       taskIdFactory: options.taskIdFactory,
       attachmentStore: options.taskAttachmentStore,
       workspaceStore: options.workspaceStore,
+      structuredTaskMemoryStore: options.structuredTaskMemoryStore,
       executor: options.taskExecutor,
       authorizePeer: (peerTetiId) => this.requireNetworkAuthorization(peerTetiId),
       enqueueOperation: (operation) => this.serial(operation)
@@ -317,6 +328,11 @@ export class PeerConnectionRuntime implements PeerConnectionService {
 
   resolve(query: string): Promise<PublicTetiIdentity> {
     return this.serial(async () => toPublicIdentity(await this.resolveRemote(query)));
+  }
+
+  async close(): Promise<void> {
+    await this.taskInitialization.catch(() => undefined);
+    await this.structuredTaskMemoryStore?.close();
   }
 
   request(query: string): Promise<PeerConnectionResult> {
@@ -673,6 +689,10 @@ export class PeerConnectionRuntime implements PeerConnectionService {
 
   getTask(taskId: string): Promise<CollaborationTaskTransportRecord> {
     return this.taskInitialization.then(() => this.taskTransport.get(taskId));
+  }
+
+  getLongHorizonTaskMemory(taskId: string): Promise<LongHorizonTaskMemorySnapshot> {
+    return this.taskInitialization.then(() => this.taskTransport.getLongHorizonMemory(taskId));
   }
 
   stageTaskImage(sourcePath: string): Promise<StagedTaskImage> {
@@ -1599,11 +1619,12 @@ export function getDefaultPassportSharingStore(): Promise<FilePassportSharingSto
 
 export async function closeDefaultPeerConnectionService(): Promise<void> {
   const pendingService = defaultServicePromise;
-  if (pendingService) await pendingService.catch(() => undefined);
+  const service = pendingService ? await pendingService.catch(() => undefined) : undefined;
   const client = defaultRpcClient;
   defaultServicePromise = undefined;
   defaultRpcClient = undefined;
   defaultPassportSharingStorePromise = undefined;
+  await service?.close?.();
   await client?.close();
 }
 
@@ -1629,6 +1650,9 @@ async function createDefaultPeerConnectionService(
     getLocalCallableAgents: options.getLocalCallableAgents,
     getLocalComputeOffers: options.getLocalComputeOffers,
     taskTransportStore: new FileTaskTransportStore(join(profile.storeDir, "tasks.json")),
+    structuredTaskMemoryStore: new SqliteStructuredTaskMemoryStore({
+      path: join(profile.storeDir, "collaboration-memory-v2.sqlite")
+    }),
     peerProtocolCapabilities: new FilePeerProtocolCapabilityStore(
       join(profile.storeDir, "peer-protocol-capabilities.json")
     ),

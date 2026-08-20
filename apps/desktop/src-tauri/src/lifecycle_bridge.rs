@@ -792,6 +792,7 @@ pub fn timeout_for_method(method: &str) -> Duration {
         "task.list"
         | "task.summary"
         | "task.get"
+        | "task.memory.get"
         | "task.attachment.resolve"
         | "task.delegation.targets"
         | "task.execution.get" => 2_000,
@@ -835,6 +836,7 @@ fn is_allowed_method(method: &str) -> bool {
             | "task.list"
             | "task.summary"
             | "task.get"
+            | "task.memory.get"
             | "task.attachment.stage"
             | "task.attachment.resolve"
             | "task.approve"
@@ -963,6 +965,7 @@ mod tests {
             "agent.observation.get",
             "task.send",
             "task.list",
+            "task.memory.get",
             "task.approve",
             "task.attachment.stage",
             "task.delegation.targets",

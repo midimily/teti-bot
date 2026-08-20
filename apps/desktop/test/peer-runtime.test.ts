@@ -58,6 +58,8 @@ import type { TaskImagePart } from "../../../core/task/types.ts";
 import type { ExecutionHandle, PrepareExecutionHandleInput } from "../../../core/callability/execution.ts";
 import type { ExecutionAuthority } from "../../../core/callability/agent-core.ts";
 import { FileCollaborationWorkspaceStore } from "../lifecycle-sidecar/runtime/workspaces/store.ts";
+import type { StructuredTaskMemoryStore } from "../../../core/memory/structured-task.ts";
+import { SqliteStructuredTaskMemoryStore } from "../lifecycle-sidecar/runtime/memory/structured-task-sqlite.ts";
 
 test("two Teti runtimes confirm a Chatmail handshake and exchange alpha heartbeats", async () => {
   const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
@@ -936,6 +938,61 @@ test("long-horizon collaboration survives Host restart, accepts input, and switc
   assert.equal(completed.artifacts?.length, 2, "final status must not overwrite intermediate Artifacts");
   assert.deepEqual(completed.peerArtifactMetadata?.map((entry) => entry.stageIndex), [1, 2]);
   assert.equal(completed.peerLongHorizon?.finalArtifactId, completed.artifacts?.[1]?.artifactId);
+});
+
+test("only new long-horizon stages enter SQLite structured task memory", async () => {
+  const root = await mkdtemp(join(tmpdir(), "teti-structured-task-memory-runtime-"));
+  const memory = new SqliteStructuredTaskMemoryStore({
+    path: join(root, "collaboration-memory-v2.sqlite")
+  });
+  try {
+    const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
+    const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
+    const directory = new StaticDirectory([toIdentity(accountA), toIdentity(accountB)]);
+    const relay = new MemoryChatmailRelay();
+    const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), directory);
+    const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), directory, undefined, {
+      taskExecutor: new LongHorizonTaskExecutor(),
+      structuredTaskMemoryStore: memory
+    });
+    const connection = await confirmPeers(runtimeA, runtimeB, "beta00002");
+    const ongoing = await runtimeA.sendTask({
+      connectionRequestId: connection.requestId,
+      taskId: "structured-memory-long-001",
+      capabilityId: "code-analysis",
+      text: "Complete one bounded collaboration stage.",
+      executionMode: "long_horizon"
+    });
+    await runtimeB.poll();
+    await runtimeB.approveTask(ongoing.request.taskId);
+    await flushBackgroundWork();
+
+    const snapshot = await runtimeB.getLongHorizonTaskMemory(ongoing.request.taskId);
+    assert.equal(snapshot.status, "ready");
+    assert.equal(snapshot.recordCount, 1);
+    assert.equal(snapshot.records[0]?.stageIndex, 1);
+    assert.equal(snapshot.records[0]?.trust, "peer_originated_reference");
+    assert.match(snapshot.records[0]?.contentPreview ?? "", /safe:fake-agent-a:1/);
+
+    const single = await runtimeA.sendTask({
+      connectionRequestId: connection.requestId,
+      taskId: "structured-memory-single-001",
+      capabilityId: "code-analysis",
+      text: "This single call must not enter structured memory.",
+      executionMode: "single_stage"
+    });
+    await runtimeB.poll();
+    await runtimeB.approveTask(single.request.taskId);
+    await flushBackgroundWork();
+    assert.equal((await memory.getTaskSnapshot(single.request.taskId)).recordCount, 0);
+    await assert.rejects(
+      () => runtimeB.getLongHorizonTaskMemory(single.request.taskId),
+      /ongoing collaboration/
+    );
+  } finally {
+    await memory.close();
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("Teti Host executes an explicit depth-one Delegation Plan and deterministically aggregates provenance", async () => {
@@ -2093,6 +2150,7 @@ async function makeRuntime(
     taskTransportStore?: MemoryTaskTransportStore;
     taskAttachmentStore?: FileTaskAttachmentStore;
     workspaceStore?: FileCollaborationWorkspaceStore;
+    structuredTaskMemoryStore?: StructuredTaskMemoryStore;
     taskExecutor?: TaskExecutionBridge;
     taskIdFactory?: () => string;
     now?: () => Date;
