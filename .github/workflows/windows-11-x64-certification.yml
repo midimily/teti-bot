@@ -90,7 +90,7 @@ jobs:
         shell: powershell
         run: |
           . .\apps\desktop\scripts\enter-windows-build-machine.ps1
-          npm --prefix apps/desktop exec -- vite build
+          npm --prefix apps/desktop run build:renderer
 
       - name: Verify pinned Rust MSVC toolchain
         shell: powershell

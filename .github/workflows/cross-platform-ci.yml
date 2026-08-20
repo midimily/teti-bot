@@ -83,6 +83,10 @@ jobs:
         run: cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml -- --check
 
       - name: Check and test native shell
+        # Hosted compatibility checks compile the shell without packaging the
+        # separately hydrated production Runtime bundle.
+        env:
+          TAURI_CONFIG: '{"bundle":{"resources":{}}}'
         run: |
           cargo check --locked --all-targets --manifest-path apps/desktop/src-tauri/Cargo.toml
           cargo test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml
