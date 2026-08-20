@@ -80,6 +80,10 @@ import {
   type LongHorizonTaskMemorySnapshot,
   type StructuredTaskMemoryStore
 } from "../../../../../core/memory/structured-task.ts";
+import {
+  boundMemoryShadowQueryText,
+  type MemoryShadowRetrievalInput
+} from "../../../../../core/memory/shadow-retrieval.ts";
 import { WORKSPACE_LIMITS } from "../../../../../core/workspace/types.ts";
 import { validateTaskWorkspaceRequest } from "../../../../../core/workspace/validation.ts";
 import {
@@ -1233,6 +1237,16 @@ export class TaskTransportRuntime {
     delete record.safeErrorCode;
     await this.store.save(state);
     await this.trySendPendingForRecord(state, record);
+    await this.persistMemoryShadowManifest({
+      schemaVersion: 1,
+      executionId: `${executionTaskId}:epoch:${handle.executionEpoch}`,
+      taskId: record.request.taskId,
+      peerTetiId: record.peerTetiId,
+      workspaceId: workspace.workspaceId,
+      childAgentId: target.childAgentId,
+      queryText: boundMemoryShadowQueryText(stageInstruction),
+      generatedAt: now
+    });
 
     const grant = createExecutionGrant(
       record.request,
@@ -2666,6 +2680,11 @@ export class TaskTransportRuntime {
   ): Promise<void> {
     if (!input || !this.structuredTaskMemoryStore) return;
     await this.structuredTaskMemoryStore.saveStage(input).catch(() => undefined);
+  }
+
+  private async persistMemoryShadowManifest(input: MemoryShadowRetrievalInput): Promise<void> {
+    if (!this.structuredTaskMemoryStore) return;
+    await this.structuredTaskMemoryStore.createShadowManifest(input).catch(() => undefined);
   }
 
   private async synchronizeStructuredTaskMemory(

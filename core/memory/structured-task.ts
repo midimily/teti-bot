@@ -1,3 +1,8 @@
+import type {
+  MemoryShadowRetrievalInput,
+  MemoryShadowSelectionManifest
+} from "./shadow-retrieval.ts";
+
 export const TETI_STRUCTURED_TASK_MEMORY_SCHEMA_VERSION = 1;
 
 export const STRUCTURED_TASK_MEMORY_LIMITS = Object.freeze({
@@ -54,12 +59,15 @@ export interface LongHorizonTaskMemorySnapshot {
   latestStageIndex: number | null;
   updatedAt: string | null;
   records: LongHorizonStageMemorySummary[];
+  latestShadowManifest?: MemoryShadowSelectionManifest | null;
   safeErrorCode?: "MEMORY_STORE_UNAVAILABLE";
 }
 
 export interface StructuredTaskMemoryStore {
   initialize(): Promise<void>;
   saveStage(input: LongHorizonStageMemoryInput): Promise<void>;
+  createShadowManifest(input: MemoryShadowRetrievalInput): Promise<MemoryShadowSelectionManifest>;
+  getLatestShadowManifest(taskId: string): Promise<MemoryShadowSelectionManifest | null>;
   getTaskSnapshot(taskId: string): Promise<LongHorizonTaskMemorySnapshot>;
   close(): Promise<void>;
 }

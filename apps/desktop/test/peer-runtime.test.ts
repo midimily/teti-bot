@@ -943,16 +943,36 @@ test("long-horizon collaboration survives Host restart, accepts input, and switc
 test("only new long-horizon stages enter SQLite structured task memory", async () => {
   const root = await mkdtemp(join(tmpdir(), "teti-structured-task-memory-runtime-"));
   const memory = new SqliteStructuredTaskMemoryStore({
-    path: join(root, "collaboration-memory-v2.sqlite")
+    path: join(root, "collaboration-memory-v2.sqlite"),
+    now: () => new Date("2026-08-20T00:00:00.000Z")
   });
   try {
     const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
     const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
     const directory = new StaticDirectory([toIdentity(accountA), toIdentity(accountB)]);
     const relay = new MemoryChatmailRelay();
+    const executor = new LongHorizonTaskExecutor();
+    await memory.initialize();
+    await memory.saveStage({
+      schemaVersion: 1,
+      taskId: "shadow-peer-history-001",
+      taskCreatedAt: "2026-08-20T00:00:00.000Z",
+      peerTetiId: accountA.id,
+      workspaceId: "workspace:shadow-peer-history",
+      stageId: "stage:1",
+      stageIndex: 1,
+      executionTaskId: "lh_shadow-peer-history-001_1",
+      executionEpoch: 1,
+      childAgentId: "fake-agent-a",
+      connectorId: "fake.connector-a",
+      artifactId: "artifact-shadow-peer-history-001",
+      workspaceRevision: 1,
+      content: "SHADOW_SECRET_MUST_NOT_REACH_CLI",
+      createdAt: "2026-08-20T00:00:00.000Z"
+    });
     const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), directory);
     const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), directory, undefined, {
-      taskExecutor: new LongHorizonTaskExecutor(),
+      taskExecutor: executor,
       structuredTaskMemoryStore: memory
     });
     const connection = await confirmPeers(runtimeA, runtimeB, "beta00002");
@@ -967,12 +987,24 @@ test("only new long-horizon stages enter SQLite structured task memory", async (
     await runtimeB.approveTask(ongoing.request.taskId);
     await flushBackgroundWork();
 
+    const shadowManifest = await memory.getLatestShadowManifest(ongoing.request.taskId);
+    assert.equal(shadowManifest?.mode, "shadow");
+    assert.equal(shadowManifest?.cliInjectionEnabled, false);
+    assert.equal(shadowManifest?.scopeCandidateCounts.peer, 1);
+    assert.equal(shadowManifest?.candidates[0]?.scope, "peer");
+    assert.doesNotMatch(JSON.stringify(executor.requests[0]), /SHADOW_SECRET_MUST_NOT_REACH_CLI/);
+    assert.doesNotMatch(
+      JSON.stringify(executor.requests[0]),
+      new RegExp(shadowManifest?.candidates[0]?.memoryId ?? "unreachable-memory-id")
+    );
+
     const snapshot = await runtimeB.getLongHorizonTaskMemory(ongoing.request.taskId);
     assert.equal(snapshot.status, "ready");
     assert.equal(snapshot.recordCount, 1);
     assert.equal(snapshot.records[0]?.stageIndex, 1);
     assert.equal(snapshot.records[0]?.trust, "peer_originated_reference");
     assert.match(snapshot.records[0]?.contentPreview ?? "", /safe:fake-agent-a:1/);
+    assert.equal(snapshot.latestShadowManifest?.manifestId, shadowManifest?.manifestId);
 
     const single = await runtimeA.sendTask({
       connectionRequestId: connection.requestId,
@@ -984,7 +1016,9 @@ test("only new long-horizon stages enter SQLite structured task memory", async (
     await runtimeB.poll();
     await runtimeB.approveTask(single.request.taskId);
     await flushBackgroundWork();
-    assert.equal((await memory.getTaskSnapshot(single.request.taskId)).recordCount, 0);
+    const singleSnapshot = await memory.getTaskSnapshot(single.request.taskId);
+    assert.equal(singleSnapshot.recordCount, 0);
+    assert.equal(singleSnapshot.latestShadowManifest, null);
     await assert.rejects(
       () => runtimeB.getLongHorizonTaskMemory(single.request.taskId),
       /ongoing collaboration/

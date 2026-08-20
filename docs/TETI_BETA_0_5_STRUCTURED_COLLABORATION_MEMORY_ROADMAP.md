@@ -11,6 +11,14 @@ Chatmail 或 Application Envelope 的网络协议。
 > 仍须经过结构化确认与有界选择，才能成为可注入记忆。数据库首次启用时间之前的
 > 任务不会补录。此实施决策覆盖下文中原先针对 `0.5.0` 的 v1 迁移设想。
 
+> 2026-08-21 实施决策：`0.5.1` 先交付 **Shadow Retrieval**，用 `0.5.0`
+> 已落库的 `peer_originated_reference` 阶段记录评估精确 `task` / `workspace` /
+> `peer` 候选、FTS5、确定性排序、预算和不可变 manifest。Shadow manifest 只保存
+> ID、Digest、范围、理由和字节预算，`cli_injection_enabled` 与每个候选的注入资格
+> 均由数据库约束固定为关闭；Task Runtime 不改变 Connector / CLI 请求。用户确认
+> 的结构化提升、关系编辑、授权 UI、执行前预览和真正的 Context Composer 注入仍在
+> 后续显式开启版本完成。本决策覆盖下文 `0.5.1` 原计划中“直接注入”的部分。
+
 ## 产品目标
 
 让一个长期协作在多个阶段、重启和多次与同一对端的任务之间保持连续性，
@@ -237,6 +245,10 @@ Execution Authority 仍由 Host 独立构造，历史文本不能覆盖它们。
 
 **目标：** 让长期任务在阶段边界保存并选择“决策、约束、交接、未决事项”，而不是
 按时间把完整历史塞进 CLI。
+
+**本次实施切片：** 只生成可解释的 Shadow candidates 与 manifest，不把候选原文
+拼接进 CLI。它用于验证范围隔离、召回、顺序和预算，为后续用户确认与注入开关
+收集本地质量证据；不能宣称 Agent 已经使用这些记忆。
 
 **交付：**
 
