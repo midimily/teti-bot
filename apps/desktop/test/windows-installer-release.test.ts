@@ -91,7 +91,7 @@ test("all release version owners stay aligned", async () => {
     readFile(new URL("../src-tauri/tauri.conf.json", import.meta.url), "utf8"),
     readFile(new URL("../src-tauri/Cargo.toml", import.meta.url), "utf8")
   ]);
-  const expectedVersion = "0.5.0-beta.1";
+  const expectedVersion = "0.5.1-beta.1";
   assert.equal((JSON.parse(rootPackage) as { version?: string }).version, expectedVersion);
   assert.equal((JSON.parse(desktopPackage) as { version?: string }).version, expectedVersion);
   assert.equal((JSON.parse(tauri) as { version?: string }).version, expectedVersion);
