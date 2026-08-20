@@ -112,3 +112,4 @@ jobs:
           . .\apps\desktop\scripts\enter-windows-build-machine.ps1
           cargo check --locked --all-targets --manifest-path apps/desktop/src-tauri/Cargo.toml
           cargo test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml
+          cargo test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml -- --ignored real_windows_profile_acl_round_trips_as_protected

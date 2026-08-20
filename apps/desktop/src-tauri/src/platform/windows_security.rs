@@ -222,6 +222,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires the exact Windows 11 x64 certification host"]
     fn real_windows_profile_acl_round_trips_as_protected() {
         let root =
             std::env::temp_dir().join(format!("teti-windows-profile-acl-{}", std::process::id()));

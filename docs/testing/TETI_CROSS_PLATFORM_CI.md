@@ -22,6 +22,11 @@ Both jobs assert their actual Node platform and architecture before running:
 4. the renderer build;
 5. Rust format, all-target check and tests with Rust `1.92.0` and `Cargo.lock`.
 
+The real Profile ACL round-trip is intentionally excluded from the hosted
+Windows Server lane because its filesystem security environment is not the
+supported Windows 11 client environment. Its parser and native code still
+compile here; the OS integration test runs in the exact certification lane.
+
 Recommended required checks for branch protection are:
 
 - `Windows x64 hosted compatibility`;
@@ -45,6 +50,10 @@ The workflow verifies the Windows client product type, the `Windows 11`
 caption, 64-bit OS state and Node `win32/x64` before accepting evidence. It
 then rehydrates `.tools/` from the persistent build-machine root and rejects
 Node, Rust, MSVC, SDK, auxiliary-tool or DeltaChat provenance drift.
+
+The exact lane also runs the ignored-by-default
+`real_windows_profile_acl_round_trips_as_protected` integration test against
+the actual Windows 11 filesystem security model.
 
 To activate automatic certification on every push to `main`, create the
 repository Actions variable:

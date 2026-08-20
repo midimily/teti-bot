@@ -124,6 +124,11 @@ test("Windows 11 certification hydrates the fixed machine before dependency inst
   assert.match(workflow, /node-version: 22\.22\.3/);
   assert.match(workflow, /windows-build-machine\.ps1[\s\S]*-Action Hydrate/);
   assert.ok(workflow.indexOf("-Action Hydrate") < workflow.indexOf("npm ci --prefix apps/desktop"));
+  assert.match(
+    workflow,
+    /--ignored real_windows_profile_acl_round_trips_as_protected/,
+    "the exact Windows 11 lane must run the real Profile ACL integration test"
+  );
   assert.equal(
     workflow.match(/enter-windows-build-machine\.ps1/g)?.length,
     8,
