@@ -377,7 +377,7 @@ export class FileCollaborationWorkspaceStore implements CollaborationWorkspaceSt
 
   private workspaceRoot(workspaceId: string): string {
     requireSafeId(workspaceId, "workspaceId");
-    return scopedPath(this.workspacesRoot, workspaceId);
+    return scopedPath(this.workspacesRoot, storageSegment(workspaceId));
   }
 
   private revisionContentPath(workspaceId: string, revision: number): string {
@@ -389,7 +389,7 @@ export class FileCollaborationWorkspaceStore implements CollaborationWorkspaceSt
 
   private snapshotPath(snapshotId: string): string {
     requireSafeId(snapshotId, "snapshotId");
-    return scopedPath(this.snapshotsRoot, snapshotId);
+    return scopedPath(this.snapshotsRoot, storageSegment(snapshotId));
   }
 
   private async requireInitialized(): Promise<void> {
@@ -403,6 +403,19 @@ export class FileCollaborationWorkspaceStore implements CollaborationWorkspaceSt
     this.queue = pending.then(() => undefined, () => undefined);
     return pending;
   }
+}
+
+function storageSegment(value: string): string {
+  if (process.platform !== "win32" || isWindowsSafeStorageSegment(value)) return value;
+  // `~` is valid on Windows but excluded by the logical ID grammar, so the
+  // encoded namespace cannot collide with an existing unencoded ID.
+  return `~${Buffer.from(value, "utf8").toString("base64url")}`;
+}
+
+function isWindowsSafeStorageSegment(value: string): boolean {
+  if (/[<>:"/\\|?*\u0000-\u001f]/.test(value) || /[ .]$/.test(value)) return false;
+  const stem = value.split(".", 1)[0]!.toUpperCase();
+  return !/^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/.test(stem);
 }
 
 async function scanWorkspaceTree(

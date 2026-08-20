@@ -1,6 +1,6 @@
 {
   "name": "teti-bot",
-  "version": "0.4.1-beta.2",
+  "version": "0.5.0-beta.1",
   "private": true,
   "type": "module",
   "scripts": {
@@ -17,6 +17,9 @@
     "desktop:runtime:windows:stage-rpc": "npm --prefix apps/desktop run runtime:windows:stage-rpc --",
     "desktop:runtime:windows:verify": "npm --prefix apps/desktop run runtime:windows:verify",
     "desktop:runtime:windows:exit-gate": "npm --prefix apps/desktop run runtime:windows:exit-gate --",
+    "desktop:build-machine:bootstrap": "npm --prefix apps/desktop run build-machine:bootstrap",
+    "desktop:build-machine:hydrate": "npm --prefix apps/desktop run build-machine:hydrate",
+    "desktop:build-machine:verify": "npm --prefix apps/desktop run build-machine:verify",
     "desktop:windows:release": "npm --prefix apps/desktop run windows:release",
     "desktop:windows:inventory": "npm --prefix apps/desktop run windows:inventory",
     "desktop:windows:installer-smoke": "npm --prefix apps/desktop run windows:installer-smoke --",

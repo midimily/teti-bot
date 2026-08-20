@@ -17,10 +17,13 @@ if (!root) {
 
 const env = import.meta.env;
 const localePreferenceStorage = safeLocalePreferenceStorage(window);
+root.dataset.tetiBootStage = "native-api";
 const tauriPromise = createTauriInvoker();
 const tauri = await tauriPromise.catch(() => undefined);
+root.dataset.tetiBootStage = "locale";
 const localePreference = await readPersistedAppLocalePreference(tauri, localePreferenceStorage);
 const i18n = createDesktopI18n(resolveAppLocalePreference(localePreference, window.navigator));
+root.dataset.tetiBootStage = "application";
 const app = await bootstrapDesktopApp({
   root,
   env,

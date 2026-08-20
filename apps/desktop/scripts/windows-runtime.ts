@@ -3,6 +3,7 @@ import { execFile } from "node:child_process";
 import { copyFile, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
+import { WINDOWS_BUILD_MACHINE_POLICY } from "./windows-build-machine-policy.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -10,17 +11,17 @@ export const WINDOWS_RUNTIME_POLICY = Object.freeze({
   schemaVersion: 1 as const,
   platform: "windows" as const,
   architecture: "x64" as const,
-  rustTarget: "x86_64-pc-windows-msvc",
+  rustTarget: WINDOWS_BUILD_MACHINE_POLICY.rust.target,
   node: Object.freeze({
-    version: "22.22.3",
-    fileName: "node.exe",
-    url: "https://nodejs.org/dist/v22.22.3/win-x64/node.exe",
-    sha256: "780f44f2c53c108bae261ada21a525b4bfe733c020ac85e41bfe94479090ac9b"
+    version: WINDOWS_BUILD_MACHINE_POLICY.node.version,
+    fileName: WINDOWS_BUILD_MACHINE_POLICY.node.runtimeFileName,
+    url: WINDOWS_BUILD_MACHINE_POLICY.node.runtimeUrl,
+    sha256: WINDOWS_BUILD_MACHINE_POLICY.node.runtimeSha256
   }),
   deltaChat: Object.freeze({
-    revision: "823b0741df82e3ec0f61285d52bf91ae19b1963e",
-    version: "2.54.0-dev",
-    fileName: "deltachat-rpc-server.exe"
+    revision: WINDOWS_BUILD_MACHINE_POLICY.deltaChat.revision,
+    version: WINDOWS_BUILD_MACHINE_POLICY.deltaChat.version,
+    fileName: WINDOWS_BUILD_MACHINE_POLICY.deltaChat.fileName
   }),
   // The pinned vendored build is a single portable executable. Keep this
   // allowlist explicit: an unexpected adjacent DLL must stop packaging.
@@ -101,7 +102,7 @@ export async function stagePinnedWindowsRpc(
   await assertPortableExecutable(source, "x86_64", "Windows deltachat-rpc-server.exe");
   const paths = resolveWindowsRuntimePaths(repoRoot);
   await mkdir(dirname(paths.rpc), { recursive: true });
-  await copyFile(source, paths.rpc);
+  await copyFileWithWindowsRetry(source, paths.rpc);
   const sha256 = await sha256File(paths.rpc);
   const provenance: WindowsRpcProvenance = {
     schemaVersion: 1,
@@ -278,4 +279,21 @@ async function assertSha256(path: string, expected: string, label: string): Prom
 
 async function sha256File(path: string): Promise<string> {
   return createHash("sha256").update(await readFile(path)).digest("hex");
+}
+
+async function copyFileWithWindowsRetry(source: string, destination: string): Promise<void> {
+  const attempts = process.platform === "win32" ? 12 : 1;
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      await copyFile(source, destination);
+      return;
+    } catch (error) {
+      lastError = error;
+      const code = (error as NodeJS.ErrnoException).code;
+      if (attempt === attempts || !new Set(["EBUSY", "EPERM", "EACCES"]).has(code ?? "")) break;
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, Math.min(attempt * 250, 1_500)));
+    }
+  }
+  throw lastError;
 }

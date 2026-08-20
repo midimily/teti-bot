@@ -73,6 +73,13 @@ import type {
   TaskWorkspaceBinding,
   TaskWorkspaceRequest
 } from "../../../../../core/workspace/types.ts";
+import {
+  boundStructuredTaskMemoryContent,
+  unavailableLongHorizonTaskMemory,
+  type LongHorizonStageMemoryInput,
+  type LongHorizonTaskMemorySnapshot,
+  type StructuredTaskMemoryStore
+} from "../../../../../core/memory/structured-task.ts";
 import { WORKSPACE_LIMITS } from "../../../../../core/workspace/types.ts";
 import { validateTaskWorkspaceRequest } from "../../../../../core/workspace/validation.ts";
 import {
@@ -121,6 +128,7 @@ interface TaskTransportRuntimeOptions {
   taskIdFactory?: () => string;
   attachmentStore?: TaskAttachmentStore;
   workspaceStore?: CollaborationWorkspaceStore;
+  structuredTaskMemoryStore?: StructuredTaskMemoryStore;
   executor?: TaskExecutionBridge;
   enqueueOperation?: (operation: () => Promise<void>) => Promise<void>;
   authorizePeer?: (peerTetiId: string) => Promise<void>;
@@ -168,6 +176,7 @@ export class TaskTransportRuntime {
   private readonly taskIdFactory: () => string;
   private readonly attachmentStore?: TaskAttachmentStore;
   private readonly workspaceStore?: CollaborationWorkspaceStore;
+  private readonly structuredTaskMemoryStore?: StructuredTaskMemoryStore;
   private readonly executor?: TaskExecutionBridge;
   private readonly enqueueOperation: (operation: () => Promise<void>) => Promise<void>;
   private readonly authorizePeer?: (peerTetiId: string) => Promise<void>;
@@ -182,6 +191,7 @@ export class TaskTransportRuntime {
     this.taskIdFactory = options.taskIdFactory ?? randomUUID;
     this.attachmentStore = options.attachmentStore;
     this.workspaceStore = options.workspaceStore;
+    this.structuredTaskMemoryStore = options.structuredTaskMemoryStore;
     this.executor = options.executor;
     this.enqueueOperation = options.enqueueOperation ?? ((operation) => operation());
     this.authorizePeer = options.authorizePeer;
@@ -200,6 +210,11 @@ export class TaskTransportRuntime {
    */
   async initializeReadModel(): Promise<void> {
     const state = await this.store.load();
+    if (this.structuredTaskMemoryStore) {
+      await this.structuredTaskMemoryStore.initialize().then(async () => {
+        for (const record of state.records) await this.synchronizeStructuredTaskMemory(record);
+      }).catch(() => undefined);
+    }
     let changed = await this.reconcileInterruptedExecutions(state, false);
     changed = this.refreshLongHorizonTargets(state) || changed;
     changed = await this.refreshAttachmentReadiness(state) || changed;
@@ -224,6 +239,25 @@ export class TaskTransportRuntime {
     const record = await this.readModel.get(taskId);
     if (!record) throw new TaskTransportRuntimeError("TASK_NOT_FOUND", "Task was not found.");
     return record;
+  }
+
+  async getLongHorizonMemory(taskId: string): Promise<LongHorizonTaskMemorySnapshot> {
+    const record = await this.get(taskId);
+    if (record.direction !== "incoming"
+      || record.request.executionMode !== "long_horizon"
+      || !record.longHorizon) {
+      throw new TaskTransportRuntimeError(
+        "TASK_LONG_HORIZON_REQUIRED",
+        "Structured task memory is available only for locally hosted ongoing collaboration."
+      );
+    }
+    if (!this.structuredTaskMemoryStore) return unavailableLongHorizonTaskMemory(taskId);
+    try {
+      await this.synchronizeStructuredTaskMemory(record);
+      return await this.structuredTaskMemoryStore.getTaskSnapshot(taskId);
+    } catch {
+      return unavailableLongHorizonTaskMemory(taskId);
+    }
   }
 
   async listDelegationTargets(taskId: string): Promise<DelegationTargetOption[]> {
@@ -2266,6 +2300,7 @@ export class TaskTransportRuntime {
     const stage = session.stages.find((candidate) => candidate.executionTaskId === executionTaskId);
     if (!stage || stage.stageIndex !== session.currentStageIndex || stage.state !== "working") return;
     const completedAt = this.now().toISOString();
+    let completedStageMemory: LongHorizonStageMemoryInput | undefined;
     if (Date.parse(session.continuationExpiresAt) <= this.now().getTime()
       || result?.safeErrorCode === "ADAPTER_TASK_EXPIRED") {
       expireRecord(record, completedAt);
@@ -2389,6 +2424,12 @@ export class TaskTransportRuntime {
       };
       session.checkpoints.push(checkpoint);
       stage.checkpointAvailable = true;
+      completedStageMemory = this.structuredStageMemoryInput(
+        record,
+        stage,
+        artifact,
+        handle?.executionEpoch ?? null
+      );
       if (record.delegationPlan && delegationStep?.kind === "child_execution") {
         delegationStep.state = "completed";
         delegationStep.completedAt = completedAt;
@@ -2477,9 +2518,11 @@ export class TaskTransportRuntime {
             await this.store.save(state);
             if (deliverPending) await this.trySendPendingForRecord(state, record);
           }
+          await this.persistStructuredTaskMemory(completedStageMemory);
           return;
         }
         await this.completeDelegation(state, record, completedAt, deliverPending);
+        await this.persistStructuredTaskMemory(completedStageMemory);
         return;
       }
       session.phase = session.pauseRequested ? "paused" : "input_required";
@@ -2586,7 +2629,61 @@ export class TaskTransportRuntime {
     record.statusPending = true;
     record.updatedAt = completedAt;
     await this.store.save(state);
+    if (completedStageMemory) await this.persistStructuredTaskMemory(completedStageMemory);
     if (deliverPending) await this.trySendPendingForRecord(state, record);
+  }
+
+  private structuredStageMemoryInput(
+    record: CollaborationTaskTransportRecord,
+    stage: LongHorizonTaskState["stages"][number],
+    artifact: CollaborationTaskArtifact,
+    executionEpoch: number | null
+  ): LongHorizonStageMemoryInput | undefined {
+    if (record.direction !== "incoming" || record.request.executionMode !== "long_horizon") return undefined;
+    const content = boundStructuredTaskMemoryContent(taskArtifactText(artifact));
+    if (!content) return undefined;
+    return {
+      schemaVersion: 1,
+      taskId: record.request.taskId,
+      taskCreatedAt: record.createdAt,
+      peerTetiId: record.peerTetiId,
+      workspaceId: record.workspaceBinding?.workspaceId ?? null,
+      stageId: stage.stageId,
+      stageIndex: stage.stageIndex,
+      executionTaskId: stage.executionTaskId,
+      executionEpoch,
+      childAgentId: stage.childAgentId,
+      connectorId: stage.connectorId,
+      artifactId: artifact.artifactId,
+      workspaceRevision: stage.workspaceRevision,
+      content,
+      createdAt: artifact.createdAt
+    };
+  }
+
+  private async persistStructuredTaskMemory(
+    input: LongHorizonStageMemoryInput | undefined
+  ): Promise<void> {
+    if (!input || !this.structuredTaskMemoryStore) return;
+    await this.structuredTaskMemoryStore.saveStage(input).catch(() => undefined);
+  }
+
+  private async synchronizeStructuredTaskMemory(
+    record: CollaborationTaskTransportRecord
+  ): Promise<void> {
+    if (!this.structuredTaskMemoryStore
+      || record.direction !== "incoming"
+      || record.request.executionMode !== "long_horizon"
+      || !record.longHorizon) return;
+    for (const stage of record.longHorizon.stages) {
+      if (stage.state !== "completed") continue;
+      const artifact = (record.artifacts ?? []).find((candidate) =>
+        stage.artifactIds.includes(candidate.artifactId)
+      );
+      if (!artifact) continue;
+      const input = this.structuredStageMemoryInput(record, stage, artifact, null);
+      if (input) await this.structuredTaskMemoryStore.saveStage(input);
+    }
   }
 
   private async completeDelegation(

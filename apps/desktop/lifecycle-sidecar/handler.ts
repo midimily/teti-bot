@@ -273,6 +273,12 @@ async function dispatchLifecycleRequest(
       return service.getTask(validateTaskId(request.params?.taskId));
     }
 
+    case "task.memory.get": {
+      const service = await dependencies.getPeerConnectionService();
+      if (!service.getLongHorizonTaskMemory) throw new Error("Structured task memory is unavailable.");
+      return service.getLongHorizonTaskMemory(validateTaskId(request.params?.taskId));
+    }
+
     case "task.attachment.stage": {
       const service = await dependencies.getPeerConnectionService();
       if (!service.stageTaskImage) throw new Error("Task image staging is unavailable.");
@@ -794,6 +800,7 @@ function fallbackCodeForMethod(method: LifecycleRequest["method"]) {
     case "task.list":
     case "task.summary":
     case "task.get":
+    case "task.memory.get":
     case "task.attachment.stage":
     case "task.attachment.resolve":
     case "task.approve":

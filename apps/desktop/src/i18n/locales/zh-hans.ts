@@ -140,6 +140,10 @@ export const ZH_HANS_MESSAGES = {
       },
       accept: "接受建联",
       reject: "拒绝建联",
+      accepting: "正在接受…",
+      rejecting: "正在拒绝…",
+      acceptFailed: "接受失败，请重试",
+      rejectFailed: "拒绝失败，请重试",
       waitingApproval: "等待确认",
       rejected: "已拒绝",
       expandDetails: "展开 {identity} 的 AI Passport 详情",
@@ -515,6 +519,14 @@ export const ZH_HANS_MESSAGES = {
       aggregationDetail: "Artifact 确定性汇总 · {state}",
       budget: "Workspace r{revision} · {seconds}s · 输出上限 {kib} KiB",
       stage: "阶段 {stage} · {agent}",
+      structuredMemory: {
+        title: "本地持续协作记忆",
+        automaticNote: "仅将本机已成功提交的持续协作阶段写入 SQLite；不会读取或迁移旧版 Memory。",
+        loading: "正在读取本地记忆状态…",
+        unavailable: "本地记忆库暂不可用；任务结果仍保留，Runtime 会在后续读取时重试。",
+        ready: "SQLite 已保存 {count} 个阶段",
+        stage: "阶段 {stage} · {agent}"
+      },
       phase: {
         pending_approval: "等待批准",
         queued: "排队中",

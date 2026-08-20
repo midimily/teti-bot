@@ -84,14 +84,16 @@ test("clean-VM script gates install, WebView2, repair, upgrade, state preservati
   assert.match(source, /survived application exit/);
 });
 
-test("all beta.2 version owners stay aligned", async () => {
+test("all release version owners stay aligned", async () => {
   const [rootPackage, desktopPackage, tauri, cargo] = await Promise.all([
     readFile(new URL("../../../package.json", import.meta.url), "utf8"),
     readFile(new URL("../package.json", import.meta.url), "utf8"),
     readFile(new URL("../src-tauri/tauri.conf.json", import.meta.url), "utf8"),
     readFile(new URL("../src-tauri/Cargo.toml", import.meta.url), "utf8")
   ]);
-  for (const source of [rootPackage, desktopPackage, tauri, cargo]) {
-    assert.match(source, /0\.4\.1-beta\.2/);
-  }
+  const expectedVersion = "0.5.0-beta.1";
+  assert.equal((JSON.parse(rootPackage) as { version?: string }).version, expectedVersion);
+  assert.equal((JSON.parse(desktopPackage) as { version?: string }).version, expectedVersion);
+  assert.equal((JSON.parse(tauri) as { version?: string }).version, expectedVersion);
+  assert.match(cargo, new RegExp(`^version = "${expectedVersion.replaceAll(".", "\\.")}"$`, "m"));
 });

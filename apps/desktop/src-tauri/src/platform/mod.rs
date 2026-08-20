@@ -392,11 +392,19 @@ mod tests {
 
     #[test]
     fn macos_paths_preserve_the_existing_profile_and_log_locations() {
-        let paths = macos_paths(Path::new("/Users/teti-test")).unwrap();
-        assert_eq!(paths.profile_root, Path::new("/Users/teti-test/.teti"));
+        // `Path::is_absolute` follows the host OS even when this unit exercises
+        // the macOS path policy. Use a native absolute fixture so the shared
+        // Rust suite can run on both Windows and macOS.
+        let home = if cfg!(target_os = "windows") {
+            Path::new("C:/Users/teti-test")
+        } else {
+            Path::new("/Users/teti-test")
+        };
+        let paths = macos_paths(home).unwrap();
+        assert_eq!(paths.profile_root, home.join(".teti"));
         assert_eq!(
             paths.log_dir,
-            Path::new("/Users/teti-test/Library/Logs/Teti")
+            home.join("Library").join("Logs").join("Teti")
         );
     }
 

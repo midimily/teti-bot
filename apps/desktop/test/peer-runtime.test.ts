@@ -24,6 +24,7 @@ import {
 import type {
   ChatmailAdapter,
   ChatmailIdentity,
+  ChatmailMessageStatus,
   ChatmailPublicIdentity,
   ChatmailReceivedMessage,
   ChatmailSentMessage,
@@ -31,7 +32,8 @@ import type {
   DeleteChatmailAccountInput,
   LoadChatmailAccountInput,
   ReceiveChatmailMessagesInput,
-  SendChatmailMessageInput
+  SendChatmailMessageInput,
+  WaitForChatmailDeliveryInput
 } from "../../../integrations/chatmail/types.ts";
 import type { TetiPublicDirectoryReader } from "../../../services/discovery/client.ts";
 import type { TetiPublicDirectoryIdentity } from "../../../services/discovery/types.ts";
@@ -56,6 +58,8 @@ import type { TaskImagePart } from "../../../core/task/types.ts";
 import type { ExecutionHandle, PrepareExecutionHandleInput } from "../../../core/callability/execution.ts";
 import type { ExecutionAuthority } from "../../../core/callability/agent-core.ts";
 import { FileCollaborationWorkspaceStore } from "../lifecycle-sidecar/runtime/workspaces/store.ts";
+import type { StructuredTaskMemoryStore } from "../../../core/memory/structured-task.ts";
+import { SqliteStructuredTaskMemoryStore } from "../lifecycle-sidecar/runtime/memory/structured-task-sqlite.ts";
 
 test("two Teti runtimes confirm a Chatmail handshake and exchange alpha heartbeats", async () => {
   const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
@@ -82,6 +86,7 @@ test("two Teti runtimes confirm a Chatmail handshake and exchange alpha heartbea
 
   const heartbeatReturn = await runtimeB.poll();
   assert.ok(heartbeatReturn.connections[0]?.lastHeartbeatReceivedAt);
+  assert.ok(heartbeatReturn.connections[0]?.lastHeartbeatSentAt);
 
   const repeated = await runtimeA.request("beta00002");
   assert.equal(repeated.requestOutcome?.kind, "alreadyConfirmed");
@@ -104,6 +109,33 @@ test("a due heartbeat is sent before polling a peer backlog", async () => {
   await runtimeA.poll();
 
   assert.deepEqual(relay.eventsFor(accountA.address).slice(0, 2), ["send", "receive"]);
+});
+
+test("heartbeat delivery observation cannot block the serialized connection queue", async () => {
+  const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
+  const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
+  const directory = new StaticDirectory([toIdentity(accountA), toIdentity(accountB)]);
+  const relay = new MemoryChatmailRelay();
+  let nowMs = Date.now() + 1_000;
+  const now = () => new Date(nowMs);
+  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), directory, undefined, { now });
+  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), directory, undefined, { now });
+  await confirmPeers(runtimeA, runtimeB, "beta00002");
+
+  nowMs += 5_000;
+  const deliveryWaitsBeforePoll = relay.deliveryWaitCount();
+  relay.setDeliveryBlocked(true);
+
+  const poll = runtimeA.poll();
+  const snapshot = await Promise.race([
+    poll,
+    new Promise<never>((_resolve, reject) => {
+      setTimeout(() => reject(new Error("poll was blocked by delivery observation")), 100);
+    })
+  ]);
+
+  assert.ok(relay.deliveryWaitCount() > deliveryWaitsBeforePoll);
+  assert.equal(snapshot.connections[0]?.state, "Confirmed");
 });
 
 test("reciprocal intent accepts a relayed request and confirms both Teti instances", async () => {
@@ -750,8 +782,8 @@ test("two peers execute an abstract receiver-local Compute Offer without sharing
   assert.equal(working.workspaceBinding?.workspaceId, `workspace:none.${sent.request.taskId}`);
   assert.deepEqual(working.workspaceBinding?.access, ["read"]);
   assert.equal(executor.resolvedOfferId, sent.request.offerId);
-  await flushBackgroundWork();
-  await flushBackgroundWork();
+  await waitUntil(async () => (await runtimeB.getTask(sent.request.taskId)).state === "completed");
+  await runtimeB.poll();
   await runtimeA.poll();
   const result = (await runtimeA.listTasks()).records[0];
   assert.equal(result?.state, "completed");
@@ -779,8 +811,9 @@ test("Task v7 delivers an 11 KB result as a verified file and clears outbox only
 
   await runtimeB.poll();
   await runtimeB.approveTask(sent.request.taskId);
-  await flushBackgroundWork();
-  await flushBackgroundWork();
+  await waitUntil(() => relay.peek(accountA.address).some((message) =>
+    applicationType(message) === "teti.task.artifact.file"
+  ));
   const artifactMessage = relay.peek(accountA.address).find((message) =>
     applicationType(message) === "teti.task.artifact.file"
   );
@@ -848,7 +881,8 @@ test("long-horizon collaboration survives Host restart, accepts input, and switc
   });
   await runtimeB.poll();
   await runtimeB.approveTask(sent.request.taskId);
-  await flushBackgroundWork();
+  await waitUntil(async () => (await runtimeB.getTask(sent.request.taskId)).state === "input_required");
+  await runtimeB.poll();
   let host = await runtimeB.getTask(sent.request.taskId);
   assert.equal(host.state, "input_required");
   assert.equal(host.longHorizon?.stages.length, 1);
@@ -887,7 +921,8 @@ test("long-horizon collaboration survives Host restart, accepts input, and switc
     "an unavailable previous Child must never fall through to the first ready alternative"
   );
   await runtimeB.continueTask(sent.request.taskId, "fake-agent-b");
-  await flushBackgroundWork();
+  await waitUntil(async () => (await runtimeB.getTask(sent.request.taskId)).artifacts?.length === 2);
+  await runtimeB.poll();
   host = await runtimeB.getTask(sent.request.taskId);
   assert.equal(host.longHorizon?.stages.length, 2);
   assert.equal(host.longHorizon?.stages[1]?.childAgentId, "fake-agent-b");
@@ -903,6 +938,61 @@ test("long-horizon collaboration survives Host restart, accepts input, and switc
   assert.equal(completed.artifacts?.length, 2, "final status must not overwrite intermediate Artifacts");
   assert.deepEqual(completed.peerArtifactMetadata?.map((entry) => entry.stageIndex), [1, 2]);
   assert.equal(completed.peerLongHorizon?.finalArtifactId, completed.artifacts?.[1]?.artifactId);
+});
+
+test("only new long-horizon stages enter SQLite structured task memory", async () => {
+  const root = await mkdtemp(join(tmpdir(), "teti-structured-task-memory-runtime-"));
+  const memory = new SqliteStructuredTaskMemoryStore({
+    path: join(root, "collaboration-memory-v2.sqlite")
+  });
+  try {
+    const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
+    const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
+    const directory = new StaticDirectory([toIdentity(accountA), toIdentity(accountB)]);
+    const relay = new MemoryChatmailRelay();
+    const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), directory);
+    const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), directory, undefined, {
+      taskExecutor: new LongHorizonTaskExecutor(),
+      structuredTaskMemoryStore: memory
+    });
+    const connection = await confirmPeers(runtimeA, runtimeB, "beta00002");
+    const ongoing = await runtimeA.sendTask({
+      connectionRequestId: connection.requestId,
+      taskId: "structured-memory-long-001",
+      capabilityId: "code-analysis",
+      text: "Complete one bounded collaboration stage.",
+      executionMode: "long_horizon"
+    });
+    await runtimeB.poll();
+    await runtimeB.approveTask(ongoing.request.taskId);
+    await flushBackgroundWork();
+
+    const snapshot = await runtimeB.getLongHorizonTaskMemory(ongoing.request.taskId);
+    assert.equal(snapshot.status, "ready");
+    assert.equal(snapshot.recordCount, 1);
+    assert.equal(snapshot.records[0]?.stageIndex, 1);
+    assert.equal(snapshot.records[0]?.trust, "peer_originated_reference");
+    assert.match(snapshot.records[0]?.contentPreview ?? "", /safe:fake-agent-a:1/);
+
+    const single = await runtimeA.sendTask({
+      connectionRequestId: connection.requestId,
+      taskId: "structured-memory-single-001",
+      capabilityId: "code-analysis",
+      text: "This single call must not enter structured memory.",
+      executionMode: "single_stage"
+    });
+    await runtimeB.poll();
+    await runtimeB.approveTask(single.request.taskId);
+    await flushBackgroundWork();
+    assert.equal((await memory.getTaskSnapshot(single.request.taskId)).recordCount, 0);
+    await assert.rejects(
+      () => runtimeB.getLongHorizonTaskMemory(single.request.taskId),
+      /ongoing collaboration/
+    );
+  } finally {
+    await memory.close();
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("Teti Host executes an explicit depth-one Delegation Plan and deterministically aggregates provenance", async () => {
@@ -932,9 +1022,8 @@ test("Teti Host executes an explicit depth-one Delegation Plan and deterministic
     connectorId: target.connectorId,
     capabilityId: target.capabilityId
   })));
-  await flushBackgroundWork();
-  await flushBackgroundWork();
-  await flushBackgroundWork();
+  await waitUntil(async () => (await runtimeB.getTask(sent.request.taskId)).state === "completed");
+  await runtimeB.poll();
 
   const host = await runtimeB.getTask(sent.request.taskId);
   assert.equal(host.state, "completed");
@@ -1001,8 +1090,10 @@ test("a failed Delegation step stops the frozen plan and never auto-switches to 
     connectorId: target.connectorId,
     capabilityId: target.capabilityId
   })));
-  await flushBackgroundWork();
-  await flushBackgroundWork();
+  await waitUntil(async () =>
+    (await runtimeB.getTask(sent.request.taskId)).delegationPlan?.phase === "failed"
+  );
+  await runtimeB.poll();
 
   const host = await runtimeB.getTask(sent.request.taskId);
   assert.equal(executor.requests.length, 1);
@@ -1037,8 +1128,8 @@ test("a Delegation target change between steps preserves prior Artifact and fail
     connectorId: target.connectorId,
     capabilityId: target.capabilityId
   })));
-  await flushBackgroundWork();
-  await flushBackgroundWork();
+  await waitUntil(async () => (await runtimeB.getTask(sent.request.taskId)).state === "failed");
+  await runtimeB.poll();
 
   const host = await runtimeB.getTask(sent.request.taskId);
   assert.equal(executor.requests.length, 1);
@@ -1083,7 +1174,9 @@ test("long-horizon stage rejects a changed Workspace revision and publishes no s
     });
     await workspaceStore.commitSnapshot(foreignSnapshot);
     executor.finish("stale result");
-    await flushBackgroundWork();
+    await waitUntil(async () =>
+      (await runtimeB.getTask(sent.request.taskId)).safeErrorCode === "TASK_WORKSPACE_REVISION_CONFLICT"
+    );
     const conflicted = await runtimeB.getTask(sent.request.taskId);
     assert.equal(conflicted.state, "input_required");
     assert.equal(conflicted.safeErrorCode, "TASK_WORKSPACE_REVISION_CONFLICT");
@@ -1123,7 +1216,9 @@ test("an expired long-horizon stage cannot publish an Artifact after its lease",
   await runtimeB.approveTask(sent.request.taskId);
   nowMs += 61_000;
   executor.finish("late result");
-  await flushBackgroundWork();
+  await waitUntil(async () =>
+    (await runtimeB.getTask(sent.request.taskId)).longHorizon?.phase === "expired"
+  );
   const expired = await runtimeB.getTask(sent.request.taskId);
   assert.equal(expired.longHorizon?.phase, "expired");
   assert.equal(expired.artifacts?.length ?? 0, 0);
@@ -1167,8 +1262,8 @@ test("two peers deliver a verified image Task, approve once, execute, and return
     const working = await runtimeB.approveTask(sent.request.taskId);
     assert.equal(working.state, "working");
     assert.equal(working.approval, "consumed");
-    await flushBackgroundWork();
-    await flushBackgroundWork();
+    await waitUntil(async () => (await runtimeB.getTask(sent.request.taskId)).state === "completed");
+    await runtimeB.poll();
     await runtimeA.poll();
     const completed = await runtimeA.listTasks();
     assert.equal(completed.records[0]?.state, "completed");
@@ -1622,8 +1717,9 @@ test("a verified Task v7 result completes the requester even when every status u
   });
   await runtimeB.poll();
   await runtimeB.approveTask(sent.request.taskId);
-  await flushBackgroundWork();
-  await flushBackgroundWork();
+  await waitUntil(() => relay.peek(accountA.address).some((message) =>
+    applicationType(message) === "teti.task.artifact.file"
+  ));
   assert.equal(relay.dropFirstApplicationMessage(accountA.address, "teti.task.status", "working"), true);
   assert.equal(relay.dropFirstApplicationMessage(accountA.address, "teti.task.status", "completed"), true);
 
@@ -1678,8 +1774,9 @@ test("Artifact persistence failure leaves Chatmail fresh and succeeds on the nex
   });
   await runtimeB.poll();
   await runtimeB.approveTask(sent.request.taskId);
-  await flushBackgroundWork();
-  await flushBackgroundWork();
+  await waitUntil(() => relay.peek(accountA.address).some((message) =>
+    applicationType(message) === "teti.task.artifact.file"
+  ));
 
   await runtimeA.poll();
   assert.equal((await runtimeA.getTask(sent.request.taskId)).artifacts?.length ?? 0, 0);
@@ -1762,8 +1859,11 @@ test("out-of-order Task status and receipt messages cannot roll back newer state
   });
   await runtimeB.poll();
   await runtimeB.approveTask(sent.request.taskId);
-  await flushBackgroundWork();
-  await flushBackgroundWork();
+  await waitUntil(() => relay.peek(accountA.address).some((message) => {
+    if (applicationType(message) !== "teti.task.status" || !message.text) return false;
+    const envelope = parseApplicationEnvelope(message.text);
+    return (envelope.payload as { state?: string }).state === "completed";
+  }));
   relay.reverseApplicationMessages(accountA.address, "teti.task.status");
   await runtimeA.poll();
   assert.equal((await runtimeA.getTask(sent.request.taskId)).state, "completed");
@@ -1886,7 +1986,8 @@ test("Runtime poll preserves a terminal local execution while its Task result is
   const concurrentPoll = runtimeB.poll();
   executor.finish("safe:terminal-result");
   await concurrentPoll;
-  await flushBackgroundWork();
+  await waitUntil(async () => (await runtimeB.getTask(sent.request.taskId)).state === "completed");
+  await runtimeB.poll();
 
   const receiver = await runtimeB.getTask(sent.request.taskId);
   assert.equal(receiver.state, "completed");
@@ -1918,8 +2019,8 @@ test("expired Agent authentication returns to explicit allow-once after local lo
   });
   await runtimeB.poll();
   await runtimeB.approveTask(sent.request.taskId);
-  await flushBackgroundWork();
-  await flushBackgroundWork();
+  await waitUntil(async () => (await runtimeB.getTask(sent.request.taskId)).state === "auth_required");
+  await runtimeB.poll();
   const authRequired = await runtimeB.getTask(sent.request.taskId);
   assert.equal(authRequired.state, "auth_required");
   assert.equal(authRequired.approval, "pending");
@@ -1929,8 +2030,8 @@ test("expired Agent authentication returns to explicit allow-once after local lo
 
   executor.authenticated = true;
   await runtimeB.approveTask(sent.request.taskId);
-  await flushBackgroundWork();
-  await flushBackgroundWork();
+  await waitUntil(async () => (await runtimeB.getTask(sent.request.taskId)).state === "completed");
+  await runtimeB.poll();
   await runtimeA.poll();
   const completed = await runtimeA.getTask(sent.request.taskId);
   assert.equal(completed.state, "completed");
@@ -1960,8 +2061,7 @@ test("an auth-required Task still expires instead of remaining actionable foreve
   });
   await runtimeB.poll();
   await runtimeB.approveTask(sent.request.taskId);
-  await flushBackgroundWork();
-  await flushBackgroundWork();
+  await waitUntil(async () => (await runtimeB.getTask(sent.request.taskId)).state === "auth_required");
   assert.equal((await runtimeB.getTask(sent.request.taskId)).state, "auth_required");
 
   nowMs += 2_000;
@@ -2050,6 +2150,7 @@ async function makeRuntime(
     taskTransportStore?: MemoryTaskTransportStore;
     taskAttachmentStore?: FileTaskAttachmentStore;
     workspaceStore?: FileCollaborationWorkspaceStore;
+    structuredTaskMemoryStore?: StructuredTaskMemoryStore;
     taskExecutor?: TaskExecutionBridge;
     taskIdFactory?: () => string;
     now?: () => Date;
@@ -2149,10 +2250,13 @@ async function flushBackgroundWork(): Promise<void> {
   await new Promise<void>((resolve) => setTimeout(resolve, 10));
 }
 
-async function waitUntil(read: () => boolean, timeoutMs = 1_000): Promise<void> {
+async function waitUntil(
+  read: () => boolean | Promise<boolean>,
+  timeoutMs = 3_000
+): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (read()) return;
+    if (await read()) return;
     await new Promise<void>((resolve) => setTimeout(resolve, 5));
   }
   throw new Error("Timed out waiting for relayed Task state.");
@@ -2266,6 +2370,8 @@ class MemoryChatmailRelay {
   private readonly attachmentDownloadRequests = new Map<number, number>();
   private nextMessageId = 1;
   private lastReceivedAtMs = Date.now();
+  private deliveryBlocked = false;
+  private deliveryWaitCalls = 0;
   private readonly deferredAttachments: boolean;
   private readonly hideAttachmentTextUntilDone: boolean;
   private readonly initialAttachmentDownloadState: "Available" | "Failure";
@@ -2282,6 +2388,22 @@ class MemoryChatmailRelay {
 
   adapter(fromAddress: string): ChatmailAdapter {
     return new RelayAdapter(this, fromAddress);
+  }
+
+  setDeliveryBlocked(blocked: boolean): void {
+    this.deliveryBlocked = blocked;
+  }
+
+  deliveryWaitCount(): number {
+    return this.deliveryWaitCalls;
+  }
+
+  async waitForDelivery(messageId: number): Promise<ChatmailMessageStatus> {
+    this.deliveryWaitCalls += 1;
+    if (this.deliveryBlocked) {
+      return new Promise<ChatmailMessageStatus>(() => undefined);
+    }
+    return { messageId, state: 26 };
   }
 
   send(fromAddress: string, input: SendChatmailMessageInput): ChatmailSentMessage {
@@ -2935,6 +3057,9 @@ class RelayAdapter implements ChatmailAdapter {
   }
   async sendMessage(input: SendChatmailMessageInput): Promise<ChatmailSentMessage> {
     return this.relay.send(this.address, input);
+  }
+  async waitForDelivery(input: WaitForChatmailDeliveryInput): Promise<ChatmailMessageStatus> {
+    return this.relay.waitForDelivery(input.messageId);
   }
   async receiveMessages(input: ReceiveChatmailMessagesInput): Promise<ChatmailReceivedMessage[]> {
     return this.relay.receive(this.address, input.limit);

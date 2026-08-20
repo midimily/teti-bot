@@ -78,9 +78,12 @@ test("0.3.8 upgrade preserves local account/Chatmail and scoped Network state wh
       profile.networkStatePaths.production.credentialsPath,
       profile.networkStatePaths.local_development.credentialsPath
     );
-    assert.match(profile.networkStatePaths.production.credentialsPath, /network\/production/);
     assert.match(
-      profile.networkStatePaths.local_development.credentialsPath,
+      profile.networkStatePaths.production.credentialsPath.replaceAll("\\", "/"),
+      /network\/production/
+    );
+    assert.match(
+      profile.networkStatePaths.local_development.credentialsPath.replaceAll("\\", "/"),
       /network\/local_development/
     );
 

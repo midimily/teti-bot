@@ -21,7 +21,9 @@ test("Passport sharing defaults off and persists a private field-level policy", 
     version: 4,
     passportSharing: resourceSharingPolicy(true)
   });
-  assert.equal((await stat(path)).mode & 0o777, 0o600);
+  if (process.platform !== "win32") {
+    assert.equal((await stat(path)).mode & 0o777, 0o600);
+  }
 });
 
 test("legacy statusSharing is migrated once to the Passport policy", async (context) => {

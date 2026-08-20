@@ -257,8 +257,10 @@ test("file credential store uses private file permissions and never writes into 
     const store = new FileTetiNetworkCredentialStore(path);
     const record = testCredentials();
     await store.save(record);
-    assert.equal((await stat(path)).mode & 0o777, 0o600);
-    assert.equal((await stat(join(directory, "credentials"))).mode & 0o777, 0o700);
+    if (process.platform !== "win32") {
+      assert.equal((await stat(path)).mode & 0o777, 0o600);
+      assert.equal((await stat(join(directory, "credentials"))).mode & 0o777, 0o700);
+    }
     const raw = await readFile(path, "utf8");
     assert.ok(raw.includes("ed25519-seed:"));
     assert.deepEqual(await store.load(), record);

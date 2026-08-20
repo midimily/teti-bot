@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 #[cfg(not(target_os = "macos"))]
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use tauri::{
-    App, AppHandle, LogicalPosition, Manager, PhysicalPosition, WebviewUrl, WebviewWindow,
+    AppHandle, LogicalPosition, Manager, PhysicalPosition, WebviewUrl, WebviewWindow,
     WebviewWindowBuilder,
 };
 
@@ -83,38 +83,55 @@ pub struct PhysicalMonitorFrame {
     pub scale_factor: f64,
 }
 
-pub fn create_island_window(app: &App) -> tauri::Result<WebviewWindow> {
-    let size = size_for_mode(IslandMode::Idle);
-    let window = WebviewWindowBuilder::new(app, ISLAND_LABEL, WebviewUrl::App("index.html".into()))
-        .title("Teti")
-        .inner_size(size.width, size.height)
-        .min_inner_size(32.0, 18.0)
-        .resizable(false)
-        .decorations(false)
-        .transparent(true)
-        .shadow(false)
-        .always_on_top(true)
-        .skip_taskbar(true)
-        .visible(false)
-        .build()?;
+pub fn create_island_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
+    let initial_mode = initial_island_mode();
+    let size = size_for_mode(initial_mode);
+    #[cfg(not(target_os = "macos"))]
+    CURRENT_MODE.store(mode_code(initial_mode), Ordering::SeqCst);
+    let builder =
+        WebviewWindowBuilder::new(app, ISLAND_LABEL, WebviewUrl::App("index.html".into()))
+            .title("Teti")
+            .inner_size(size.width, size.height)
+            .min_inner_size(32.0, 18.0)
+            .resizable(false)
+            .decorations(false)
+            .transparent(true)
+            .shadow(false)
+            .always_on_top(true)
+            .skip_taskbar(true)
+            .visible(false);
+    #[cfg(target_os = "windows")]
+    let builder = builder.closable(false);
+    let window = builder.build()?;
 
     #[cfg(target_os = "macos")]
     {
         macos_panel::configure(&window).map_err(std::io::Error::other)?;
-        macos_panel::resize_and_pin(app.handle(), IslandMode::Idle)
-            .map_err(std::io::Error::other)?;
-        macos_panel::install_screen_change_observers(app.handle())
-            .map_err(std::io::Error::other)?;
+        macos_panel::resize_and_pin(app, IslandMode::Idle).map_err(std::io::Error::other)?;
+        macos_panel::install_screen_change_observers(app).map_err(std::io::Error::other)?;
     }
     #[cfg(not(target_os = "macos"))]
-    position_window_top_center(&window, size, top_inset_for_mode(IslandMode::Idle))
+    position_window_top_center(&window, size, top_inset_for_mode(initial_mode))
         .map_err(std::io::Error::other)?;
     #[cfg(target_os = "windows")]
-    crate::windows_native::install_native_window_events(app.handle(), &window)
+    crate::windows_native::install_native_window_events(app, &window)
         .map_err(std::io::Error::other)?;
     #[cfg(not(target_os = "macos"))]
     window.show()?;
+    #[cfg(target_os = "windows")]
+    let _ = window.set_focus();
     Ok(window)
+}
+
+const fn initial_island_mode() -> IslandMode {
+    #[cfg(target_os = "windows")]
+    {
+        IslandMode::Onboarding
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        IslandMode::Idle
+    }
 }
 
 #[tauri::command]

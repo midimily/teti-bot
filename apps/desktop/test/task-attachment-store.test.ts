@@ -34,7 +34,9 @@ test("Task attachment store stages a private bounded PNG without exposing its so
   assert.equal(staged.part.height, 1);
   assert.match(staged.part.sha256, /^sha256:[a-f0-9]{64}$/);
   assert.equal(JSON.stringify(staged.part).includes(source), false);
-  assert.equal((await stat(staged.path)).mode & 0o777, 0o600);
+  if (process.platform !== "win32") {
+    assert.equal((await stat(staged.path)).mode & 0o777, 0o600);
+  }
   assert.deepEqual(await readFile(staged.path), ONE_PIXEL_PNG);
   assert.deepEqual((await store.getStagedImage(staged.part)).part, staged.part);
 });
@@ -110,7 +112,9 @@ test("Task v7 Artifact document is private, bounded, and rejected after byte tam
     deliveryReceiptRequested: true as const
   };
 
-  assert.equal((await stat(staged.path)).mode & 0o777, 0o600);
+  if (process.platform !== "win32") {
+    assert.equal((await stat(staged.path)).mode & 0o777, 0o600);
+  }
   assert.deepEqual(await store.readArtifactDocument(staged.path, descriptor), artifact);
   await writeFile(staged.path, Buffer.from("tampered", "utf8"));
   await assert.rejects(

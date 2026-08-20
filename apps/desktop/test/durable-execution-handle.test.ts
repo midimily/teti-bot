@@ -176,7 +176,9 @@ test("duplicate completion is idempotent and the local store stays private", asy
   assert.equal(await service.finish(handle.taskId, handle.executionEpoch, "completed"), true);
   assert.equal(await service.finish(handle.taskId, handle.executionEpoch, "completed"), false);
   validateExecutionHandle(await service.get(handle.taskId));
-  assert.equal((await stat(path)).mode & 0o777, 0o600);
+  if (process.platform !== "win32") {
+    assert.equal((await stat(path)).mode & 0o777, 0o600);
+  }
   const serialized = await readFile(path, "utf8");
   assert.match(serialized, /loopback:instance:request/);
   assert.doesNotMatch(serialized, /Passport|Chatmail|remoteTetiId/);

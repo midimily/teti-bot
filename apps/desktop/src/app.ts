@@ -11,6 +11,11 @@ import type { TauriInvoker } from "./platform/tauri-api.ts";
 import type { DesktopPlatformInfo } from "./platform/contract.ts";
 import { createPanelDiagnosticSink } from "./platform/panel-diagnostics.ts";
 import { DockActivationGuard } from "./platform/dock-activation-guard.ts";
+import {
+  isWindowsLaunchFocusGuardActive,
+  shouldRevealMainPanelOnLaunch,
+  WINDOWS_LAUNCH_FOCUS_GUARD_MS
+} from "./platform/launch-presentation.ts";
 import { TETI_BUILD_INFO } from "./build-info.ts";
 import {
   LifecycleBridgeClient
@@ -20,6 +25,7 @@ import {
   CONNECTION_DETAILS_TRANSITION_MS,
   MockPeerConnectionClient,
   PeerConnectionController,
+  type PeerConnectionMutationStatus,
   type PeerConnectionSnapshot
 } from "./connections/controller.ts";
 import {
@@ -151,6 +157,7 @@ export async function createDesktopApp(options: DesktopAppOptions): Promise<Desk
   let preserveStateForBrandOpen = false;
   let brandOpenGuardTimer: number | undefined;
   let localAppUpdateRequired = false;
+  let windowsLaunchFocusGuardDeadline = Number.NEGATIVE_INFINITY;
   const languageSettings: AppLanguageSettings | undefined = options.onLocalePreferenceChange
     ? {
         preference: options.localePreference ?? "auto",
@@ -324,6 +331,14 @@ export async function createDesktopApp(options: DesktopAppOptions): Promise<Desk
         return;
       }
       if (!focused) {
+        if (isWindowsLaunchFocusGuardActive(windowsLaunchFocusGuardDeadline)) {
+          panelDiagnostic({
+            level: "debug",
+            event: "panel.dismiss.ignored",
+            fields: { reason: "windows_launch_focus_guard" }
+          });
+          return;
+        }
         if (preserveStateForBrandOpen) {
           panelDiagnostic({
             level: "debug",
@@ -449,15 +464,25 @@ export async function createDesktopApp(options: DesktopAppOptions): Promise<Desk
   };
 
   await release.start();
-  await coordinator.initialize();
+  const initialSnapshot = await coordinator.initialize();
   setPresenceSignal("foreground", options.root.ownerDocument.hasFocus());
   setPresenceSignal("panel_visible", connections.snapshot.open);
   passport.start();
   tasks.start();
   await memory.start();
+  if (shouldRevealMainPanelOnLaunch(options.platform, initialSnapshot)) {
+    windowsLaunchFocusGuardDeadline = Date.now() + WINDOWS_LAUNCH_FOCUS_GUARD_MS;
+    connections.open("windows-app-launch");
+  }
   app.render();
   await notchWindow.setMode(
-    visualModeForViewModel(toFirstLaunchViewModel(coordinator.snapshot, options.i18n)),
+    tasks.snapshot.open
+      ? "task"
+      : connections.snapshot.open
+        ? connections.snapshot.expandedRequestId
+          ? "connection_detail"
+          : "onboarding"
+        : visualModeForViewModel(toFirstLaunchViewModel(coordinator.snapshot, options.i18n)),
     "initial-render"
   );
 
@@ -949,6 +974,10 @@ function createConnectionIsland(
       list.append(createConnectionRow(
         connection,
         snapshot.busy,
+        snapshot.mutation?.requestId === connection.requestId ? snapshot.mutation : undefined,
+        snapshot.mutationError?.requestId === connection.requestId
+          ? snapshot.mutationError
+          : undefined,
         connection.requestId === snapshot.highlightedRequestId,
         controller,
         connection.requestId === snapshot.expandedRequestId,
@@ -1089,6 +1118,8 @@ function focusAfterPanelExpansion(input: HTMLInputElement): void {
 function createConnectionRow(
   connection: ConnectionCardViewModel,
   busy: boolean,
+  mutation: PeerConnectionMutationStatus | undefined,
+  mutationError: PeerConnectionMutationStatus | undefined,
   highlighted: boolean,
   controller: PeerConnectionController,
   expanded: boolean,
@@ -1113,6 +1144,7 @@ function createConnectionRow(
 
   const state = document.createElement("div");
   state.className = "teti-connection-state";
+  row.setAttribute("aria-busy", String(Boolean(mutation)));
   if (connection.state === "Confirmed") {
     row.classList.add(`is-${connection.reachability}`);
     row.classList.add(`is-compatibility-${connection.compatibility.replace("_", "-")}`);
@@ -1141,19 +1173,48 @@ function createConnectionRow(
       state.append(compatibility);
     }
   } else if (connection.state === "PendingApproval") {
-    const accept = iconButton(
-      Check,
-      i18n.messages.connections.list.accept,
-      () => void controller.accept(connection.requestId)
-    );
-    const reject = iconButton(
-      X,
-      i18n.messages.connections.list.reject,
-      () => void controller.reject(connection.requestId)
-    );
-    accept.disabled = busy;
-    reject.disabled = busy;
-    state.append(accept, reject);
+    if (mutation) {
+      row.classList.add("is-mutating");
+      const progress = document.createElement("span");
+      progress.className = "teti-connection-mutation";
+      progress.setAttribute("role", "status");
+      progress.setAttribute("aria-live", "polite");
+      const spinner = document.createElement("span");
+      spinner.className = "teti-connection-mutation-spinner";
+      spinner.setAttribute("aria-hidden", "true");
+      const label = document.createElement("span");
+      label.textContent = mutation.kind === "accept"
+        ? i18n.messages.connections.list.accepting
+        : i18n.messages.connections.list.rejecting;
+      progress.append(spinner, label);
+      state.append(progress);
+    } else {
+      const actions = document.createElement("span");
+      actions.className = "teti-connection-actions";
+      const accept = iconButton(
+        Check,
+        i18n.messages.connections.list.accept,
+        () => void controller.accept(connection.requestId)
+      );
+      const reject = iconButton(
+        X,
+        i18n.messages.connections.list.reject,
+        () => void controller.reject(connection.requestId)
+      );
+      accept.disabled = busy;
+      reject.disabled = busy;
+      actions.append(accept, reject);
+      state.append(actions);
+      if (mutationError) {
+        const error = document.createElement("small");
+        error.className = "teti-connection-mutation-error";
+        error.setAttribute("role", "alert");
+        error.textContent = mutationError.kind === "accept"
+          ? i18n.messages.connections.list.acceptFailed
+          : i18n.messages.connections.list.rejectFailed;
+        state.append(error);
+      }
+    }
   } else if (connection.state === "Requested") {
     state.textContent = i18n.messages.connections.list.waitingApproval;
   } else if (connection.state === "Rejected") {

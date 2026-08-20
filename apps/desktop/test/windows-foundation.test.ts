@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import { createDesktopI18n } from "../src/i18n/index.ts";
 import {
   validateDesktopRuntimeDiagnostics,
@@ -11,7 +12,7 @@ import {
 import { RecordingTauriInvoker } from "../src/platform/tauri-api.ts";
 import { createDesktopAccountLifecycle } from "../src/provisioning/index.ts";
 
-const repoRoot = new URL("../../..", import.meta.url).pathname;
+const repoRoot = fileURLToPath(new URL("../../..", import.meta.url));
 const desktopRoot = join(repoRoot, "apps", "desktop");
 const tauriRoot = join(desktopRoot, "src-tauri");
 
@@ -50,7 +51,6 @@ test("Windows Tauri overlay owns NSIS, verified Runtime resources, and ICO metad
     windows: {
       allowDowngrades: boolean;
       digestAlgorithm: string;
-      signCommand: { cmd: string; args: string[] };
       webviewInstallMode: { type: string; silent: boolean };
       nsis: {
         installMode: string;
@@ -74,8 +74,7 @@ test("Windows Tauri overlay owns NSIS, verified Runtime resources, and ICO metad
   );
   assert.equal(bundle.windows.allowDowngrades, false);
   assert.equal(bundle.windows.digestAlgorithm, "sha256");
-  assert.equal(bundle.windows.signCommand.cmd, "node");
-  assert.ok(bundle.windows.signCommand.args.includes("scripts/windows-sign-command.ts"));
+  assert.equal("signCommand" in bundle.windows, false);
   assert.equal(bundle.windows.webviewInstallMode.type, "embedBootstrapper");
   assert.equal(bundle.windows.webviewInstallMode.silent, true);
   assert.equal(bundle.windows.nsis.installMode, "currentUser");
@@ -91,6 +90,27 @@ test("Windows Tauri overlay owns NSIS, verified Runtime resources, and ICO metad
     "$APPLOCALDATA/profile/store-v2/task-attachments/input/**",
     "$APPLOCALDATA/profile/store-v2/task-attachments/artifact/**"
   ]);
+});
+
+test("desktop package builds inject an absolute Windows signing command without POSIX env syntax", () => {
+  const desktopPackage = readJson(join(desktopRoot, "package.json")) as {
+    scripts: Record<string, string>;
+  };
+  const buildScripts = [
+    desktopPackage.scripts["tauri:build"],
+    desktopPackage.scripts["tauri:build:app"],
+    desktopPackage.scripts["tauri:build:release"],
+    desktopPackage.scripts["tauri:build:app:release"],
+    desktopPackage.scripts["tauri:build:windows:shell"]
+  ];
+  assert.ok(buildScripts.every((script) => script.includes("scripts/tauri-build.ts")));
+  assert.ok(buildScripts.every((script) => !script.startsWith("TETI_BUILD_TYPE=")));
+
+  const wrapper = readFileSync(join(desktopRoot, "scripts", "tauri-build.ts"), "utf8");
+  assert.match(wrapper, /cmd: process\.execPath/);
+  assert.match(wrapper, /windows-sign-command\.ts/);
+  assert.match(wrapper, /tauriArgs\.push\("--config"/);
+  assert.match(wrapper, /tauriArgs\.push\("--no-sign"\)/);
 });
 
 test("native platform DTO is bounded and rejects renderer-invented values", () => {

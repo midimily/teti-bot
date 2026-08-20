@@ -1,5 +1,5 @@
 import { constants } from "node:fs";
-import { access, realpath, stat } from "node:fs/promises";
+import { access, readdir, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, delimiter, join, win32 } from "node:path";
 import { execFile } from "node:child_process";
@@ -210,9 +210,15 @@ export async function resolveCodexEntrypoint(options: {
   const homeDirectory = options.homeDirectory ?? homedir();
   const platform = options.platform ?? (process.platform === "win32" ? "windows" : "macos");
   const configuredOverride = options.pathOverride?.trim();
+  const desktopCandidates = !configuredOverride && platform === "windows"
+    ? await windowsCodexDesktopEntrypointCandidates(environment.LOCALAPPDATA)
+    : [];
   const candidates = configuredOverride
     ? [configuredOverride]
-    : codexEntrypointCandidates(environment, homeDirectory, platform);
+    : [...new Set([
+        ...desktopCandidates,
+        ...codexEntrypointCandidates(environment, homeDirectory, platform)
+      ])];
 
   for (const candidate of candidates) {
     if (!isSafeAbsoluteLocalPath(candidate, platform)) continue;
@@ -229,6 +235,29 @@ export async function resolveCodexEntrypoint(options: {
     }
   }
   return null;
+}
+
+export async function windowsCodexDesktopEntrypointCandidates(
+  localAppData: string | undefined
+): Promise<string[]> {
+  if (!localAppData) return [];
+  const binRoot = win32.join(localAppData, "OpenAI", "Codex", "bin");
+  try {
+    const entries = await readdir(binRoot, { withFileTypes: true });
+    const candidates = await Promise.all(entries
+      .filter((entry) => entry.isDirectory() && /^[A-Za-z0-9._-]{1,64}$/.test(entry.name))
+      .map(async (entry) => {
+        const path = win32.join(binRoot, entry.name, "codex.exe");
+        const metadata = await stat(path).catch(() => null);
+        return metadata?.isFile() ? { path, modifiedAt: metadata.mtimeMs } : null;
+      }));
+    return candidates
+      .filter((candidate): candidate is { path: string; modifiedAt: number } => candidate !== null)
+      .sort((left, right) => right.modifiedAt - left.modifiedAt)
+      .map((candidate) => candidate.path);
+  } catch {
+    return [];
+  }
 }
 
 export async function probeCodexLogin(

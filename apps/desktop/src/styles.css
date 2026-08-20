@@ -169,6 +169,19 @@ textarea {
   background: transparent;
 }
 
+:root[data-platform="windows"] .teti-shell--collapsed {
+  overflow: hidden;
+  border-radius: 0 0 12px 12px;
+}
+
+:root[data-platform="windows"] :is(
+  .teti-shell--expanded,
+  .teti-shell--protocol-blocked
+) {
+  overflow: hidden;
+  border-radius: 0 0 var(--teti-radius-island) var(--teti-radius-island);
+}
+
 .teti-shell--protocol-blocked {
   background: var(--teti-notch-bg);
 }
@@ -928,6 +941,21 @@ textarea {
   padding: 6px 8px;
   border-radius: 8px;
   background: rgba(26, 136, 255, 0.08);
+}
+
+.teti-task-structured-memory {
+  display: grid;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid color-mix(in srgb, var(--teti-accent) 24%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--teti-accent) 7%, transparent);
+}
+
+.teti-task-structured-memory > small,
+.teti-task-structured-memory > p {
+  margin: 0;
+  color: var(--teti-text-muted);
 }
 
 .teti-task-delegation-approval {
@@ -2938,6 +2966,49 @@ textarea {
   white-space: nowrap;
 }
 
+.teti-connection-actions,
+.teti-connection-mutation {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 5px;
+}
+
+.teti-connection-actions .teti-header-icon:disabled {
+  opacity: 0.38;
+  cursor: default;
+}
+
+.teti-connection-row.is-mutating {
+  border-color: rgba(26, 136, 255, 0.26);
+  background: rgba(244, 250, 255, 0.88);
+}
+
+.teti-connection-mutation {
+  min-height: 26px;
+  color: var(--teti-blue-primary);
+}
+
+.teti-connection-mutation-spinner {
+  box-sizing: border-box;
+  width: 13px;
+  height: 13px;
+  border: 2px solid rgba(26, 136, 255, 0.2);
+  border-top-color: var(--teti-blue-primary);
+  border-radius: 50%;
+  animation: teti-connection-spin 720ms linear infinite;
+}
+
+.teti-connection-mutation-error {
+  max-width: 118px;
+  color: var(--teti-error);
+  font-size: 8px;
+  font-weight: 700;
+  line-height: 11px;
+  text-align: right;
+  white-space: normal;
+}
+
 .teti-peer-ai-status {
   display: grid;
   width: 100%;
@@ -3758,6 +3829,10 @@ textarea {
   .teti-peer-details {
     scroll-behavior: auto;
   }
+
+  .teti-connection-mutation-spinner {
+    animation-duration: 1.5s;
+  }
 }
 
 .teti-connection-empty {
@@ -3787,6 +3862,12 @@ textarea {
   50% {
     opacity: 1;
     transform: scale(1.15);
+  }
+}
+
+@keyframes teti-connection-spin {
+  to {
+    transform: rotate(360deg);
   }
 }
 

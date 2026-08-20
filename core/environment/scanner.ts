@@ -218,14 +218,16 @@ function sanitizeTool(tool: DetectedAiTool): DetectedAiTool {
 }
 
 function sanitizeDeviceMetadata(input: Partial<EnvironmentDeviceMetadata> = {}): EnvironmentDeviceMetadata {
+  const vendor = sanitizeSmallString(input.hardware?.vendor);
+  const model = sanitizeSmallString(input.hardware?.model);
   return {
     os: {
       name: sanitizeSmallString(input.os?.name) ?? "unknown",
       version: sanitizeSmallString(input.os?.version) ?? "unknown"
     },
     hardware: {
-      vendor: sanitizeSmallString(input.hardware?.vendor),
-      model: sanitizeSmallString(input.hardware?.model),
+      ...(vendor ? { vendor } : {}),
+      ...(model ? { model } : {}),
       architecture: sanitizeSmallString(input.hardware?.architecture) ?? arch()
     }
   };

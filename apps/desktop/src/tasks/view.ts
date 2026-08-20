@@ -467,7 +467,9 @@ function createTaskDetail(
     }
     content.append(card);
   }
-  if (memoryController && snapshot.selectedExecution) {
+  if (memoryController
+    && snapshot.selectedExecution
+    && record.request.executionMode !== "long_horizon") {
     content.append(createTaskMemorySection(memoryController, snapshot, i18n));
   }
   if (record.safeErrorCode) {
@@ -552,6 +554,10 @@ function createLongHorizonSection(
     )
   });
   section.append(heading, meta);
+
+  if (record.direction === "incoming" && local) {
+    section.append(createStructuredTaskMemoryStatus(snapshot, i18n));
+  }
 
   if (delegation) {
     const boundary = document.createElement("p");
@@ -724,6 +730,46 @@ function createLongHorizonSection(
     section.append(audit);
   }
   return section;
+}
+
+function createStructuredTaskMemoryStatus(
+  snapshot: TaskControllerSnapshot,
+  i18n: DesktopI18n
+): HTMLElement {
+  const messages = i18n.messages.tasks.longHorizon.structuredMemory;
+  const memory = snapshot.selectedStructuredMemory;
+  const container = document.createElement("div");
+  container.className = "teti-task-structured-memory";
+  const title = document.createElement("strong");
+  title.textContent = messages.title;
+  const note = document.createElement("small");
+  note.textContent = messages.automaticNote;
+  const state = document.createElement("p");
+  state.setAttribute("role", "status");
+  state.textContent = !memory
+    ? messages.loading
+    : memory.status === "unavailable"
+      ? messages.unavailable
+      : formatMessage(messages.ready, { count: i18n.formatNumber(memory.recordCount) });
+  container.append(title, note, state);
+  if (memory?.status === "ready" && memory.records.length > 0) {
+    const records = document.createElement("ol");
+    records.className = "teti-task-stage-list";
+    for (const record of memory.records.slice(0, 3)) {
+      const item = document.createElement("li");
+      const label = document.createElement("strong");
+      label.textContent = formatMessage(messages.stage, {
+        stage: i18n.formatNumber(record.stageIndex),
+        agent: record.childAgentId
+      });
+      const preview = document.createElement("span");
+      preview.textContent = record.contentPreview;
+      item.append(label, preview);
+      records.append(item);
+    }
+    container.append(records);
+  }
+  return container;
 }
 
 function createDelegationApprovalSection(

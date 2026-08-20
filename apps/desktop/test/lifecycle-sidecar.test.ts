@@ -443,6 +443,53 @@ test("sidecar accepts only local explicit Delegation selections and rejects inje
   assert.equal(!injected.ok && injected.error.code, "TASK_TRANSPORT_FAILED");
 });
 
+test("sidecar exposes only a bounded local DTO for ongoing-collaboration SQLite memory", async () => {
+  const deps = fakeDependencies({ account: createAccount("Milo") });
+  const service = await deps.getPeerConnectionService();
+  deps.getPeerConnectionService = async () => ({
+    ...service,
+    async getLongHorizonTaskMemory(taskId: string) {
+      return {
+        schemaVersion: 1 as const,
+        taskId,
+        status: "ready" as const,
+        recordCount: 1,
+        latestStageIndex: 1,
+        updatedAt: "2026-08-20T00:00:00.000Z",
+        records: [{
+          schemaVersion: 1 as const,
+          memoryId: "lhm_001",
+          taskId,
+          stageId: "stage:1",
+          stageIndex: 1,
+          childAgentId: "codex",
+          connectorId: "codex.process",
+          artifactId: "artifact-001",
+          workspaceRevision: 1,
+          kind: "stage_handoff" as const,
+          trust: "peer_originated_reference" as const,
+          contentDigest: `sha256:${"a".repeat(64)}`,
+          contentPreview: "bounded preview",
+          createdAt: "2026-08-20T00:00:00.000Z"
+        }]
+      };
+    }
+  });
+
+  const result = await handleLifecycleRequest(request("task.memory.get", {
+    taskId: "task-long-memory-001"
+  }), deps);
+  const invalid = await handleLifecycleRequest(request("task.memory.get", {
+    taskId: "../../collaboration-memory-v2.sqlite"
+  }), deps);
+
+  assert.equal(result.ok, true);
+  assert.equal(result.ok && "recordCount" in result.result && result.result.recordCount, 1);
+  assert.equal(JSON.stringify(result).includes("collaboration-memory-v2.sqlite"), false);
+  assert.equal(invalid.ok, false);
+  assert.equal(!invalid.ok && invalid.error.code, "TASK_TRANSPORT_FAILED");
+});
+
 test("sidecar exposes durable execution query and explicit resume only through local lifecycle methods", async () => {
   const deps = fakeDependencies({ account: createAccount("Milo") });
   const service = await deps.getPeerConnectionService();

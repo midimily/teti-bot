@@ -1,0 +1,115 @@
+name: Windows 11 x64 certification
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-11-x64-certification-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTUP_TOOLCHAIN: 1.92.0
+
+jobs:
+  certify:
+    name: Windows 11 x64 self-hosted
+    if: github.event_name == 'workflow_dispatch' || vars.TETI_WINDOWS_11_CI_ENABLED == 'true'
+    runs-on:
+      - self-hosted
+      - windows
+      - x64
+      - teti-windows-11
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22.22.3
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      - name: Verify Windows 11 x64 host
+        shell: pwsh
+        run: |
+          $os = Get-CimInstance Win32_OperatingSystem
+          $actualPlatform = (& node -p "process.platform").Trim()
+          $actualArch = (& node -p "process.arch").Trim()
+          if ($os.ProductType -ne 1 -or $os.Caption -notmatch "Windows 11") {
+            throw "Exact certification requires Windows 11 client; got $($os.Caption)."
+          }
+          if (-not [Environment]::Is64BitOperatingSystem -or $actualPlatform -ne "win32" -or $actualArch -ne "x64") {
+            throw "Exact certification requires Windows 11 x64; got $actualPlatform/$actualArch."
+          }
+          $os | Select-Object Caption, Version, BuildNumber, OSArchitecture
+
+      - name: Hydrate and verify reproducible build machine
+        shell: powershell
+        run: >-
+          & .\apps\desktop\scripts\windows-build-machine.ps1
+          -Action Hydrate
+
+      - name: Install desktop dependencies
+        shell: powershell
+        run: |
+          . .\apps\desktop\scripts\enter-windows-build-machine.ps1
+          npm ci --prefix apps/desktop
+
+      - name: Type-check desktop
+        shell: powershell
+        run: |
+          . .\apps\desktop\scripts\enter-windows-build-machine.ps1
+          npm run desktop:typecheck
+
+      - name: Run localized-copy and icon guards
+        shell: powershell
+        run: |
+          . .\apps\desktop\scripts\enter-windows-build-machine.ps1
+          npm run desktop:i18n-check
+          npm run desktop:icon:verify
+
+      - name: Run full repository tests
+        shell: powershell
+        run: |
+          . .\apps\desktop\scripts\enter-windows-build-machine.ps1
+          npm test
+
+      - name: Build renderer
+        shell: powershell
+        run: |
+          . .\apps\desktop\scripts\enter-windows-build-machine.ps1
+          npm --prefix apps/desktop run build:renderer
+
+      - name: Verify pinned Rust MSVC toolchain
+        shell: powershell
+        run: |
+          . .\apps\desktop\scripts\enter-windows-build-machine.ps1
+          rustup show active-toolchain
+          rustc --version
+          cargo --version
+
+      - name: Check Rust formatting
+        shell: powershell
+        run: |
+          . .\apps\desktop\scripts\enter-windows-build-machine.ps1
+          cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml -- --check
+
+      - name: Check and test native shell
+        shell: powershell
+        run: |
+          . .\apps\desktop\scripts\enter-windows-build-machine.ps1
+          cargo check --locked --all-targets --manifest-path apps/desktop/src-tauri/Cargo.toml
+          cargo test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml
+          cargo test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml -- --ignored real_windows_profile_acl_round_trips_as_protected

@@ -154,6 +154,10 @@ export interface AppMessages {
       };
       readonly accept: string;
       readonly reject: string;
+      readonly accepting: string;
+      readonly rejecting: string;
+      readonly acceptFailed: string;
+      readonly rejectFailed: string;
       readonly waitingApproval: string;
       readonly rejected: string;
       readonly expandDetails: string;
@@ -531,6 +535,14 @@ export interface AppMessages {
       readonly aggregationDetail: string;
       readonly budget: string;
       readonly stage: string;
+      readonly structuredMemory: {
+        readonly title: string;
+        readonly automaticNote: string;
+        readonly loading: string;
+        readonly unavailable: string;
+        readonly ready: string;
+        readonly stage: string;
+      };
       readonly phase: Record<
         "pending_approval" | "queued" | "working" | "input_required" | "paused"
           | "interrupted" | "completed" | "failed" | "canceled" | "expired" | "unknown",

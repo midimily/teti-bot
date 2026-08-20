@@ -20,6 +20,7 @@ export const REPO_LOCAL_RPC_RELATIVE_PATH = join(
 
 export interface ChatmailRuntimeConfig {
   rpcServerPath: string;
+  rpcServerArgs?: string[];
   accountsPath: string;
   workingDirectory?: string;
   env?: NodeJS.ProcessEnv;
@@ -27,6 +28,7 @@ export interface ChatmailRuntimeConfig {
 
 export interface ChatmailRuntimeConfigInput {
   rpcServerPath?: string;
+  rpcServerArgs?: string[];
   accountsPath?: string;
   workingDirectory?: string;
   env?: NodeJS.ProcessEnv;
@@ -38,6 +40,7 @@ export function resolveChatmailRuntimeConfig(
 ): ChatmailRuntimeConfig {
   return {
     rpcServerPath: input.rpcServerPath ?? resolveDefaultRpcServerPath(env),
+    ...(input.rpcServerArgs ? { rpcServerArgs: [...input.rpcServerArgs] } : {}),
     accountsPath:
       input.accountsPath ??
       env[TETI_CHATMAIL_ACCOUNTS_PATH] ??

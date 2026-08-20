@@ -14,6 +14,7 @@ import {
 
 const english = createDesktopI18n("en");
 const chinese = createDesktopI18n("zh-Hans");
+const localTaskTimestamp = new Date(2026, 6, 27, 12, 34, 56).toISOString();
 
 test("Task execution and Runtime progress map semantic state instead of receiver UI copy", () => {
   assert.equal(executionProgressLabel("running", english), "Local Child Agent is running");
@@ -43,9 +44,8 @@ test("Task execution and Runtime progress map semantic state instead of receiver
 });
 
 test("Task dates, counts, plurals, native dialogs, and safe errors expose both catalogs", () => {
-  const timestamp = "2026-07-27T12:34:56+08:00";
-  assert.equal(formatTaskTimestamp(timestamp, english), "07/27/2026, 12:34:56");
-  assert.equal(formatTaskTimestamp(timestamp, chinese), "2026/07/27 12:34:56");
+  assert.equal(formatTaskTimestamp(localTaskTimestamp, english), "07/27/2026, 12:34:56");
+  assert.equal(formatTaskTimestamp(localTaskTimestamp, chinese), "2026/07/27 12:34:56");
   assert.equal(english.formatPlural(1, english.messages.tasks.header.pending), "1 awaiting confirmation");
   assert.equal(english.formatPlural(2, english.messages.tasks.header.pending), "2 awaiting confirmation");
   assert.equal(chinese.formatPlural(2, chinese.messages.tasks.header.pending), "2 个待确认");
@@ -73,7 +73,7 @@ test("two Mac locales render one collaboration record without changing protocol 
     peerTetiId: "teti_alpha0001",
     state: "working",
     progress: Object.freeze({ state: "running", completedUnits: 2, totalUnits: 5 }),
-    createdAt: "2026-07-27T12:34:56+08:00"
+    createdAt: localTaskTimestamp
   });
   const before = JSON.stringify(semanticRecord);
   const connections = [{

@@ -2,12 +2,13 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import { toFirstLaunchViewModel } from "../src/first-launch/view-model.ts";
 import { createDesktopI18n } from "../src/i18n/index.ts";
 
 const zhHans = createDesktopI18n("zh-Hans");
 
-const repoRoot = new URL("../../..", import.meta.url).pathname;
+const repoRoot = fileURLToPath(new URL("../../..", import.meta.url));
 const desktopRoot = join(repoRoot, "apps", "desktop");
 const tauriConfigPath = join(desktopRoot, "src-tauri", "tauri.conf.json");
 const tauriMacosConfigPath = join(desktopRoot, "src-tauri", "tauri.macos.conf.json");

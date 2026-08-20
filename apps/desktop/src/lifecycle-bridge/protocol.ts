@@ -13,6 +13,7 @@ import type {
   ChildMemorySnapshot,
   MemoryExportResult
 } from "../../../../core/memory/types.ts";
+import type { LongHorizonTaskMemorySnapshot } from "../../../../core/memory/structured-task.ts";
 import type { LocalReleaseStatus } from "../../../../core/release/policy.ts";
 import type { DelegationTargetOption } from "../../../../core/delegation/types.ts";
 
@@ -39,6 +40,7 @@ export type LifecycleMethod =
   | "task.list"
   | "task.summary"
   | "task.get"
+  | "task.memory.get"
   | "task.attachment.stage"
   | "task.attachment.resolve"
   | "task.approve"
@@ -86,6 +88,7 @@ export const LIFECYCLE_METHODS: readonly LifecycleMethod[] = [
   "task.list",
   "task.summary",
   "task.get",
+  "task.memory.get",
   "task.attachment.stage",
   "task.attachment.resolve",
   "task.approve",
@@ -152,6 +155,7 @@ export type LifecycleResult =
   | ExecutionHandle
   | DelegationTargetOption[]
   | ChildMemorySnapshot
+  | LongHorizonTaskMemorySnapshot
   | MemoryExportResult
   | OsaurusNativeChildSettingsDto
   | TetiNetworkEnvironmentSettingsDto
@@ -342,6 +346,7 @@ export const LIFECYCLE_TIMEOUT_MS: Record<LifecycleMethod, number> = {
   "task.list": 2_000,
   "task.summary": 2_000,
   "task.get": 2_000,
+  "task.memory.get": 2_000,
   "task.attachment.stage": 10_000,
   "task.attachment.resolve": 2_000,
   "task.approve": 10_000,

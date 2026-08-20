@@ -30,12 +30,26 @@ export const CONNECTION_DETAILS_TRANSITION_MS = 180;
 export interface PeerConnectionClient {
   resolve(query: string): Promise<PublicTetiIdentity>;
   request(query: string): Promise<PeerConnectionCommandResult>;
-  accept(requestId: string): Promise<void>;
-  reject(requestId: string): Promise<void>;
+  accept(requestId: string): Promise<PeerConnectionMutationResult>;
+  reject(requestId: string): Promise<PeerConnectionMutationResult>;
 }
 
 export interface PeerConnectionCommandResult {
   requestOutcome?: PeerConnectionRequestOutcome;
+}
+
+export type PeerConnectionMutationKind = "accept" | "reject";
+
+export interface PeerConnectionMutationResult {
+  requestId: string;
+  connectionState: "Confirmed" | "Rejected";
+  updatedAt: string;
+  confirmedAt?: string;
+}
+
+export interface PeerConnectionMutationStatus {
+  requestId: string;
+  kind: PeerConnectionMutationKind;
 }
 
 export interface PeerConnectionSnapshot {
@@ -43,6 +57,8 @@ export interface PeerConnectionSnapshot {
   input: string;
   busy: boolean;
   connectPanel: ConnectPanelSnapshot;
+  mutation?: PeerConnectionMutationStatus;
+  mutationError?: PeerConnectionMutationStatus;
   expandedRequestId?: string;
   highlightedRequestId?: string;
   resolved?: PublicTetiIdentity;
@@ -72,6 +88,7 @@ export class PeerConnectionController {
   private outsideDismissPending = false;
   private panelTimer: unknown;
   private readonly timers = new Set<unknown>();
+  private readonly optimisticMutations = new Map<string, PeerConnectionMutationResult>();
 
   constructor(options: {
     client: PeerConnectionClient;
@@ -96,6 +113,10 @@ export class PeerConnectionController {
       ...this.snapshotValue,
       busy: this.snapshotValue.busy || this.snapshotValue.connectPanel.state === "connecting",
       connectPanel: { ...this.snapshotValue.connectPanel },
+      mutation: this.snapshotValue.mutation ? { ...this.snapshotValue.mutation } : undefined,
+      mutationError: this.snapshotValue.mutationError
+        ? { ...this.snapshotValue.mutationError }
+        : undefined,
       resolved: this.snapshotValue.resolved ? { ...this.snapshotValue.resolved } : undefined,
       connections: this.snapshotValue.connections.map((connection) => structuredClone(connection))
     };
@@ -104,7 +125,30 @@ export class PeerConnectionController {
   syncPassportConnections(connections: readonly PassportConnectionSnapshot[]): void {
     if (this.disposed) return;
     const hadPending = this.hasPendingApproval();
-    this.snapshotValue.connections = connections.map((connection) => structuredClone(connection));
+    const visibleRequestIds = new Set(connections.map((connection) => connection.requestId));
+    this.snapshotValue.connections = connections.map((connection) => {
+      const optimistic = this.optimisticMutations.get(connection.requestId);
+      if (!optimistic) return structuredClone(connection);
+      if (connection.connectionState === optimistic.connectionState) {
+        this.optimisticMutations.delete(connection.requestId);
+        return structuredClone(connection);
+      }
+      if (connection.connectionState !== "PendingApproval") {
+        this.optimisticMutations.delete(connection.requestId);
+        return structuredClone(connection);
+      }
+      return projectConnectionMutation(connection, optimistic);
+    });
+    for (const requestId of this.optimisticMutations.keys()) {
+      if (!visibleRequestIds.has(requestId)) this.optimisticMutations.delete(requestId);
+    }
+    if (this.snapshotValue.mutationError
+      && !this.snapshotValue.connections.some((connection) =>
+        connection.requestId === this.snapshotValue.mutationError?.requestId
+        && connection.connectionState === "PendingApproval"
+      )) {
+      this.snapshotValue.mutationError = undefined;
+    }
     if (this.snapshotValue.expandedRequestId
       && !this.snapshotValue.connections.some((connection) =>
         connection.requestId === this.snapshotValue.expandedRequestId
@@ -322,17 +366,60 @@ export class PeerConnectionController {
   }
 
   async accept(requestId: string): Promise<void> {
-    await this.run(async () => {
-      await this.client.accept(requestId);
-      await this.refreshPassport();
-    });
+    await this.mutateConnection(requestId, "accept", () => this.client.accept(requestId));
   }
 
   async reject(requestId: string): Promise<void> {
-    await this.run(async () => {
-      await this.client.reject(requestId);
-      await this.refreshPassport();
-    });
+    await this.mutateConnection(requestId, "reject", () => this.client.reject(requestId));
+  }
+
+  private async mutateConnection(
+    requestId: string,
+    kind: PeerConnectionMutationKind,
+    operation: () => Promise<PeerConnectionMutationResult>
+  ): Promise<void> {
+    if (this.snapshotValue.busy || this.snapshotValue.connectPanel.state === "connecting") return;
+    const startedAt = Date.now();
+    this.snapshotValue.busy = true;
+    this.snapshotValue.mutation = { requestId, kind };
+    this.snapshotValue.mutationError = undefined;
+    this.snapshotValue.highlightedRequestId = undefined;
+    this.touch();
+    this.onChange();
+    try {
+      const result = await operation();
+      if (this.disposed) return;
+      this.optimisticMutations.set(result.requestId, { ...result });
+      this.snapshotValue.connections = this.snapshotValue.connections.map((connection) =>
+        connection.requestId === result.requestId
+          ? projectConnectionMutation(connection, result)
+          : connection
+      );
+      this.diagnostic({
+        level: "debug",
+        event: "connection.mutation.completed",
+        fields: { kind, durationMs: Date.now() - startedAt }
+      });
+      void this.refreshPassport().catch(() => undefined);
+    } catch (error) {
+      if (this.disposed) return;
+      this.snapshotValue.mutationError = { requestId, kind };
+      this.diagnostic({
+        level: "warn",
+        event: "connection.mutation.failed",
+        fields: {
+          kind,
+          durationMs: Date.now() - startedAt,
+          code: readStableErrorCode(error) ?? "CONNECTION_REQUEST_FAILED"
+        }
+      });
+    } finally {
+      if (this.disposed) return;
+      this.snapshotValue.busy = false;
+      this.snapshotValue.mutation = undefined;
+      this.touch();
+      this.onChange();
+    }
   }
 
   private async run(operation: () => Promise<void>): Promise<void> {
@@ -485,12 +572,14 @@ export class BridgePeerConnectionClient implements PeerConnectionClient {
     return result.requestOutcome ? { requestOutcome: result.requestOutcome } : {};
   }
 
-  async accept(requestId: string): Promise<void> {
-    await this.bridge.request("connection.accept", { requestId });
+  async accept(requestId: string): Promise<PeerConnectionMutationResult> {
+    const result = await this.bridge.request("connection.accept", { requestId }) as PeerConnectionResult;
+    return mutationResult(result, requestId, "Confirmed");
   }
 
-  async reject(requestId: string): Promise<void> {
-    await this.bridge.request("connection.reject", { requestId });
+  async reject(requestId: string): Promise<PeerConnectionMutationResult> {
+    const result = await this.bridge.request("connection.reject", { requestId }) as PeerConnectionResult;
+    return mutationResult(result, requestId, "Rejected");
   }
 }
 
@@ -548,10 +637,67 @@ export class MockPeerConnectionClient implements PeerConnectionClient {
     } };
   }
 
-  async accept(): Promise<void> { this.publish(); }
-  async reject(): Promise<void> { this.publish(); }
+  async accept(requestId: string): Promise<PeerConnectionMutationResult> {
+    return this.mutate(requestId, "Confirmed");
+  }
+
+  async reject(requestId: string): Promise<PeerConnectionMutationResult> {
+    return this.mutate(requestId, "Rejected");
+  }
+
+  private mutate(
+    requestId: string,
+    connectionState: PeerConnectionMutationResult["connectionState"]
+  ): PeerConnectionMutationResult {
+    const now = new Date().toISOString();
+    const connection = this.connections.find((item) => item.requestId === requestId);
+    if (!connection) throw connectionMutationError();
+    connection.connectionState = connectionState;
+    connection.updatedAt = now;
+    if (connectionState === "Confirmed") connection.confirmedAt = now;
+    this.publish();
+    return {
+      requestId,
+      connectionState,
+      updatedAt: now,
+      ...(connectionState === "Confirmed" ? { confirmedAt: now } : {})
+    };
+  }
 
   private publish(): void {
     this.onConnectionsChanged?.(structuredClone(this.connections));
   }
+}
+
+function mutationResult(
+  result: PeerConnectionResult,
+  requestId: string,
+  expectedState: PeerConnectionMutationResult["connectionState"]
+): PeerConnectionMutationResult {
+  const connection = result.connections.find((item) => item.requestId === requestId);
+  if (!connection || connection.state !== expectedState) throw connectionMutationError();
+  return {
+    requestId,
+    connectionState: expectedState,
+    updatedAt: connection.updatedAt,
+    ...(connection.confirmedAt ? { confirmedAt: connection.confirmedAt } : {})
+  };
+}
+
+function projectConnectionMutation(
+  connection: PassportConnectionSnapshot,
+  result: PeerConnectionMutationResult
+): PassportConnectionSnapshot {
+  return {
+    ...structuredClone(connection),
+    connectionState: result.connectionState,
+    updatedAt: result.updatedAt,
+    ...(result.confirmedAt ? { confirmedAt: result.confirmedAt } : {})
+  };
+}
+
+function connectionMutationError(): Error {
+  const error = new Error("The connection mutation returned an invalid state.");
+  error.name = "CONNECTION_REQUEST_FAILED";
+  return error;
 }

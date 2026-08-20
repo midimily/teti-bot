@@ -66,7 +66,7 @@ export async function inspectChatmailRpcRuntime(
     errors.push(`RPC executable is not executable: ${resolvedPath}`);
   }
 
-  diagnostics.version = await readVersion(resolvedPath, errors);
+  diagnostics.version = await readVersion(resolvedPath, runtime.rpcServerArgs ?? [], errors);
   const binary = await inspectBinary(resolvedPath, errors);
   diagnostics.fileOutput = binary.description;
   diagnostics.binaryPlatform = binary.platform;
@@ -80,7 +80,13 @@ export async function inspectChatmailRpcRuntime(
   diagnostics.accountsPathWritable = await ensureWritableDirectory(runtime.accountsPath, errors);
 
   if (diagnostics.executable && diagnostics.accountsPathWritable) {
-    await runJsonRpcHealth(resolvedPath, runtime.accountsPath, diagnostics, errors);
+    await runJsonRpcHealth(
+      resolvedPath,
+      runtime.rpcServerArgs ?? [],
+      runtime.accountsPath,
+      diagnostics,
+      errors
+    );
   }
 
   return diagnostics;
@@ -112,6 +118,7 @@ export async function resolveExecutablePath(
 
 async function runJsonRpcHealth(
   rpcServerPath: string,
+  rpcServerArgs: string[],
   accountsPath: string,
   diagnostics: ChatmailRpcRuntimeDiagnostics,
   errors: string[]
@@ -119,6 +126,7 @@ async function runJsonRpcHealth(
   const transport = StdioJsonRpcTransport.spawn(
     {
       rpcServerPath,
+      rpcServerArgs,
       accountsPath
     },
     {
@@ -140,9 +148,13 @@ async function runJsonRpcHealth(
   }
 }
 
-async function readVersion(path: string, errors: string[]): Promise<string | undefined> {
+async function readVersion(
+  path: string,
+  args: string[],
+  errors: string[]
+): Promise<string | undefined> {
   try {
-    const { stdout, stderr } = await execFileAsync(path, ["--version"], { timeout: 5000 });
+    const { stdout, stderr } = await execFileAsync(path, [...args, "--version"], { timeout: 5000 });
     return String(stdout || stderr).trim();
   } catch (error) {
     errors.push(`Unable to read RPC version: ${error instanceof Error ? error.message : String(error)}`);
@@ -253,7 +265,9 @@ async function fileExists(path: string): Promise<boolean> {
 
 async function canExecute(path: string): Promise<boolean> {
   try {
-    if (process.platform === "win32") return (await stat(path)).isFile();
+    if (process.platform === "win32") {
+      return (await stat(path)).isFile() && (await inspectPortableExecutable(path)) !== undefined;
+    }
     await access(path, constants.X_OK);
     return true;
   } catch {

@@ -56,7 +56,7 @@ export function mapCodexUsageResource(state: CodexUsageState, fallbackObservedAt
       windowSeconds: snapshot.weekly.windowSeconds,
       identification: snapshot.weekly.identification
     }] : [],
-    assurance: "provider_observed",
+    assurance: snapshot?.source === "local_auth" ? "local_observed" : "provider_observed",
     observedAt: snapshot?.observedAt ?? fallbackObservedAt
   });
 }
