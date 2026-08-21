@@ -129,8 +129,10 @@ export const ZH_HANS_MESSAGES = {
         compatible: "兼容",
         upgradeRequired: "需要升级",
         checking: "版本检测中",
+        unavailable: "协议状态暂不可用",
         upgradeHint: "仅暂停此节点协作",
-        checkingHint: "本机功能保持可用"
+        checkingHint: "本机功能保持可用",
+        unavailableHint: "已建联，正在自动重试"
       },
       reachability: {
         reachable: "在线",
@@ -172,6 +174,7 @@ export const ZH_HANS_MESSAGES = {
       notes: {
         stale: "AI Passport 已过期",
         disabled: "对方未分享 AI Passport",
+        unknown: "正在获取对方 AI Passport 状态",
         empty: "暂无 AI Passport"
       },
       resourceKinds: {

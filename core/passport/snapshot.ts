@@ -20,7 +20,7 @@ export interface PassportIdentity {
 }
 
 export type RemotePassportState = "fresh" | "stale" | "disabled" | "unknown";
-export type PeerCompatibility = "compatible" | "upgrade_required" | "unknown";
+export type PeerCompatibility = "compatible" | "upgrade_required" | "unknown" | "unavailable";
 
 export type NetworkPeerPresenceSnapshot =
   | { state: "checking" }

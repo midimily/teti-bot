@@ -133,5 +133,9 @@ test("peer compatibility requires the exact current Task and Passport protocols"
   assert.equal(mapPeerConnection(peerWithProtocols([7], [4]), now).compatibility, "compatible");
   assert.equal(mapPeerConnection(peerWithProtocols([5], [4]), now).compatibility, "upgrade_required");
   assert.equal(mapPeerConnection(peerWithProtocols([7], [2]), now).compatibility, "upgrade_required");
-  assert.equal(mapPeerConnection(peerWithProtocols(undefined, [4]), now).compatibility, "unknown");
+  assert.equal(mapPeerConnection(peerWithProtocols(undefined, [4]), now).compatibility, "unavailable");
+  assert.equal(
+    mapPeerConnection(peerWithProtocols(undefined, [4]), new Date("2026-07-27T00:00:10.000Z")).compatibility,
+    "unknown"
+  );
 });

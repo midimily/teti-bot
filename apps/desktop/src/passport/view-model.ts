@@ -639,7 +639,9 @@ export function toConnectionCardViewModel(
       ? messages.list.compatibility.compatible
       : connection.compatibility === "upgrade_required"
         ? messages.list.compatibility.upgradeRequired
-        : messages.list.compatibility.checking,
+        : connection.compatibility === "unavailable"
+          ? messages.list.compatibility.unavailable
+          : messages.list.compatibility.checking,
     reachability,
     reachabilityLabel: reachability === "reachable"
       ? messages.list.reachability.reachable
@@ -932,7 +934,7 @@ function toRemotePassportViewModel(
     : passport.state === "disabled"
       ? notes.disabled
       : passport.state === "unknown"
-      ? notes.empty
+      ? notes.unknown
         : passport.resources.length === 0
           && passport.agents.length === 0
           && (passport.capabilities?.length ?? 0) === 0

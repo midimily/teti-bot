@@ -143,8 +143,10 @@ export interface AppMessages {
         readonly compatible: string;
         readonly upgradeRequired: string;
         readonly checking: string;
+        readonly unavailable: string;
         readonly upgradeHint: string;
         readonly checkingHint: string;
+        readonly unavailableHint: string;
       };
       readonly reachability: {
         readonly reachable: string;
@@ -186,6 +188,7 @@ export interface AppMessages {
       readonly notes: {
         readonly stale: string;
         readonly disabled: string;
+        readonly unknown: string;
         readonly empty: string;
       };
       readonly resourceKinds: {

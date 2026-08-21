@@ -3329,6 +3329,10 @@ textarea {
   color: #8a6b22;
 }
 
+.teti-peer-compatibility.is-unavailable strong {
+  color: #8a6b22;
+}
+
 .teti-connection-row.is-confirmed .teti-peer-ai-status {
   justify-items: stretch;
 }

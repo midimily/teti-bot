@@ -138,6 +138,49 @@ test("heartbeat delivery observation cannot block the serialized connection queu
   assert.equal(snapshot.connections[0]?.state, "Confirmed");
 });
 
+test("the first received protocol hello forces a same-poll reciprocal hello", async () => {
+  const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
+  const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
+  const directory = new StaticDirectory([toIdentity(accountA), toIdentity(accountB)]);
+  const relay = new MemoryChatmailRelay();
+  const connections = new MemoryTetiConnectionStorage();
+  await connections.saveAll([
+    makeConnectionRecord(accountB, "Confirmed", "2026-08-21T00:00:00.000Z")
+  ]);
+  const runtimeA = await makeRuntime(
+    accountA,
+    relay.adapter(accountA.address),
+    directory,
+    connections
+  );
+  const hello = createApplicationEnvelope({
+    type: "teti.presence",
+    messageId: "windows-initial-protocol-hello",
+    fromTetiId: accountB.id,
+    createdAt: "2026-08-21T00:00:01.000Z",
+    payload: {
+      status: "alpha-heartbeat",
+      timestamp: "2026-08-21T00:00:01.000Z",
+      collaborationProtocolEpoch: 2,
+      taskProtocolVersions: [7],
+      passportSchemaVersions: [4]
+    }
+  });
+  relay.pushRaw(accountA.address, accountB.address, serializeApplicationEnvelope(hello));
+  await runtimeA.poll();
+
+  const presenceMessages = relay.peek(accountB.address).filter(
+    (message) => applicationType(message) === "teti.presence"
+  );
+  assert.equal(presenceMessages.length, 2, "the inbound hello triggers one immediate reciprocal retry");
+  assert.equal(relay.dropFirstApplicationMessage(accountB.address, "teti.presence"), true);
+  assert.equal(
+    relay.peek(accountB.address).filter((message) => applicationType(message) === "teti.presence").length,
+    1,
+    "the reciprocal hello survives loss of the first startup message"
+  );
+});
+
 test("reciprocal intent accepts a relayed request and confirms both Teti instances", async () => {
   const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
   const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
@@ -339,8 +382,14 @@ test("AI status is opt-in, sent only to confirmed peers, and revoked independent
   const responseSchemas = relay.peek(accountA.address)
     .map((message) => message.text ? parseApplicationEnvelope(message.text) : null)
     .filter((envelope) => envelope?.type === "teti.ai.status.sync")
-    .map((envelope) => (envelope!.payload as { schemaVersion: number }).schemaVersion);
-  assert.deepEqual(responseSchemas, [4], "known current peers receive one negotiated payload");
+    .map((envelope) => ({
+      schemaVersion: (envelope!.payload as { schemaVersion: number }).schemaVersion,
+      sharing: (envelope!.payload as { sharing: string }).sharing
+    }));
+  assert.deepEqual(responseSchemas, [
+    { schemaVersion: 4, sharing: "disabled" },
+    { schemaVersion: 4, sharing: "enabled" }
+  ], "known current peers receive an explicit privacy state followed by the enabled snapshot");
   await runtimeA.poll();
 
   await runtimeA.setPassportSharing(resourceSharingPolicy(false));
@@ -359,6 +408,33 @@ test("AI status is opt-in, sent only to confirmed peers, and revoked independent
       : undefined,
     []
   );
+});
+
+test("Passport sharing is directional and an opted-out peer still receives the remote Passport", async () => {
+  const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
+  const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
+  const directory = new StaticDirectory([toIdentity(accountA), toIdentity(accountB)]);
+  const relay = new MemoryChatmailRelay();
+  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), directory, undefined, {
+    passportSharing: new MemoryPassportSharingStore(resourceSharingPolicy(false))
+  });
+  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), directory, undefined, {
+    passportSharing: new MemoryPassportSharingStore(resourceSharingPolicy(true)),
+    getLocalAiTools: () => [localCodexStatus()],
+    getLocalCallableAgents: () => [localCodexAgent()]
+  });
+
+  await confirmPeers(runtimeA, runtimeB, "beta00002");
+  const macView = await runtimeA.poll();
+  const windowsView = await runtimeB.list();
+
+  assert.deepEqual(macView.connections[0]?.remoteProtocolCapabilities?.taskProtocolVersions, [7]);
+  assert.deepEqual(windowsView.connections[0]?.remoteProtocolCapabilities?.taskProtocolVersions, [7]);
+  assert.equal(macView.connections[0]?.remoteAiStatus?.sharing, "enabled");
+  assert.equal(macView.connections[0]?.remoteAiStatus?.tools[0]?.toolId, "openai.codex");
+  assert.equal(windowsView.connections[0]?.remoteAiStatus?.sharing, "disabled");
+  assert.deepEqual(windowsView.connections[0]?.remoteAiStatus?.tools, []);
+  assert.deepEqual(await runtimeA.getPassportSharing(), resourceSharingPolicy(false));
 });
 
 test("a delayed legacy Passport is rejected without downgrading an established schema 4 snapshot", async () => {
@@ -401,8 +477,9 @@ test("out-of-order schema 4 Passport snapshots keep the newest generation", asyn
   const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
   const directory = new StaticDirectory([toIdentity(accountA), toIdentity(accountB)]);
   const relay = new MemoryChatmailRelay();
-  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), directory);
-  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), directory);
+  const now = () => new Date("2026-07-27T02:00:00.000Z");
+  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), directory, undefined, { now });
+  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), directory, undefined, { now });
   await confirmPeers(runtimeA, runtimeB, "beta00002");
 
   for (const generatedAt of ["2026-07-27T04:00:00.000Z", "2026-07-27T03:00:00.000Z"]) {

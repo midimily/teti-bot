@@ -121,7 +121,7 @@ test("unknown, disabled, and stale remote Passport states use truthful product c
   }));
   const viewModel = toPassportViewModel({ passport, sharingBusy: false, openPanel: null });
   assert.deepEqual(viewModel.connections.map((item) => item.passport.note), [
-    "暂无 AI Passport",
+    "正在获取对方 AI Passport 状态",
     "对方未分享 AI Passport",
     "AI Passport 已过期"
   ]);
@@ -457,4 +457,42 @@ test("legacy peer compatibility is separate from reachability", () => {
   assert.equal(viewModel.connections[0]?.reachability, "reachable");
   assert.equal(viewModel.connections[0]?.compatibility, "upgrade_required");
   assert.equal(viewModel.connections[0]?.compatibilityLabel, "需要升级");
+});
+
+test("protocol timeout and remote Passport bootstrap have distinct user-facing states", () => {
+  const passport = emptyPassportSnapshot();
+  passport.connections = [{
+    requestId: "bootstrap-peer",
+    connectionState: "Confirmed",
+    direction: "incoming",
+    identity: { tetiId: "teti_remote001", address: "remote001@mail.seep.im" },
+    createdAt: "2026-08-21T00:00:00.000Z",
+    updatedAt: "2026-08-21T00:00:00.000Z",
+    confirmedAt: "2026-08-21T00:00:00.000Z",
+    lastSeen: null,
+    compatibility: "unavailable",
+    passport: {
+      state: "unknown",
+      resources: [],
+      agents: [],
+      capabilities: [],
+      bindings: [],
+      computeOffers: []
+    }
+  }];
+
+  const card = toPassportViewModel(
+    { passport, sharingBusy: false, openPanel: null },
+    new Date("2026-08-21T00:01:00.000Z")
+  ).connections[0]!;
+  assert.equal(card.compatibilityLabel, "协议状态暂不可用");
+  assert.equal(card.passport.note, "正在获取对方 AI Passport 状态");
+
+  passport.connections[0]!.compatibility = "compatible";
+  passport.connections[0]!.passport.state = "fresh";
+  const emptyCard = toPassportViewModel(
+    { passport, sharingBusy: false, openPanel: null },
+    new Date("2026-08-21T00:01:00.000Z")
+  ).connections[0]!;
+  assert.equal(emptyCard.passport.note, "暂无 AI Passport");
 });

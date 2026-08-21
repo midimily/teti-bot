@@ -309,6 +309,8 @@ export class PeerConnectionRuntime implements PeerConnectionService {
   private readonly heartbeatReceived = new Map<string, string>();
   private readonly heartbeatRetries = new Map<string, ChatmailHeartbeatRetryState>();
   private readonly heartbeatDeliveryInFlight = new Set<string>();
+  private readonly forcedHeartbeats = new Set<string>();
+  private readonly protocolBootstrapResponses = new Set<string>();
   private readonly aiStatusSent = new Map<string, { at: string; signature: string }>();
   private readonly remoteAiStatus = new Map<string, RemoteAiStatusSnapshot>();
   private readonly identityCache = new Map<string, TetiIdentity>();
@@ -898,6 +900,7 @@ export class PeerConnectionRuntime implements PeerConnectionService {
     const local = await this.requireAccount();
     const connections = await this.connectionStorage.loadAll();
     const exact = connections.find((connection) => connection.requestId === document.id);
+    const wasConfirmed = exact ? isNetworkRelationshipConfirmed(exact) : false;
     const peerRecovery = exact ?? connections.find(
       (connection) => connection.remoteTetiId === document.peerTetiId
     );
@@ -967,6 +970,10 @@ export class PeerConnectionRuntime implements PeerConnectionService {
       throw new Error(`Network Relationship ${document.id} could not be archived locally.`);
     }
     await this.connectionStorage.upsert(projected);
+    if (isNetworkRelationshipConfirmed(projected) && !wasConfirmed) {
+      this.protocolBootstrapResponses.delete(projected.requestId);
+      this.forceHeartbeat(projected.requestId);
+    }
     this.forceHeartbeatAfterTransportBootstrap(
       projected.requestId,
       exact?.remotePublicKey ?? peerRecovery?.remotePublicKey,
@@ -1012,8 +1019,13 @@ export class PeerConnectionRuntime implements PeerConnectionService {
     currentPublicKey: string | undefined
   ): void {
     if (!currentPublicKey || currentPublicKey === previousPublicKey) return;
+    this.forceHeartbeat(requestId);
+  }
+
+  private forceHeartbeat(requestId: string): void {
     this.heartbeatRetries.delete(requestId);
     this.heartbeatSent.delete(requestId);
+    this.forcedHeartbeats.add(requestId);
   }
 
   private mutateNetworkRelationship(
@@ -1155,6 +1167,14 @@ export class PeerConnectionRuntime implements PeerConnectionService {
           observedAt
         });
         if (changed) this.aiStatusSent.delete(connection.requestId);
+        if (!this.protocolBootstrapResponses.has(connection.requestId)) {
+          // The first valid peer hello proves the receiver is ready. Reply in
+          // the same poll even when an earlier delivery observation is still
+          // pending, so an asymmetric startup cannot strand the peer in
+          // version checking.
+          this.protocolBootstrapResponses.add(connection.requestId);
+          this.forceHeartbeat(connection.requestId);
+        }
       }
       return true;
     }
@@ -1364,11 +1384,15 @@ export class PeerConnectionRuntime implements PeerConnectionService {
     const now = this.now();
     for (const connection of await this.connectionStorage.loadAll()) {
       if (!this.isAuthorizedConnection(connection)) continue;
-      if (this.heartbeatDeliveryInFlight.has(connection.requestId)) continue;
+      const forced = this.forcedHeartbeats.delete(connection.requestId);
+      const deliveryInFlight = this.heartbeatDeliveryInFlight.has(connection.requestId);
+      if (!forced && deliveryInFlight) continue;
       const retry = this.heartbeatRetries.get(connection.requestId);
-      if (retry && now.getTime() < retry.nextAttemptAt) continue;
+      if (!forced && retry && now.getTime() < retry.nextAttemptAt) continue;
       const previous = this.heartbeatSent.get(connection.requestId);
-      if (previous && now.getTime() - Date.parse(previous) < HEARTBEAT_INTERVAL_MS) continue;
+      if (!forced
+        && previous
+        && now.getTime() - Date.parse(previous) < HEARTBEAT_INTERVAL_MS) continue;
       const timestamp = now.toISOString();
       try {
         const delivery = await this.applicationManager.sendPresence(connection.requestId, {
@@ -1380,7 +1404,7 @@ export class PeerConnectionRuntime implements PeerConnectionService {
         });
         this.heartbeatSent.set(connection.requestId, timestamp);
         sent += 1;
-        if (this.chatmailAdapter.waitForDelivery) {
+        if (this.chatmailAdapter.waitForDelivery && !deliveryInFlight) {
           const account = await this.requireAccount();
           this.observeHeartbeatDelivery(
             connection,
@@ -1450,7 +1474,7 @@ export class PeerConnectionRuntime implements PeerConnectionService {
 
   private async sendDueAiStatus(force = false): Promise<number> {
     const policy = await this.passportSharing.load().catch(() => null);
-    if (!policy || !hasPassportSharingFields(policy)) return 0;
+    if (!policy) return 0;
     return this.broadcastAiStatus(policy, force);
   }
 

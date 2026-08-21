@@ -1164,11 +1164,15 @@ function createConnectionRow(
       const compatibilityTitle = document.createElement("strong");
       compatibilityTitle.textContent = connection.compatibility === "upgrade_required"
         ? i18n.messages.connections.list.compatibility.upgradeRequired
-        : i18n.messages.connections.list.compatibility.checking;
+        : connection.compatibility === "unavailable"
+          ? i18n.messages.connections.list.compatibility.unavailable
+          : i18n.messages.connections.list.compatibility.checking;
       const compatibilityHint = document.createElement("small");
       compatibilityHint.textContent = connection.compatibility === "upgrade_required"
         ? i18n.messages.connections.list.compatibility.upgradeHint
-        : i18n.messages.connections.list.compatibility.checkingHint;
+        : connection.compatibility === "unavailable"
+          ? i18n.messages.connections.list.compatibility.unavailableHint
+          : i18n.messages.connections.list.compatibility.checkingHint;
       compatibility.append(compatibilityTitle, compatibilityHint);
       state.append(compatibility);
     }

@@ -129,8 +129,10 @@ export const EN_MESSAGES = {
         compatible: "Compatible",
         upgradeRequired: "Update required",
         checking: "Checking version",
+        unavailable: "Protocol status unavailable",
         upgradeHint: "Collaboration with this Teti only is paused",
-        checkingHint: "Local features remain available"
+        checkingHint: "Local features remain available",
+        unavailableHint: "Connected · retrying automatically"
       },
       reachability: {
         reachable: "Online",
@@ -172,6 +174,7 @@ export const EN_MESSAGES = {
       notes: {
         stale: "AI Passport has expired",
         disabled: "The other Teti isn’t sharing its AI Passport",
+        unknown: "Getting the other Teti’s AI Passport status",
         empty: "No AI Passport"
       },
       resourceKinds: {

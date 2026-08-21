@@ -24,6 +24,7 @@ import { TETI_SUPPORTED_TASK_PROTOCOL_VERSIONS } from "../../../../../core/task/
 import { TETI_SUPPORTED_PASSPORT_SCHEMA_VERSIONS } from "../../../../../core/ai-status/negotiation.ts";
 
 export const CODEX_RESOURCE_ID = "openai.codex";
+export const PROTOCOL_COMPATIBILITY_CHECK_TIMEOUT_MS = 15_000;
 
 export function mapAccountIdentity(account: TetiAccount | null): PassportIdentity | null {
   if (!account) return null;
@@ -78,22 +79,39 @@ export function mapPeerConnection(
     updatedAt: connection.updatedAt,
     ...(connection.confirmedAt ? { confirmedAt: connection.confirmedAt } : {}),
     lastSeen: connection.lastHeartbeatReceivedAt ?? null,
-    compatibility: peerCompatibility(connection),
+    compatibility: peerCompatibility(connection, now),
     passport: mapRemoteAiStatus(connection.remoteAiStatus, now)
   };
 }
 
-function peerCompatibility(connection: PeerConnectionDto): PassportConnectionSnapshot["compatibility"] {
+function peerCompatibility(
+  connection: PeerConnectionDto,
+  now: Date
+): PassportConnectionSnapshot["compatibility"] {
   const capability = connection.remoteProtocolCapabilities;
-  if (!capability) return "unknown";
+  if (!capability) return unresolvedPeerCompatibility(connection, now);
   if (capability.collaborationProtocolEpoch !== 2) return "upgrade_required";
-  if (!capability.taskProtocolVersions || !capability.passportSchemaVersions) return "unknown";
+  if (!capability.taskProtocolVersions || !capability.passportSchemaVersions) {
+    return unresolvedPeerCompatibility(connection, now);
+  }
   return capability.taskProtocolVersions.length === 1
     && capability.taskProtocolVersions[0] === TETI_SUPPORTED_TASK_PROTOCOL_VERSIONS[0]
     && capability.passportSchemaVersions.length === 1
     && capability.passportSchemaVersions[0] === TETI_SUPPORTED_PASSPORT_SCHEMA_VERSIONS[0]
     ? "compatible"
     : "upgrade_required";
+}
+
+function unresolvedPeerCompatibility(
+  connection: PeerConnectionDto,
+  now: Date
+): PassportConnectionSnapshot["compatibility"] {
+  if (connection.state !== "Confirmed") return "unknown";
+  const baseline = Date.parse(connection.confirmedAt ?? connection.updatedAt);
+  return Number.isFinite(baseline)
+    && now.getTime() - baseline >= PROTOCOL_COMPATIBILITY_CHECK_TIMEOUT_MS
+    ? "unavailable"
+    : "unknown";
 }
 
 export function mapRemoteAiStatus(
