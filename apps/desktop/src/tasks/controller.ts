@@ -71,6 +71,7 @@ export interface TaskControllerSnapshot {
   structuredMemoryExcludedIds: string[];
   structuredMemoryEditor: StructuredMemoryEditor | null;
   structuredMemoryDeleteConfirmationId: string | null;
+  structuredMemoryExpanded: boolean;
   structuredMemoryBusy: boolean;
   structuredMemoryError: "read_failed" | "write_failed" | "preview_stale" | null;
   delegationTargets: DelegationTargetOption[];
@@ -227,6 +228,7 @@ export class TaskController {
     structuredMemoryExcludedIds: [],
     structuredMemoryEditor: null,
     structuredMemoryDeleteConfirmationId: null,
+    structuredMemoryExpanded: false,
     structuredMemoryBusy: false,
     structuredMemoryError: null,
     delegationTargets: [],
@@ -512,6 +514,12 @@ export class TaskController {
     const preview = this.snapshotValue.structuredMemoryPreview;
     this.snapshotValue.structuredMemoryUseNextExecution = enabled
       && Boolean(preview && preview.candidateCount > 0 && Date.parse(preview.expiresAt) > Date.now());
+    this.onChange();
+  }
+
+  setStructuredMemoryExpanded(expanded: boolean): void {
+    if (this.snapshotValue.structuredMemoryExpanded === expanded) return;
+    this.snapshotValue.structuredMemoryExpanded = expanded;
     this.onChange();
   }
 
@@ -1080,6 +1088,7 @@ export class TaskController {
     this.snapshotValue.structuredMemoryExcludedIds = [];
     this.snapshotValue.structuredMemoryEditor = null;
     this.snapshotValue.structuredMemoryDeleteConfirmationId = null;
+    this.snapshotValue.structuredMemoryExpanded = false;
     this.snapshotValue.structuredMemoryBusy = false;
     this.snapshotValue.structuredMemoryError = null;
     this.structuredMemoryPreviewKey = null;
@@ -1154,6 +1163,9 @@ export class TaskController {
       structuredMemoryDeleteConfirmationId: detailVisible
         ? this.snapshotValue.structuredMemoryDeleteConfirmationId
         : null,
+      structuredMemoryExpanded: detailVisible
+        ? this.snapshotValue.structuredMemoryExpanded
+        : false,
       structuredMemoryBusy: detailVisible ? this.snapshotValue.structuredMemoryBusy : false,
       structuredMemoryError: detailVisible ? this.snapshotValue.structuredMemoryError : null,
       selectedImagePaths: detailVisible ? this.snapshotValue.selectedImagePaths : {}

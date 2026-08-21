@@ -44,7 +44,7 @@ export class TaskReadModel {
         summary: projectSummary(record),
         verifiedSingleStageCompletion: canRecoverVerifiedSingleStageCompletion(record)
       }))
-      .sort((left, right) => compareTaskSummaries(left.summary, right.summary))
+      .sort((left, right) => compareTaskSummaryPresentation(left.summary, right.summary))
       .slice(0, 100);
 
     for (const taskId of [...this.details.keys()]) {
@@ -64,7 +64,7 @@ export class TaskReadModel {
       .map((connection) => [connection.remoteTetiId, connection.requestId] as const));
     const tasks = this.summaries
       .map((entry) => projectCurrentSummary(entry, this.now()))
-      .sort(compareTaskSummaries);
+      .sort(compareTaskSummaryPresentation);
     return {
       schemaVersion: 1,
       generatedAt: this.now().toISOString(),
@@ -162,6 +162,10 @@ function projectSummary(record: CollaborationTaskTransportRecord): CachedTaskSum
     direction: record.direction,
     peerTetiId: record.peerTetiId,
     capabilityId: record.request.capabilityId,
+    executionMode: record.request.executionMode ?? "single_stage",
+    currentStageIndex: record.longHorizon?.currentStageIndex
+      ?? record.peerLongHorizon?.currentStageIndex
+      ?? null,
     textPreview: taskInputText(record.request.input).slice(0, 240),
     imageCount: taskInputImages(record.request.input).length,
     receivedImageCount: receivedInputImageCount(record),
@@ -289,12 +293,14 @@ function shouldProjectExpiry(
     && Date.parse(expiresAt) <= now.getTime();
 }
 
-function compareTaskSummaries(left: CachedTaskSummary, right: CachedTaskSummary): number {
-  const rank = (task: CachedTaskSummary): number => {
+export function compareTaskSummaryPresentation(
+  left: Pick<CollaborationTaskSummary, "direction" | "approval" | "state" | "updatedAt" | "expiresAt">,
+  right: Pick<CollaborationTaskSummary, "direction" | "approval" | "state" | "updatedAt" | "expiresAt">
+): number {
+  const rank = (task: Pick<CollaborationTaskSummary, "direction" | "approval" | "state">): number => {
     if (task.direction === "incoming" && task.approval === "pending" && task.state === "submitted") return 0;
-    if (task.state === "working") return 1;
-    if (task.direction === "outgoing" && task.state === "submitted") return 2;
-    return 3;
+    if (["working", "input_required", "auth_required"].includes(task.state)) return 1;
+    return 2;
   };
   const difference = rank(left) - rank(right);
   if (difference !== 0) return difference;

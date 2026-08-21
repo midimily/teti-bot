@@ -26,7 +26,8 @@ export const LONG_HORIZON_LIMITS = {
   maximumStages: 16,
   maximumArtifacts: 32,
   maximumAuditEvents: 256,
-  maximumInputs: 32,
+  /** Supplemental instructions after the initial stage. */
+  maximumInputs: 15,
   maximumInstructionBytes: 8 * 1024,
   maximumRenewals: 8,
   maximumRenewalMs: 24 * 60 * 60 * 1_000,
@@ -422,6 +423,8 @@ export interface CollaborationTaskSummary {
   peerTetiId: string;
   connectionRequestId?: string;
   capabilityId: string;
+  executionMode: "single_stage" | "long_horizon";
+  currentStageIndex: number | null;
   textPreview: string;
   imageCount: number;
   receivedImageCount: number;

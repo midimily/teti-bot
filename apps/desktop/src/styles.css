@@ -944,16 +944,55 @@ textarea {
 }
 
 .teti-task-structured-memory {
-  display: grid;
-  gap: 6px;
   padding: 10px;
   border: 1px solid color-mix(in srgb, var(--teti-accent) 24%, transparent);
   border-radius: 10px;
   background: color-mix(in srgb, var(--teti-accent) 7%, transparent);
 }
 
-.teti-task-structured-memory > small,
-.teti-task-structured-memory > p {
+.teti-task-structured-memory-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.teti-task-structured-memory-summary::-webkit-details-marker {
+  display: none;
+}
+
+.teti-task-structured-memory-summary > span:first-child {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.teti-task-structured-memory-summary small {
+  color: var(--teti-text-muted);
+  font-size: 8px;
+  font-weight: 400;
+}
+
+.teti-task-structured-memory-state {
+  flex: 0 0 auto;
+  padding: 3px 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--teti-accent) 12%, transparent);
+  color: var(--teti-text-secondary);
+  font-size: 8px;
+  font-weight: 600;
+}
+
+.teti-task-structured-memory-body {
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.teti-task-structured-memory-body > small,
+.teti-task-structured-memory-body > p {
   margin: 0;
   color: var(--teti-text-muted);
 }
@@ -984,7 +1023,7 @@ textarea {
 
 .teti-task-memory-inline-actions .teti-task-secondary,
 .teti-task-memory-inline-actions .teti-task-primary,
-.teti-task-structured-memory > .teti-task-secondary {
+.teti-task-structured-memory-body > .teti-task-secondary {
   min-height: 24px;
   padding: 4px 7px;
   font-size: 8px;
@@ -1195,6 +1234,21 @@ textarea {
   color: var(--teti-text-primary);
   font: inherit;
   font-size: 10px;
+}
+
+.teti-task-stage-input textarea:disabled {
+  cursor: not-allowed;
+  background: color-mix(in srgb, var(--teti-surface) 72%, transparent);
+  color: var(--teti-text-muted);
+}
+
+.teti-task-stage-limit {
+  margin: 0;
+  padding: 7px 8px;
+  border-radius: 8px;
+  background: rgba(255, 189, 63, 0.12);
+  color: var(--teti-text-secondary);
+  font-size: 9px;
 }
 
 .teti-task-stage-instruction {

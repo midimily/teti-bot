@@ -1017,6 +1017,59 @@ test("long-horizon collaboration survives Host restart, accepts input, and switc
   assert.equal(completed.peerLongHorizon?.finalArtifactId, completed.artifacts?.[1]?.artifactId);
 });
 
+test("ongoing collaboration permits exactly fifteen supplemental instructions for sixteen stages", async () => {
+  const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
+  const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
+  const directory = new StaticDirectory([toIdentity(accountA), toIdentity(accountB)]);
+  const relay = new MemoryChatmailRelay();
+  const executor = new LongHorizonTaskExecutor();
+  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), directory);
+  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), directory, undefined, {
+    taskExecutor: executor
+  });
+  const connection = await confirmPeers(runtimeA, runtimeB, "beta00002");
+  const sent = await runtimeA.sendTask({
+    connectionRequestId: connection.requestId,
+    taskId: "long-horizon-stage-limit-001",
+    capabilityId: "code-analysis",
+    text: "Run every bounded collaboration stage.",
+    ttlMs: 60_000,
+    executionMode: "long_horizon"
+  });
+  await runtimeB.poll();
+  await runtimeB.approveTask(sent.request.taskId);
+  await waitUntil(async () => (await runtimeB.getTask(sent.request.taskId)).state === "input_required");
+  await runtimeB.poll();
+
+  for (let nextStage = 2; nextStage <= 16; nextStage += 1) {
+    await waitUntil(async () => {
+      await runtimeA.poll();
+      return (await runtimeA.getTask(sent.request.taskId)).state === "input_required";
+    });
+    await runtimeA.submitTaskInput(sent.request.taskId, `Continue with stage ${nextStage}.`);
+    await runtimeB.poll();
+    await runtimeB.continueTask(sent.request.taskId);
+    await waitUntil(async () => {
+      const host = await runtimeB.getTask(sent.request.taskId);
+      return host.state === "input_required" && host.longHorizon?.currentStageIndex === nextStage;
+    });
+    await runtimeB.poll();
+  }
+
+  await waitUntil(async () => {
+    await runtimeA.poll();
+    const record = await runtimeA.getTask(sent.request.taskId);
+    return record.state === "input_required" && record.peerLongHorizon?.currentStageIndex === 16;
+  });
+  const requester = await runtimeA.getTask(sent.request.taskId);
+  assert.equal(requester.peerLongHorizon?.currentStageIndex, 16);
+  assert.equal(requester.artifacts?.length, 16);
+  await assert.rejects(
+    () => runtimeA.submitTaskInput(sent.request.taskId, "A seventeenth stage must not start."),
+    /supplemental-instruction limit/
+  );
+});
+
 test("only new long-horizon stages enter SQLite structured task memory", async () => {
   const root = await mkdtemp(join(tmpdir(), "teti-structured-task-memory-runtime-"));
   const memory = new SqliteStructuredTaskMemoryStore({

@@ -1707,6 +1707,12 @@ export class TaskTransportRuntime {
       await this.store.save(state);
       throw new TaskTransportRuntimeError("TASK_EXPIRED", "The collaboration continuation lease has expired.");
     }
+    if (record.peerLongHorizon.currentStageIndex - 1 >= LONG_HORIZON_LIMITS.maximumInputs) {
+      throw new TaskTransportRuntimeError(
+        "TASK_STAGE_LIMIT",
+        "The collaboration reached its bounded supplemental-instruction limit."
+      );
+    }
     if (record.inputPending) {
       throw new TaskTransportRuntimeError("TASK_INPUT_PENDING", "A supplemental instruction is already pending delivery.");
     }
@@ -1752,6 +1758,12 @@ export class TaskTransportRuntime {
       expireRecord(record, this.now().toISOString());
       await this.store.save(state);
       return;
+    }
+    if (session.currentStageIndex - 1 >= LONG_HORIZON_LIMITS.maximumInputs) {
+      throw new TaskTransportRuntimeError(
+        "TASK_STAGE_LIMIT",
+        "The collaboration reached its bounded supplemental-instruction limit."
+      );
     }
     if (payload.expectedStageIndex !== session.currentStageIndex) {
       throw new TaskTransportRuntimeError("TASK_INPUT_STAGE_CONFLICT", "Supplemental input targets a stale stage.");

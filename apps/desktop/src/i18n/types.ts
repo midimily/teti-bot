@@ -451,6 +451,9 @@ export interface AppMessages {
       readonly emptyNote: string;
       readonly composeAction: string;
       readonly imageProgress: string;
+      readonly singleStage: string;
+      readonly longHorizon: string;
+      readonly longHorizonStage: string;
     };
     readonly composer: {
       readonly peer: string;
@@ -542,6 +545,9 @@ export interface AppMessages {
       readonly structuredMemory: {
         readonly title: string;
         readonly automaticNote: string;
+        readonly collapsedOff: string;
+        readonly collapsedOn: string;
+        readonly collapsedUnavailable: string;
         readonly loading: string;
         readonly unavailable: string;
         readonly readOnly: string;
@@ -595,6 +601,8 @@ export interface AppMessages {
       readonly nextInstructionPlaceholder: string;
       readonly nextInstructionLabel: string;
       readonly sendInstruction: string;
+      readonly instructionPending: string;
+      readonly stageLimitReached: string;
       readonly pauseRequested: string;
       readonly pauseAfterStage: string;
       readonly supplementalInstruction: string;

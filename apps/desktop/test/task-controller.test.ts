@@ -14,7 +14,16 @@ import {
   resolveTaskRefreshDecision,
   type TaskClient
 } from "../src/tasks/controller.ts";
-import { formatTaskTimestamp, taskPeerHeading } from "../src/tasks/view.ts";
+import {
+  capabilityRequiresImageOutput,
+  formatTaskTimestamp,
+  taskArtifactsForDisplay,
+  taskModeLabel,
+  taskPeerHeading,
+  taskStatusLabel
+} from "../src/tasks/view.ts";
+import { compareTaskSummaryPresentation } from "../lifecycle-sidecar/runtime/tasks/read-model.ts";
+import type { PassportConnectionSnapshot } from "../../../core/passport/snapshot.ts";
 import type {
   DelegationTargetOption,
   DelegationTargetSelection
@@ -77,6 +86,60 @@ test("Task headings prefer the peer nickname and include an exact local timestam
   ), "Collaboration request sent to Air0727 [07/27/2026, 12:34:56]");
 });
 
+test("Task summaries distinguish initial acceptance from ongoing collaboration stages", () => {
+  const waiting = taskSummary("submitted");
+  assert.equal(taskModeLabel(waiting, chinese), "单次调用");
+  assert.equal(taskStatusLabel(waiting, chinese), "等待对端接受任务");
+  assert.equal(taskStatusLabel(waiting, english), "Awaiting peer task acceptance");
+
+  const stageTwo = {
+    ...taskSummary("input_required"),
+    executionMode: "long_horizon" as const,
+    currentStageIndex: 2
+  };
+  assert.equal(taskModeLabel(stageTwo, chinese), "持续协作 · 第 2 阶段");
+  assert.equal(taskModeLabel(stageTwo, english), "Ongoing collaboration · Stage 2");
+});
+
+test("requester ongoing-collaboration Artifacts display newest stage first", () => {
+  const record = longHorizonDetailRecord("artifact-ordering");
+  record.direction = "outgoing";
+  delete record.longHorizon;
+  record.artifacts = [1, 2, 3].map((stage) => ({
+    schemaVersion: 2 as const,
+    taskId: record.request.taskId,
+    artifactId: `artifact-stage-${stage}`,
+    parts: [{ kind: "text" as const, text: `Stage ${stage}` }],
+    createdAt: `2026-08-21T07:2${stage}:00.000Z`
+  }));
+
+  assert.deepEqual(
+    taskArtifactsForDisplay(record).map((artifact) => artifact.artifactId),
+    ["artifact-stage-3", "artifact-stage-2", "artifact-stage-1"]
+  );
+});
+
+test("a newly completed collaboration sorts ahead of an older outgoing acceptance wait", () => {
+  const oldSubmitted = {
+    ...taskSummary("submitted"),
+    taskId: "old-submitted",
+    updatedAt: "2026-08-21T07:03:03.000Z"
+  };
+  const newlyCompleted = {
+    ...taskSummary("completed"),
+    taskId: "newly-completed",
+    executionMode: "long_horizon" as const,
+    currentStageIndex: 2,
+    updatedAt: "2026-08-21T07:53:44.000Z"
+  };
+  assert.deepEqual(
+    [oldSubmitted, newlyCompleted]
+      .sort(compareTaskSummaryPresentation)
+      .map((task) => task.taskId),
+    ["newly-completed", "old-submitted"]
+  );
+});
+
 test("Task send eligibility follows the live draft instead of a stale render snapshot", () => {
   const controller = new TaskController({
     client: new RecordingTaskClient(),
@@ -92,6 +155,60 @@ test("Task send eligibility follows the live draft instead of a stale render sna
   controller.updateDraft({ capabilityId: "" });
   assert.equal(controller.canSendDraft(), false);
   controller.dispose();
+});
+
+test("merged Agent image modes do not disable long-horizon text capabilities", () => {
+  const connection = {
+    requestId: "connection-1",
+    connectionState: "Confirmed",
+    direction: "outgoing",
+    identity: { tetiId: "teti_remote001", address: "remote001@mail.seep.im" },
+    createdAt: "2026-08-21T00:00:00.000Z",
+    updatedAt: "2026-08-21T00:00:00.000Z",
+    lastSeen: null,
+    compatibility: "compatible",
+    passport: {
+      state: "fresh",
+      resources: [],
+      agents: [{
+        id: "codex",
+        name: "Codex",
+        capabilityIds: ["code-analysis", "image-editing"],
+        inputModes: ["text", "image"],
+        outputModes: ["text", "image"],
+        availability: "available",
+        observedAt: "2026-08-21T00:00:00.000Z"
+      }],
+      capabilities: [{
+        id: "code-analysis",
+        name: "Code analysis",
+        category: "coding",
+        description: "Analyze code.",
+        availability: "available",
+        observedAt: "2026-08-21T00:00:00.000Z"
+      }, {
+        id: "image-editing",
+        name: "Image editing",
+        category: "image",
+        description: "Edit an image.",
+        availability: "available",
+        observedAt: "2026-08-21T00:00:00.000Z"
+      }],
+      bindings: [{
+        capabilityId: "code-analysis",
+        agentIds: ["codex"],
+        resourceIds: []
+      }, {
+        capabilityId: "image-editing",
+        agentIds: ["codex"],
+        resourceIds: []
+      }],
+      computeOffers: []
+    }
+  } as PassportConnectionSnapshot;
+
+  assert.equal(capabilityRequiresImageOutput(connection, "code-analysis"), false);
+  assert.equal(capabilityRequiresImageOutput(connection, "image-editing"), true);
 });
 
 test("Task result images expose native open, reveal, and save actions", async () => {
@@ -166,11 +283,30 @@ test("Task UI keeps send state live, catalog-driven, and parents native image di
   assert.match(native, /save_task_result_image/);
   assert.match(view, /messages\.plannerDisabled/);
   assert.match(view, /messages\.approve/);
+  assert.match(view, /document\.createElement\("details"\)/);
+  assert.match(view, /input\.disabled = inputLocked/);
+  assert.match(view, /taskArtifactsForDisplay\(record\)/);
   assert.match(chineseCatalog, /Teti Host 委派计划/);
   assert.match(chineseCatalog, /Planner 关闭/);
   assert.match(chineseCatalog, /按计划委派/);
   assert.match(view, /content\.dataset\.scrollKey = "tasks-inbox"/);
   assert.match(view, /content\.dataset\.scrollKey = `task-detail:\$\{record\.request\.taskId\}`/);
+});
+
+test("Structured Memory advanced controls start collapsed and remain user-controlled", () => {
+  const controller = new TaskController({
+    client: new RecordingTaskClient(),
+    tauri: new RecordingTauriInvoker(),
+    notchWindow: { setMode: async () => undefined } as never,
+    onChange: () => undefined
+  });
+
+  assert.equal(controller.snapshot.structuredMemoryExpanded, false);
+  controller.setStructuredMemoryExpanded(true);
+  assert.equal(controller.snapshot.structuredMemoryExpanded, true);
+  controller.setStructuredMemoryExpanded(false);
+  assert.equal(controller.snapshot.structuredMemoryExpanded, false);
+  controller.dispose();
 });
 
 test("Task controller builds an explicit ordered Delegation selection and never invokes a Planner", async () => {
@@ -516,6 +652,53 @@ test("Task controller reschedules one timer when visible activity changes", asyn
 
   controller.close();
   assert.equal(delays.at(-1), TASK_REFRESH_DELAYS_MS.hiddenActive);
+  controller.dispose();
+});
+
+test("delayed stage-two completion refreshes the visible requester state", async () => {
+  const client = new RecordingTaskClient();
+  client.summary.tasks = [{
+    ...taskSummary("input_required"),
+    taskId: "delayed-stage-two",
+    executionMode: "long_horizon",
+    currentStageIndex: 2,
+    updatedAt: "2026-08-21T07:20:46.000Z"
+  }];
+  let scheduled: (() => void) | undefined;
+  let renders = 0;
+  const controller = new TaskController({
+    client,
+    tauri: new RecordingTauriInvoker(),
+    notchWindow: { setMode: async () => undefined } as never,
+    onChange: () => { renders += 1; },
+    schedule(callback) {
+      scheduled = callback;
+      return callback;
+    },
+    cancel(handle) {
+      if (scheduled === handle) scheduled = undefined;
+    }
+  });
+
+  controller.openInbox();
+  controller.start();
+  await flushMicrotasks();
+  assert.equal(controller.snapshot.summary.tasks[0]?.state, "input_required");
+  renders = 0;
+
+  client.summary.tasks = [{
+    ...client.summary.tasks[0]!,
+    state: "completed",
+    delivery: "acknowledged",
+    artifactCount: 2,
+    updatedAt: "2026-08-21T07:53:44.000Z"
+  }];
+  scheduled?.();
+  await flushMicrotasks();
+
+  assert.equal(controller.snapshot.summary.tasks[0]?.state, "completed");
+  assert.equal(controller.snapshot.summary.tasks[0]?.currentStageIndex, 2);
+  assert.equal(renders, 1, "the visible task list must render the semantic completion transition");
   controller.dispose();
 });
 
@@ -1084,6 +1267,8 @@ function taskSummary(
     direction: "outgoing",
     peerTetiId: "teti_beta00002",
     capabilityId: "code-analysis",
+    executionMode: "single_stage",
+    currentStageIndex: null,
     textPreview: "Adaptive refresh fixture",
     imageCount: 0,
     receivedImageCount: 0,

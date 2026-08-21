@@ -48,6 +48,8 @@ function snapshotFor(screen: "inbox" | "compose" | "detail"): TaskControllerSnap
           taskId: "task-pending-images",
           direction: "incoming",
           peerTetiId: peerConnection.identity.tetiId,
+          executionMode: "single_stage",
+          currentStageIndex: null,
           state: "submitted",
           approval: "pending",
           attachmentsReady: false,
@@ -62,6 +64,8 @@ function snapshotFor(screen: "inbox" | "compose" | "detail"): TaskControllerSnap
           taskId: "task-running",
           direction: "outgoing",
           peerTetiId: peerConnection.identity.tetiId,
+          executionMode: "long_horizon",
+          currentStageIndex: 2,
           state: "working",
           approval: "approved_once",
           attachmentsReady: true,
@@ -76,6 +80,7 @@ function snapshotFor(screen: "inbox" | "compose" | "detail"): TaskControllerSnap
     },
     selectedTask: screen === "detail" ? detailRecord : null,
     selectedExecution: screen === "detail" ? execution : null,
+    structuredMemoryExpanded: false,
     delegationTargets: screen === "detail" ? delegationTargets : [],
     delegationSelections: screen === "detail" ? delegationTargets.slice(0, 2) : [],
     selectedImagePaths: {},
@@ -118,7 +123,8 @@ function mockController(snapshot: TaskControllerSnapshot): TaskController {
     setDelegationStep() {},
     removeDelegationStep() {},
     addDelegationStep() {},
-    approveDelegation: async () => undefined
+    approveDelegation: async () => undefined,
+    setStructuredMemoryExpanded() {}
   } as unknown as TaskController;
 }
 

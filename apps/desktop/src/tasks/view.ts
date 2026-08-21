@@ -1,6 +1,12 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { ArrowLeft, Download, ExternalLink, FolderOpen, ImagePlus, Plus, X, createElement } from "lucide";
-import { taskArtifactImages, taskInputImages, taskInputText } from "../../../../core/task/types.ts";
+import {
+  taskArtifactImages,
+  taskInputImages,
+  taskInputText,
+  type CollaborationTaskArtifact
+} from "../../../../core/task/types.ts";
+import { LONG_HORIZON_LIMITS } from "../../../../core/task/transport.ts";
 import type { PassportConnectionSnapshot } from "../../../../core/passport/snapshot.ts";
 import type {
   CallablePassportAgent,
@@ -146,7 +152,7 @@ function createInbox(
           total: i18n.formatNumber(task.imageCount)
         })} · `
       : "";
-    meta.textContent = `${imageProgress}${taskStatusLabel(task, i18n)}`;
+    meta.textContent = `${imageProgress}${taskModeLabel(task, i18n)} · ${taskStatusLabel(task, i18n)}`;
     row.append(copy, meta);
     row.addEventListener("click", () => void controller.select(task.taskId));
     list.append(row);
@@ -238,8 +244,8 @@ function createComposer(
 
   const supportsImages = snapshot.draft.executionMode !== "long_horizon" && Boolean(selectedPeer && selectedCapability
     && capabilityAcceptsImages(selectedPeer, selectedCapability.id));
-  const returnsImages = Boolean(selectedPeer && selectedCapability
-    && capabilityReturnsImages(selectedPeer, selectedCapability.id));
+  const requiresImageOutput = Boolean(selectedPeer && selectedCapability
+    && capabilityRequiresImageOutput(selectedPeer, selectedCapability.id));
   const attachments = document.createElement("div");
   attachments.className = "teti-task-attachments";
   for (const image of snapshot.draft.images) {
@@ -269,7 +275,7 @@ function createComposer(
     ? messages.hints.longHorizon
     : selectedOffer?.compute
     ? messages.hints.localCompute
-    : returnsImages
+    : requiresImageOutput
     ? supportsImages ? messages.hints.imageResultWithInput : messages.hints.imageResult
     : supportsImages ? messages.hints.images : messages.hints.textOnly;
   const send = document.createElement("button");
@@ -280,12 +286,12 @@ function createComposer(
     || !selectedPeer
     || !selectedCapability
     || !snapshot.draft.text.trim()
-    || (snapshot.draft.executionMode === "long_horizon" && returnsImages)
+    || (snapshot.draft.executionMode === "long_horizon" && requiresImageOutput)
     || (snapshot.draft.images.length > 0 && !supportsImages);
   const syncSendState = (): void => {
     controller.updateDraft({ text: prompt.value });
     send.disabled = !controller.canSendDraft()
-      || (snapshot.draft.executionMode === "long_horizon" && returnsImages)
+      || (snapshot.draft.executionMode === "long_horizon" && requiresImageOutput)
       || (snapshot.draft.images.length > 0 && !supportsImages);
   };
   prompt.addEventListener("input", syncSendState);
@@ -425,7 +431,11 @@ function createTaskDetail(
     content.append(scope);
   }
 
-  for (const [artifactIndex, artifact] of (record.artifacts ?? []).entries()) {
+  const sourceArtifacts = record.artifacts ?? [];
+  for (const artifact of taskArtifactsForDisplay(record)) {
+    const artifactIndex = sourceArtifacts.findIndex((candidate) =>
+      candidate.artifactId === artifact.artifactId
+    );
     const card = document.createElement("section");
     card.className = "teti-task-card teti-task-artifact";
     const title = document.createElement("strong");
@@ -640,21 +650,35 @@ function createLongHorizonSection(
   }
 
   if (record.direction === "outgoing" && record.state === "input_required") {
-    const form = document.createElement("form");
-    form.className = "teti-task-stage-input";
-    const input = document.createElement("textarea");
-    input.maxLength = 6_000;
-    input.placeholder = messages.nextInstructionPlaceholder;
-    input.setAttribute("aria-label", messages.nextInstructionLabel);
-    const submit = actionButton(messages.sendInstruction, "primary", () => undefined);
-    submit.type = "submit";
-    submit.disabled = snapshot.busy || Boolean(record.inputPending);
-    form.addEventListener("submit", (event) => {
-      event.preventDefault();
-      if (input.value.trim()) void controller.submitInput(input.value);
-    });
-    form.append(input, submit);
-    section.append(form);
+    if ((record.peerLongHorizon?.currentStageIndex ?? 0) >= LONG_HORIZON_LIMITS.maximumStages) {
+      const limit = document.createElement("p");
+      limit.className = "teti-task-stage-limit";
+      limit.textContent = messages.stageLimitReached;
+      section.append(limit);
+    } else {
+      const form = document.createElement("form");
+      form.className = "teti-task-stage-input";
+      const input = document.createElement("textarea");
+      const inputLocked = snapshot.busy || Boolean(record.inputPending);
+      input.maxLength = 6_000;
+      input.placeholder = messages.nextInstructionPlaceholder;
+      input.setAttribute("aria-label", messages.nextInstructionLabel);
+      input.value = record.inputPending?.instruction ?? "";
+      input.disabled = inputLocked;
+      const submit = actionButton(
+        record.inputPending ? messages.instructionPending : messages.sendInstruction,
+        "primary",
+        () => undefined
+      );
+      submit.type = "submit";
+      submit.disabled = inputLocked;
+      form.addEventListener("submit", (event) => {
+        event.preventDefault();
+        if (!input.disabled && input.value.trim()) void controller.submitInput(input.value);
+      });
+      form.append(input, submit);
+      section.append(form);
+    }
   }
 
   if (record.direction === "incoming" && local && !delegation) {
@@ -744,12 +768,30 @@ function createStructuredTaskMemoryStatus(
   const messages = i18n.messages.tasks.longHorizon.structuredMemory;
   const memory = snapshot.selectedStructuredMemory;
   const preview = snapshot.structuredMemoryPreview;
-  const container = document.createElement("div");
+  const container = document.createElement("details");
   container.className = "teti-task-structured-memory";
+  container.open = snapshot.structuredMemoryExpanded;
+  const disclosure = document.createElement("summary");
+  disclosure.className = "teti-task-structured-memory-summary";
+  const disclosureCopy = document.createElement("span");
   const title = document.createElement("strong");
   title.textContent = messages.title;
   const note = document.createElement("small");
   note.textContent = messages.automaticNote;
+  disclosureCopy.append(title, note);
+  const disclosureState = document.createElement("span");
+  disclosureState.className = "teti-task-structured-memory-state";
+  disclosureState.textContent = memory?.status === "unavailable"
+    ? messages.collapsedUnavailable
+    : snapshot.structuredMemoryUseNextExecution && preview
+      ? formatMessage(messages.collapsedOn, { count: i18n.formatNumber(preview.candidateCount) })
+      : messages.collapsedOff;
+  disclosure.append(disclosureCopy, disclosureState);
+  container.addEventListener("toggle", () => {
+    controller.setStructuredMemoryExpanded(container.open);
+  });
+  const body = document.createElement("div");
+  body.className = "teti-task-structured-memory-body";
   const state = document.createElement("p");
   state.setAttribute("role", "status");
   state.textContent = !memory
@@ -759,7 +801,8 @@ function createStructuredTaskMemoryStatus(
       : memory.status === "read_only"
         ? formatMessage(messages.readOnly, { count: i18n.formatNumber(memory.recordCount) })
         : formatMessage(messages.ready, { count: i18n.formatNumber(memory.recordCount) });
-  container.append(title, note, state);
+  body.append(state);
+  container.append(disclosure, body);
   if (memory && memory.status !== "unavailable" && memory.records.length > 0) {
     const records = document.createElement("ol");
     records.className = "teti-task-stage-list teti-task-memory-sources";
@@ -796,7 +839,7 @@ function createStructuredTaskMemoryStatus(
       item.append(copy, actions);
       records.append(item);
     }
-    container.append(records);
+    body.append(records);
   }
 
   if (preview) {
@@ -832,15 +875,15 @@ function createStructuredTaskMemoryStatus(
       row.append(checkbox, copy);
       scopes.append(row);
     }
-    container.append(scopesTitle, scopes);
+    body.append(scopesTitle, scopes);
 
     const candidatesTitle = document.createElement("strong");
     candidatesTitle.textContent = messages.candidatesTitle;
-    container.append(candidatesTitle);
+    body.append(candidatesTitle);
     if (preview.candidates.length === 0) {
       const empty = document.createElement("p");
       empty.textContent = messages.candidatesEmpty;
-      container.append(empty);
+      body.append(empty);
     } else {
       const candidates = document.createElement("ol");
       candidates.className = "teti-task-memory-candidates";
@@ -881,7 +924,7 @@ function createStructuredTaskMemoryStatus(
         row.append(selection, actions);
         candidates.append(row);
       }
-      container.append(candidates);
+      body.append(candidates);
     }
     const previewSummary = document.createElement("p");
     previewSummary.textContent = formatMessage(messages.previewSummary, {
@@ -909,7 +952,7 @@ function createStructuredTaskMemoryStatus(
       void controller.refreshStructuredMemoryPreview(preview.childAgentId);
     });
     refresh.disabled = snapshot.structuredMemoryBusy;
-    container.append(previewSummary, injection, refresh);
+    body.append(previewSummary, injection, refresh);
   }
 
   if (memory?.latestInjectionManifest) {
@@ -917,7 +960,7 @@ function createStructuredTaskMemoryStatus(
     latest.textContent = formatMessage(messages.lastInjection, {
       count: i18n.formatNumber(memory.latestInjectionManifest.candidateCount)
     });
-    container.append(latest);
+    body.append(latest);
   }
 
   if (snapshot.structuredMemoryEditor) {
@@ -1002,7 +1045,7 @@ function createStructuredTaskMemoryStatus(
       event.preventDefault();
       void controller.saveStructuredMemoryEditor();
     });
-    container.append(form);
+    body.append(form);
   }
 
   if (snapshot.structuredMemoryDeleteConfirmationId) {
@@ -1022,14 +1065,14 @@ function createStructuredTaskMemoryStatus(
     confirm.disabled = snapshot.structuredMemoryBusy;
     actions.append(cancel, confirm);
     confirmation.append(warning, actions);
-    container.append(confirmation);
+    body.append(confirmation);
   }
 
   if (snapshot.structuredMemoryError) {
     const error = document.createElement("p");
     error.className = "teti-memory-error";
     error.textContent = messages.errors[snapshot.structuredMemoryError];
-    container.append(error);
+    body.append(error);
   }
   return container;
 }
@@ -1354,7 +1397,12 @@ function capabilityAcceptsImages(connection: PassportConnectionSnapshot, capabil
   );
 }
 
-function capabilityReturnsImages(connection: PassportConnectionSnapshot, capabilityId: string): boolean {
+export function capabilityRequiresImageOutput(
+  connection: PassportConnectionSnapshot,
+  capabilityId: string
+): boolean {
+  const capability = connection.passport.capabilities.find((candidate) => candidate.id === capabilityId);
+  if (capability?.category === "image") return true;
   const agentIds = new Set(connection.passport.bindings
     .filter((binding) => binding.capabilityId === capabilityId)
     .flatMap((binding) => binding.agentIds));
@@ -1363,6 +1411,7 @@ function capabilityReturnsImages(connection: PassportConnectionSnapshot, capabil
     && agentIds.has(agent.id)
     && agent.capabilityIds.includes(capabilityId)
     && agent.outputModes.includes("image")
+    && !agent.outputModes.includes("text")
   );
 }
 
@@ -1527,6 +1576,28 @@ export function taskStatusLabel(
     return messages.resultReceiving;
   }
   return stateLabel(task.state, i18n);
+}
+
+export function taskModeLabel(
+  task: TaskControllerSnapshot["summary"]["tasks"][number],
+  i18n: DesktopI18n
+): string {
+  const messages = i18n.messages.tasks.inbox;
+  if (task.executionMode !== "long_horizon") return messages.singleStage;
+  return task.currentStageIndex && task.currentStageIndex > 0
+    ? formatMessage(messages.longHorizonStage, {
+        stage: i18n.formatNumber(task.currentStageIndex)
+      })
+    : messages.longHorizon;
+}
+
+export function taskArtifactsForDisplay(
+  record: NonNullable<TaskControllerSnapshot["selectedTask"]>
+): CollaborationTaskArtifact[] {
+  const artifacts = [...(record.artifacts ?? [])];
+  return record.direction === "outgoing" && record.request.executionMode === "long_horizon"
+    ? artifacts.reverse()
+    : artifacts;
 }
 
 export function detailStatusLabel(
