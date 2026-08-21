@@ -1,5 +1,6 @@
 import { TetiConnectionState, type TetiConnectionRecord } from "../../../../../core/connection/types.ts";
 import {
+  latestAvailableLongHorizonStageResultIndex,
   type CollaborationTaskSummary,
   type CollaborationTaskSummarySnapshot,
   type CollaborationTaskTransportRecord,
@@ -73,6 +74,7 @@ export class TaskReadModel {
         && task.approval === "pending"
         && task.state === "submitted"
       ).length,
+      unreadStageResultCount: tasks.filter((task) => task.hasUnreadStageResult).length,
       tasks: tasks.map((summary) => {
         const connectionRequestId = confirmedByPeer.get(summary.peerTetiId);
         return {
@@ -157,6 +159,7 @@ export class PublishingTaskTransportStore implements TaskTransportStore {
 }
 
 function projectSummary(record: CollaborationTaskTransportRecord): CachedTaskSummary {
+  const latestStageResultIndex = latestAvailableLongHorizonStageResultIndex(record);
   return {
     taskId: record.request.taskId,
     direction: record.direction,
@@ -178,6 +181,7 @@ function projectSummary(record: CollaborationTaskTransportRecord): CachedTaskSum
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
     expiresAt: effectiveTaskExpiry(record),
+    hasUnreadStageResult: latestStageResultIndex > (record.viewedStageResultIndex ?? 0),
     ...(record.safeErrorCode ? { safeErrorCode: record.safeErrorCode } : {})
   };
 }

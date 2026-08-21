@@ -490,6 +490,10 @@ export interface AppMessages {
         readonly loginTitle: string;
         readonly agentTitle: string;
         readonly onceTitle: string;
+        readonly ongoingLoginTitle: string;
+        readonly ongoingAgentTitle: string;
+        readonly ongoingTitle: string;
+        readonly ongoingDetail: string;
         readonly loginDetail: string;
         readonly localComputeDetail: string;
         readonly osaurusDetail: string;
@@ -508,6 +512,8 @@ export interface AppMessages {
         readonly reject: string;
         readonly retryAfterLogin: string;
         readonly allowOnce: string;
+        readonly retryOngoingAfterLogin: string;
+        readonly allowOngoing: string;
         readonly resumeCheckpoint: string;
         readonly stop: string;
         readonly cancel: string;
@@ -552,6 +558,7 @@ export interface AppMessages {
         readonly unavailable: string;
         readonly readOnly: string;
         readonly ready: string;
+        readonly currentTaskOnly: string;
         readonly stage: string;
         readonly prepare: string;
         readonly edit: string;
@@ -610,6 +617,9 @@ export interface AppMessages {
       readonly startNextStage: string;
       readonly acceptCurrentResult: string;
       readonly renewOneHour: string;
+      readonly renewing: string;
+      readonly renewedUntil: string;
+      readonly renewFailed: string;
       readonly recoveryAudit: PluralMessages;
       readonly delegationAudit: PluralMessages;
       readonly auditStage: string;

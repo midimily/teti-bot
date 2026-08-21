@@ -2,6 +2,7 @@ import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { isCanonicalTetiPublicId } from "../../../../../core/identity/public-id.ts";
 import {
+  LONG_HORIZON_LIMITS,
   MAX_TASK_TRANSPORT_RECORDS,
   TETI_TASK_TRANSPORT_SCHEMA_VERSION,
   TETI_TASK_TRANSPORT_STORE_SCHEMA_VERSION,
@@ -166,6 +167,7 @@ function validateRecord(value: unknown): asserts value is CollaborationTaskTrans
     "peerArtifactMetadata",
     "inputPending",
     "inputSentAt",
+    "viewedStageResultIndex",
     "safeErrorCode"
   ], "Task transport record");
   if (value.direction !== "incoming" && value.direction !== "outgoing") {
@@ -311,6 +313,12 @@ function validateRecord(value: unknown): asserts value is CollaborationTaskTrans
   }
   if (value.inputPending !== undefined) validateTaskInputPayload(value.inputPending);
   if (value.inputSentAt !== undefined) requireTimestamp(value.inputSentAt, "Task input sentAt");
+  if (value.viewedStageResultIndex !== undefined
+    && (!Number.isSafeInteger(value.viewedStageResultIndex)
+      || Number(value.viewedStageResultIndex) < 0
+      || Number(value.viewedStageResultIndex) > LONG_HORIZON_LIMITS.maximumStages)) {
+    throw new Error("Teti Task viewed stage result index is invalid.");
+  }
   if (value.safeErrorCode !== undefined
     && (typeof value.safeErrorCode !== "string" || !/^[A-Z0-9_]{1,64}$/.test(value.safeErrorCode))) {
     throw new Error("Teti Task transport safe error code is invalid.");

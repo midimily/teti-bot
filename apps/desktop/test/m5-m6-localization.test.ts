@@ -46,9 +46,9 @@ test("Task execution and Runtime progress map semantic state instead of receiver
 test("Task dates, counts, plurals, native dialogs, and safe errors expose both catalogs", () => {
   assert.equal(formatTaskTimestamp(localTaskTimestamp, english), "07/27/2026, 12:34:56");
   assert.equal(formatTaskTimestamp(localTaskTimestamp, chinese), "2026/07/27 12:34:56");
-  assert.equal(english.formatPlural(1, english.messages.tasks.header.pending), "1 awaiting confirmation");
-  assert.equal(english.formatPlural(2, english.messages.tasks.header.pending), "2 awaiting confirmation");
-  assert.equal(chinese.formatPlural(2, chinese.messages.tasks.header.pending), "2 个待确认");
+  assert.equal(english.formatPlural(1, english.messages.tasks.header.pending), "1 task has an update");
+  assert.equal(english.formatPlural(2, english.messages.tasks.header.pending), "2 tasks have updates");
+  assert.equal(chinese.formatPlural(2, chinese.messages.tasks.header.pending), "2 个任务有新动态");
   assert.equal(taskErrorMessage("operation_failed", english), "This task can’t be processed right now.");
   assert.equal(taskErrorMessage("operation_failed", chinese), "暂时无法处理这个任务。");
   assert.deepEqual(english.messages.nativeDialogs.taskImages, {

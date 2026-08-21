@@ -10,6 +10,7 @@ import { isCanonicalTetiPublicId } from "../../../../../core/identity/public-id.
 import type { TetiApplicationEnvelope } from "../../../../../core/protocol/types.ts";
 import {
   DEFAULT_TASK_REQUEST_TTL_MS,
+  latestAvailableLongHorizonStageResultIndex,
   LONG_HORIZON_LIMITS,
   MAX_TASK_CLOCK_SKEW_MS,
   MAX_TASK_TRANSPORT_RECORDS,
@@ -255,6 +256,21 @@ export class TaskTransportRuntime {
     const record = await this.readModel.get(taskId);
     if (!record) throw new TaskTransportRuntimeError("TASK_NOT_FOUND", "Task was not found.");
     return record;
+  }
+
+  async markStageResultsViewed(taskId: string): Promise<CollaborationTaskTransportRecord> {
+    if (!SAFE_ID_PATTERN.test(taskId)) {
+      throw new TaskTransportRuntimeError("TASK_INPUT_INVALID", "Task ID is invalid.");
+    }
+    const state = await this.store.load();
+    const record = state.records.find((candidate) => candidate.request.taskId === taskId);
+    if (!record) throw new TaskTransportRuntimeError("TASK_NOT_FOUND", "Task was not found.");
+    const latestStageResultIndex = latestAvailableLongHorizonStageResultIndex(record);
+    if (latestStageResultIndex > (record.viewedStageResultIndex ?? 0)) {
+      record.viewedStageResultIndex = latestStageResultIndex;
+      await this.store.save(state);
+    }
+    return structuredClone(record);
   }
 
   async getLongHorizonMemory(taskId: string): Promise<LongHorizonTaskMemorySnapshot> {
@@ -1940,9 +1956,13 @@ export class TaskTransportRuntime {
       throw new TaskTransportRuntimeError("TASK_RENEWAL_LIMIT", "Task renewal exceeds the bounded policy.");
     }
     const absoluteLimit = Date.parse(record.request.createdAt) + LONG_HORIZON_LIMITS.maximumLifetimeMs;
-    const nextExpiry = Math.min(this.now().getTime() + ttlMs, absoluteLimit);
-    if (nextExpiry <= Date.parse(session.continuationExpiresAt)) {
-      throw new TaskTransportRuntimeError("TASK_RENEWAL_LIMIT", "Task renewal does not extend the current lease.");
+    const currentExpiry = Date.parse(session.continuationExpiresAt);
+    const nextExpiry = Math.max(this.now().getTime(), currentExpiry) + ttlMs;
+    if (nextExpiry > absoluteLimit) {
+      throw new TaskTransportRuntimeError(
+        "TASK_RENEWAL_LIMIT",
+        "Task renewal would exceed the bounded collaboration lifetime."
+      );
     }
     const now = this.now().toISOString();
     session.continuationExpiresAt = new Date(nextExpiry).toISOString();

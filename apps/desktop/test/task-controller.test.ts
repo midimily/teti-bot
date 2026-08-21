@@ -286,6 +286,13 @@ test("Task UI keeps send state live, catalog-driven, and parents native image di
   assert.match(view, /document\.createElement\("details"\)/);
   assert.match(view, /input\.disabled = inputLocked/);
   assert.match(view, /taskArtifactsForDisplay\(record\)/);
+  assert.doesNotMatch(view, /setStructuredMemoryAuthorization|setStructuredMemoryUseNextExecution|toggleStructuredMemoryExclusion/);
+  assert.match(chineseCatalog, /已自动开启，下一阶段会参考当前任务已完成的阶段结果/);
+  assert.match(chineseCatalog, /接受持续协作/);
+  assert.match(englishCatalog, /Accept ongoing collaboration/);
+  assert.match(view, /record\.request\.executionMode === "long_horizon"/);
+  assert.match(view, /messages\.actions\.allowOngoing/);
+  assert.match(chineseCatalog, /新的截止时间/);
   assert.match(chineseCatalog, /Teti Host 委派计划/);
   assert.match(chineseCatalog, /Planner 关闭/);
   assert.match(chineseCatalog, /按计划委派/);
@@ -306,6 +313,34 @@ test("Structured Memory advanced controls start collapsed and remain user-contro
   assert.equal(controller.snapshot.structuredMemoryExpanded, true);
   controller.setStructuredMemoryExpanded(false);
   assert.equal(controller.snapshot.structuredMemoryExpanded, false);
+  controller.dispose();
+});
+
+test("ongoing-collaboration renewal reports the new deadline and a visible failure state", async () => {
+  const client = new RecordingTaskClient();
+  const record = longHorizonDetailRecord("task-renewal-feedback");
+  record.state = "input_required";
+  record.approval = "consumed";
+  record.longHorizon!.phase = "input_required";
+  record.longHorizon!.continuationExpiresAt = "2026-08-21T12:00:00.000Z";
+  client.seed(record);
+  const controller = new TaskController({
+    client,
+    tauri: new RecordingTauriInvoker(),
+    notchWindow: { setMode: async () => undefined } as never,
+    onChange: () => undefined
+  });
+
+  await controller.select(record.request.taskId);
+  await controller.renew();
+  assert.deepEqual(controller.snapshot.renewalStatus, {
+    state: "success",
+    expiresAt: "2026-08-21T13:00:00.000Z"
+  });
+
+  client.renewalFailure = true;
+  await controller.renew();
+  assert.deepEqual(controller.snapshot.renewalStatus, { state: "error" });
   controller.dispose();
 });
 
@@ -911,6 +946,7 @@ class RecordingTaskClient implements TaskClient {
   };
   readonly sent: SendCollaborationTaskInput[] = [];
   readonly approvedDelegations: DelegationTargetSelection[][] = [];
+  renewalFailure = false;
   readonly availableDelegationTargets: DelegationTargetOption[] = [
     {
       childAgentId: "osaurus-runtime",
@@ -1013,6 +1049,14 @@ class RecordingTaskClient implements TaskClient {
   }
   async reject(): Promise<CollaborationTaskTransportRecord> { return this.get(); }
   async cancel(): Promise<CollaborationTaskTransportRecord> { return this.get(); }
+  async renew(_taskId: string, ttlMs: number): Promise<CollaborationTaskTransportRecord> {
+    if (this.renewalFailure) throw new Error("TASK_RENEWAL_LIMIT");
+    if (!this.record?.longHorizon) throw new Error("TASK_RENEW_UNAVAILABLE");
+    this.record.longHorizon.continuationExpiresAt = new Date(
+      Date.parse(this.record.longHorizon.continuationExpiresAt) + ttlMs
+    ).toISOString();
+    return structuredClone(this.record);
+  }
 }
 
 class MemoryPreviewTaskClient extends RecordingTaskClient {

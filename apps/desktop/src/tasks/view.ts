@@ -28,10 +28,6 @@ import type {
   DelegationPlanState,
   DelegationStepState
 } from "../../../../core/delegation/types.ts";
-import type {
-  StructuredMemoryKind,
-  StructuredMemoryScope
-} from "../../../../core/memory/context-injection.ts";
 
 export function createTaskWorkspace(
   controller: TaskController,
@@ -89,8 +85,10 @@ function createTaskHeader(
   heading.setAttribute("aria-level", "1");
   heading.textContent = messages[snapshot.screen];
   const count = document.createElement("span");
-  count.textContent = snapshot.summary.pendingIncomingCount > 0
-    ? i18n.formatPlural(snapshot.summary.pendingIncomingCount, messages.pending)
+  const attentionCount = snapshot.summary.pendingIncomingCount
+    + (snapshot.summary.unreadStageResultCount ?? 0);
+  count.textContent = attentionCount > 0
+    ? i18n.formatPlural(attentionCount, messages.pending)
     : messages.semanticCaption;
   title.append(heading, count);
   const compose = iconButton(Plus, messages.newTask, () => controller.openCompose());
@@ -130,7 +128,7 @@ function createInbox(
   for (const task of snapshot.summary.tasks) {
     const row = document.createElement("button");
     row.type = "button";
-    row.className = `teti-task-row is-${task.state}${task.direction === "incoming" && task.approval === "pending" ? " is-awaiting-decision" : ""}`;
+    row.className = `teti-task-row is-${task.state}${task.direction === "incoming" && task.approval === "pending" ? " is-awaiting-decision" : ""}${task.hasUnreadStageResult ? " is-unread-stage-result" : ""}`;
     const copy = document.createElement("span");
     copy.className = "teti-task-row-copy";
     const peer = document.createElement("strong");
@@ -412,17 +410,29 @@ function createTaskDetail(
   if (record.direction === "incoming" && record.approval === "pending") {
     const scope = document.createElement("section");
     scope.className = "teti-task-scope";
+    const ongoing = record.request.executionMode === "long_horizon";
     const executionAgent = localAgentForTask(localPassport, record.request.capabilityId, images.length > 0);
     const scopeTitle = document.createElement("strong");
     scopeTitle.textContent = record.state === "auth_required"
-      ? messages.authorization.loginTitle
+      ? ongoing
+        ? messages.authorization.ongoingLoginTitle
+        : messages.authorization.loginTitle
       : executionAgent
-        ? formatMessage(messages.authorization.agentTitle, { agent: executionAgent.name })
-        : messages.authorization.onceTitle;
+        ? formatMessage(
+            ongoing
+              ? messages.authorization.ongoingAgentTitle
+              : messages.authorization.agentTitle,
+            { agent: executionAgent.name }
+          )
+        : ongoing
+          ? messages.authorization.ongoingTitle
+          : messages.authorization.onceTitle;
     const scopeDetail = document.createElement("span");
     scopeDetail.textContent = record.state === "auth_required"
       ? messages.authorization.loginDetail
-      : record.request.offerId === "local.compute.general-text-assistance.v1"
+      : ongoing
+        ? messages.authorization.ongoingDetail
+        : record.request.offerId === "local.compute.general-text-assistance.v1"
         ? messages.authorization.localComputeDetail
         : record.request.offerId === "local.agent.osaurus-native-text.v1"
           ? messages.authorization.osaurusDetail
@@ -497,11 +507,16 @@ function createTaskDetail(
   const actions = document.createElement("div");
   actions.className = "teti-task-actionbar is-detail";
   if (record.direction === "incoming" && record.approval === "pending") {
+    const ongoing = record.request.executionMode === "long_horizon";
     const reject = actionButton(messages.actions.reject, "secondary", () => void controller.reject());
     const allow = actionButton(
       record.state === "auth_required"
-        ? messages.actions.retryAfterLogin
-        : messages.actions.allowOnce,
+        ? ongoing
+          ? messages.actions.retryOngoingAfterLogin
+          : messages.actions.retryAfterLogin
+        : ongoing
+          ? messages.actions.allowOngoing
+          : messages.actions.allowOnce,
       "primary",
       () => void controller.approve()
     );
@@ -714,9 +729,30 @@ function createLongHorizonSection(
       ));
     }
     if (phase === "input_required" || phase === "paused") {
-      controls.append(actionButton(messages.renewOneHour, "secondary", () => void controller.renew()));
+      const renew = actionButton(
+        snapshot.renewalStatus?.state === "pending" ? messages.renewing : messages.renewOneHour,
+        "secondary",
+        () => void controller.renew()
+      );
+      renew.disabled = snapshot.busy;
+      controls.append(renew);
     }
     section.append(controls);
+    if (snapshot.renewalStatus?.state === "success" && snapshot.renewalStatus.expiresAt) {
+      const renewal = document.createElement("p");
+      renewal.className = "teti-task-renewal-status is-success";
+      renewal.setAttribute("role", "status");
+      renewal.textContent = formatMessage(messages.renewedUntil, {
+        date: formatShortTimestamp(snapshot.renewalStatus.expiresAt, i18n)
+      });
+      section.append(renewal);
+    } else if (snapshot.renewalStatus?.state === "error") {
+      const renewal = document.createElement("p");
+      renewal.className = "teti-task-renewal-status is-error";
+      renewal.setAttribute("role", "alert");
+      renewal.textContent = messages.renewFailed;
+      section.append(renewal);
+    }
 
     const audit = document.createElement("details");
     audit.className = "teti-task-audit";
@@ -767,7 +803,6 @@ function createStructuredTaskMemoryStatus(
 ): HTMLElement {
   const messages = i18n.messages.tasks.longHorizon.structuredMemory;
   const memory = snapshot.selectedStructuredMemory;
-  const preview = snapshot.structuredMemoryPreview;
   const container = document.createElement("details");
   container.className = "teti-task-structured-memory";
   container.open = snapshot.structuredMemoryExpanded;
@@ -783,9 +818,9 @@ function createStructuredTaskMemoryStatus(
   disclosureState.className = "teti-task-structured-memory-state";
   disclosureState.textContent = memory?.status === "unavailable"
     ? messages.collapsedUnavailable
-    : snapshot.structuredMemoryUseNextExecution && preview
-      ? formatMessage(messages.collapsedOn, { count: i18n.formatNumber(preview.candidateCount) })
-      : messages.collapsedOff;
+    : formatMessage(messages.collapsedOn, {
+        count: i18n.formatNumber(memory?.recordCount ?? 0)
+      });
   disclosure.append(disclosureCopy, disclosureState);
   container.addEventListener("toggle", () => {
     controller.setStructuredMemoryExpanded(container.open);
@@ -802,6 +837,10 @@ function createStructuredTaskMemoryStatus(
         ? formatMessage(messages.readOnly, { count: i18n.formatNumber(memory.recordCount) })
         : formatMessage(messages.ready, { count: i18n.formatNumber(memory.recordCount) });
   body.append(state);
+  const boundary = document.createElement("p");
+  boundary.className = "teti-task-memory-boundary";
+  boundary.textContent = messages.currentTaskOnly;
+  body.append(boundary);
   container.append(disclosure, body);
   if (memory && memory.status !== "unavailable" && memory.records.length > 0) {
     const records = document.createElement("ol");
@@ -817,262 +856,10 @@ function createStructuredTaskMemoryStatus(
       const sourcePreview = document.createElement("span");
       sourcePreview.textContent = record.contentPreview;
       copy.append(label, sourcePreview);
-      const confirmed = memory.items?.find((candidate) =>
-        candidate.sourceMemoryId === record.memoryId
-      );
-      const actions = document.createElement("span");
-      actions.className = "teti-task-memory-inline-actions";
-      const prepare = actionButton(
-        confirmed ? messages.edit : messages.prepare,
-        "secondary",
-        () => void controller.openStructuredMemorySourceEditor(record.memoryId)
-      );
-      prepare.disabled = snapshot.structuredMemoryBusy || memory.status === "read_only";
-      actions.append(prepare);
-      if (confirmed) {
-        const remove = actionButton(messages.delete, "secondary", () => {
-          controller.requestStructuredMemoryDelete(confirmed.memoryId);
-        });
-        remove.disabled = snapshot.structuredMemoryBusy || memory.status === "read_only";
-        actions.append(remove);
-      }
-      item.append(copy, actions);
+      item.append(copy);
       records.append(item);
     }
     body.append(records);
-  }
-
-  if (preview) {
-    const scopesTitle = document.createElement("strong");
-    scopesTitle.textContent = messages.scopesTitle;
-    const scopes = document.createElement("div");
-    scopes.className = "teti-task-memory-scopes";
-    for (const authorization of preview.scopeAuthorizations) {
-      const row = document.createElement("label");
-      row.className = "teti-task-memory-scope-control";
-      const checkbox = document.createElement("input");
-      checkbox.type = "checkbox";
-      checkbox.checked = authorization.enabled;
-      checkbox.disabled = authorization.scope === "task"
-        || !authorization.available
-        || snapshot.structuredMemoryBusy;
-      if (authorization.scope !== "task") {
-        const authorizationScope = authorization.scope;
-        checkbox.addEventListener("change", () => void controller.setStructuredMemoryAuthorization(
-          authorizationScope,
-          checkbox.checked
-        ));
-      }
-      const copy = document.createElement("span");
-      const scopeName = document.createElement("strong");
-      scopeName.textContent = messages.scopes[authorization.scope];
-      const scopeState = document.createElement("small");
-      scopeState.textContent = formatMessage(
-        authorization.enabled ? messages.scopeEnabled : messages.scopeDisabled,
-        { count: i18n.formatNumber(authorization.eligibleItemCount) }
-      );
-      copy.append(scopeName, scopeState);
-      row.append(checkbox, copy);
-      scopes.append(row);
-    }
-    body.append(scopesTitle, scopes);
-
-    const candidatesTitle = document.createElement("strong");
-    candidatesTitle.textContent = messages.candidatesTitle;
-    body.append(candidatesTitle);
-    if (preview.candidates.length === 0) {
-      const empty = document.createElement("p");
-      empty.textContent = messages.candidatesEmpty;
-      body.append(empty);
-    } else {
-      const candidates = document.createElement("ol");
-      candidates.className = "teti-task-memory-candidates";
-      for (const candidate of preview.candidates) {
-        const excluded = snapshot.structuredMemoryExcludedIds.includes(candidate.memoryId);
-        const row = document.createElement("li");
-        const selection = document.createElement("label");
-        const checkbox = document.createElement("input");
-        checkbox.type = "checkbox";
-        checkbox.checked = candidate.included;
-        checkbox.disabled = snapshot.structuredMemoryBusy || (!candidate.included && !excluded);
-        checkbox.addEventListener("change", () => void controller.toggleStructuredMemoryExclusion(
-          candidate.memoryId,
-          !checkbox.checked
-        ));
-        const candidateCopy = document.createElement("span");
-        const candidateTitle = document.createElement("strong");
-        candidateTitle.textContent = `${messages.kinds[candidate.kind]} · ${candidate.title}`;
-        const candidatePreview = document.createElement("small");
-        candidatePreview.textContent = candidate.contentPreview;
-        const reason = document.createElement("small");
-        reason.textContent = candidate.included || excluded
-          ? messages.temporaryExclude
-          : messages.budgetExcluded;
-        candidateCopy.append(candidateTitle, candidatePreview, reason);
-        selection.append(checkbox, candidateCopy);
-        const actions = document.createElement("span");
-        actions.className = "teti-task-memory-inline-actions";
-        const edit = actionButton(messages.edit, "secondary", () => {
-          void controller.openStructuredMemoryItemEditor(candidate.memoryId);
-        });
-        const remove = actionButton(messages.delete, "secondary", () => {
-          controller.requestStructuredMemoryDelete(candidate.memoryId);
-        });
-        edit.disabled = snapshot.structuredMemoryBusy;
-        remove.disabled = snapshot.structuredMemoryBusy;
-        actions.append(edit, remove);
-        row.append(selection, actions);
-        candidates.append(row);
-      }
-      body.append(candidates);
-    }
-    const previewSummary = document.createElement("p");
-    previewSummary.textContent = formatMessage(messages.previewSummary, {
-      count: i18n.formatNumber(preview.candidateCount),
-      bytes: i18n.formatNumber(preview.candidateBytes),
-      agent: preview.childAgentId
-    });
-    const injection = document.createElement("label");
-    injection.className = "teti-task-memory-injection-toggle";
-    const inject = document.createElement("input");
-    inject.type = "checkbox";
-    inject.checked = snapshot.structuredMemoryUseNextExecution;
-    inject.disabled = snapshot.structuredMemoryBusy || preview.candidateCount === 0;
-    inject.addEventListener("change", () => {
-      controller.setStructuredMemoryUseNextExecution(inject.checked);
-    });
-    const injectionCopy = document.createElement("span");
-    const injectionTitle = document.createElement("strong");
-    injectionTitle.textContent = messages.injectNext;
-    const injectionNote = document.createElement("small");
-    injectionNote.textContent = messages.injectNote;
-    injectionCopy.append(injectionTitle, injectionNote);
-    injection.append(inject, injectionCopy);
-    const refresh = actionButton(messages.refreshPreview, "secondary", () => {
-      void controller.refreshStructuredMemoryPreview(preview.childAgentId);
-    });
-    refresh.disabled = snapshot.structuredMemoryBusy;
-    body.append(previewSummary, injection, refresh);
-  }
-
-  if (memory?.latestInjectionManifest) {
-    const latest = document.createElement("small");
-    latest.textContent = formatMessage(messages.lastInjection, {
-      count: i18n.formatNumber(memory.latestInjectionManifest.candidateCount)
-    });
-    body.append(latest);
-  }
-
-  if (snapshot.structuredMemoryEditor) {
-    const editor = snapshot.structuredMemoryEditor;
-    const form = document.createElement("form");
-    form.className = "teti-task-memory-editor";
-    const heading = document.createElement("strong");
-    heading.textContent = messages.editorTitle;
-    const titleField = document.createElement("label");
-    titleField.textContent = messages.titleField;
-    const titleInput = document.createElement("input");
-    titleInput.value = editor.title;
-    titleInput.maxLength = 80;
-    titleInput.addEventListener("input", () => controller.updateStructuredMemoryEditor({
-      title: titleInput.value
-    }));
-    titleField.append(titleInput);
-    const contentField = document.createElement("label");
-    contentField.textContent = messages.contentField;
-    const contentInput = document.createElement("textarea");
-    contentInput.value = editor.content;
-    contentInput.addEventListener("input", () => controller.updateStructuredMemoryEditor({
-      content: contentInput.value
-    }));
-    contentField.append(contentInput);
-    const scope = labeledSelect(messages.scopeField, [
-      { value: "task", label: messages.scopes.task },
-      ...(editor.workspaceScopeAvailable
-        ? [{ value: "workspace", label: messages.scopes.workspace }]
-        : []),
-      { value: "peer", label: messages.scopes.peer }
-    ], editor.scope, i18n);
-    scope.select.addEventListener("change", () => controller.updateStructuredMemoryEditor({
-      scope: scope.select.value as StructuredMemoryScope
-    }));
-    const kind = labeledSelect(messages.kindField, Object.entries(messages.kinds).map(
-      ([value, label]) => ({ value, label })
-    ), editor.kind, i18n);
-    kind.select.addEventListener("change", () => controller.updateStructuredMemoryEditor({
-      kind: kind.select.value as StructuredMemoryKind
-    }));
-    const pinned = document.createElement("label");
-    const pinnedInput = document.createElement("input");
-    pinnedInput.type = "checkbox";
-    pinnedInput.checked = editor.pinned;
-    pinnedInput.addEventListener("change", () => controller.updateStructuredMemoryEditor({
-      pinned: pinnedInput.checked
-    }));
-    pinned.append(pinnedInput, document.createTextNode(messages.pinned));
-    const expiryField = document.createElement("label");
-    expiryField.textContent = messages.expiryField;
-    const expiryInput = document.createElement("input");
-    expiryInput.type = "datetime-local";
-    expiryInput.value = toLocalDateTimeInput(editor.expiresAt);
-    expiryInput.addEventListener("change", () => controller.updateStructuredMemoryEditor({
-      expiresAt: expiryInput.value ? new Date(expiryInput.value).toISOString() : null
-    }));
-    const expiryHint = document.createElement("small");
-    expiryHint.textContent = messages.expiryHint;
-    expiryField.append(expiryInput, expiryHint);
-    const actions = document.createElement("div");
-    actions.className = "teti-task-memory-inline-actions";
-    const cancel = actionButton(messages.cancel, "secondary", () => {
-      controller.cancelStructuredMemoryEditor();
-    });
-    const save = actionButton(messages.save, "primary", () => undefined);
-    save.type = "submit";
-    cancel.disabled = snapshot.structuredMemoryBusy;
-    save.disabled = snapshot.structuredMemoryBusy || !editor.title.trim() || !editor.content.trim();
-    actions.append(cancel, save);
-    form.append(
-      heading,
-      titleField,
-      contentField,
-      scope.label,
-      kind.label,
-      pinned,
-      expiryField,
-      actions
-    );
-    form.addEventListener("submit", (event) => {
-      event.preventDefault();
-      void controller.saveStructuredMemoryEditor();
-    });
-    body.append(form);
-  }
-
-  if (snapshot.structuredMemoryDeleteConfirmationId) {
-    const confirmation = document.createElement("div");
-    confirmation.className = "teti-task-memory-delete-confirmation";
-    const warning = document.createElement("p");
-    warning.textContent = messages.deleteWarning;
-    const actions = document.createElement("div");
-    actions.className = "teti-task-memory-inline-actions";
-    const cancel = actionButton(messages.cancel, "secondary", () => {
-      controller.requestStructuredMemoryDelete(null);
-    });
-    const confirm = actionButton(messages.confirmDelete, "secondary", () => {
-      void controller.confirmStructuredMemoryDelete(snapshot.structuredMemoryDeleteConfirmationId!);
-    });
-    cancel.disabled = snapshot.structuredMemoryBusy;
-    confirm.disabled = snapshot.structuredMemoryBusy;
-    actions.append(cancel, confirm);
-    confirmation.append(warning, actions);
-    body.append(confirmation);
-  }
-
-  if (snapshot.structuredMemoryError) {
-    const error = document.createElement("p");
-    error.className = "teti-memory-error";
-    error.textContent = messages.errors[snapshot.structuredMemoryError];
-    body.append(error);
   }
   return container;
 }
@@ -1644,15 +1431,6 @@ function formatShortTimestamp(value: string, i18n: DesktopI18n): string {
     minute: "2-digit",
     hourCycle: "h23"
   });
-}
-
-function toLocalDateTimeInput(value: string | null): string {
-  if (!value) return "";
-  const date = new Date(value);
-  if (!Number.isFinite(date.getTime())) return "";
-  return new Date(date.getTime() - date.getTimezoneOffset() * 60_000)
-    .toISOString()
-    .slice(0, 16);
 }
 
 function shortTetiId(tetiId: string): string {

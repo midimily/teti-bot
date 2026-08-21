@@ -579,6 +579,36 @@ textarea {
   box-shadow: 0 0 0 3px rgba(26, 136, 255, 0.07);
 }
 
+.teti-task-row.is-unread-stage-result {
+  border-color: rgba(255, 189, 63, 0.62);
+  box-shadow: 0 0 0 3px rgba(255, 189, 63, 0.1);
+}
+
+.teti-task-row.is-unread-stage-result .teti-task-row-meta::before {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: 5px;
+  border-radius: 999px;
+  background: #ffbd3f;
+  box-shadow: 0 0 6px rgba(255, 189, 63, 0.65);
+  content: "";
+}
+
+.teti-task-renewal-status {
+  margin: 8px 0 0;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.teti-task-renewal-status.is-success {
+  color: #147a4b;
+}
+
+.teti-task-renewal-status.is-error {
+  color: #a23a35;
+}
+
 .teti-task-row-copy {
   display: flex;
   min-width: 0;

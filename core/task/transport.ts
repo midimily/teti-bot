@@ -414,6 +414,8 @@ export interface CollaborationTaskTransportRecord {
   peerArtifactMetadata?: LongHorizonArtifactEntry[];
   inputPending?: TetiTaskInputPayload;
   inputSentAt?: string;
+  /** Local-only read marker; never enters Task, Passport, Chatmail, or Connector input. */
+  viewedStageResultIndex?: number;
   safeErrorCode?: string;
 }
 
@@ -437,6 +439,7 @@ export interface CollaborationTaskSummary {
   createdAt: string;
   updatedAt: string;
   expiresAt: string;
+  hasUnreadStageResult?: boolean;
   safeErrorCode?: string;
 }
 
@@ -444,6 +447,7 @@ export interface CollaborationTaskSummarySnapshot {
   schemaVersion: 1;
   generatedAt: string;
   pendingIncomingCount: number;
+  unreadStageResultCount?: number;
   tasks: CollaborationTaskSummary[];
 }
 
@@ -464,4 +468,17 @@ export interface TetiTaskTransportStoreState {
   schemaVersion: 5;
   records: CollaborationTaskTransportRecord[];
   peers: TetiTaskPeerProtocolCapability[];
+}
+
+export function latestAvailableLongHorizonStageResultIndex(
+  record: CollaborationTaskTransportRecord
+): number {
+  if (record.request.executionMode !== "long_horizon") return 0;
+  const availableArtifactIds = new Set((record.artifacts ?? []).map((artifact) => artifact.artifactId));
+  const entries = record.direction === "incoming"
+    ? record.longHorizon?.artifacts ?? []
+    : record.peerArtifactMetadata ?? [];
+  return entries.reduce((latest, entry) =>
+    availableArtifactIds.has(entry.artifactId) ? Math.max(latest, entry.stageIndex) : latest, 0
+  );
 }

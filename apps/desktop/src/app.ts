@@ -665,14 +665,16 @@ function createIsland(
       (connection) => connection.connectionState === "PendingApproval"
     ).length ?? 0;
     const pendingTaskCount = tasks?.snapshot.summary.pendingIncomingCount ?? 0;
-    const openLabel = pendingTaskCount > 0
-      ? i18n.formatPlural(pendingTaskCount, i18n.messages.shell.openPendingTasks)
+    const unreadStageResultCount = tasks?.snapshot.summary.unreadStageResultCount ?? 0;
+    const taskAttentionCount = pendingTaskCount + unreadStageResultCount;
+    const openLabel = taskAttentionCount > 0
+      ? i18n.formatPlural(taskAttentionCount, i18n.messages.shell.openPendingTasks)
       : pendingCount > 0
         ? i18n.formatPlural(pendingCount, i18n.messages.shell.openPendingConnections)
         : i18n.messages.shell.openTeti;
     face.setAttribute("aria-label", openLabel);
     face.setAttribute("title", openLabel);
-    if (pendingCount > 0 || pendingTaskCount > 0) {
+    if (pendingCount > 0 || taskAttentionCount > 0) {
       face.classList.add("teti-face--attention");
       const indicator = document.createElement("span");
       indicator.className = "teti-pending-indicator";
@@ -681,7 +683,7 @@ function createIsland(
     }
     face.addEventListener("click", () => {
       passport?.closePanel();
-      if (pendingTaskCount > 0) tasks?.openInbox();
+      if (taskAttentionCount > 0) tasks?.openInbox();
       else connections?.open();
     });
   } else {
@@ -1522,7 +1524,8 @@ function createIslandHeader(
     tasks?.openInbox();
   });
   taskButton.classList.add("teti-task-header-button");
-  const pendingTasks = tasks?.snapshot.summary.pendingIncomingCount ?? 0;
+  const pendingTasks = (tasks?.snapshot.summary.pendingIncomingCount ?? 0)
+    + (tasks?.snapshot.summary.unreadStageResultCount ?? 0);
   if (pendingTasks > 0) {
     taskButton.classList.add("has-task-badge");
     taskButton.dataset.count = String(Math.min(pendingTasks, 9));

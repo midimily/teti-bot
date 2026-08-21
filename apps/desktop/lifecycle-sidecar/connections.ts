@@ -183,6 +183,7 @@ export interface PeerConnectionService {
   listTasks?(): Promise<CollaborationTaskTransportSnapshot>;
   listTaskSummaries?(): Promise<CollaborationTaskSummarySnapshot>;
   getTask?(taskId: string): Promise<CollaborationTaskTransportRecord>;
+  markTaskStageResultsViewed?(taskId: string): Promise<CollaborationTaskTransportRecord>;
   getLongHorizonTaskMemory?(taskId: string): Promise<LongHorizonTaskMemorySnapshot>;
   getStructuredMemorySourceDraft?(taskId: string, sourceMemoryId: string): Promise<StructuredMemorySourceDraft | null>;
   getStructuredMemoryItem?(taskId: string, memoryId: string): Promise<StructuredMemoryItemDetail | null>;
@@ -737,6 +738,10 @@ export class PeerConnectionRuntime implements PeerConnectionService {
 
   getTask(taskId: string): Promise<CollaborationTaskTransportRecord> {
     return this.taskInitialization.then(() => this.taskTransport.get(taskId));
+  }
+
+  markTaskStageResultsViewed(taskId: string): Promise<CollaborationTaskTransportRecord> {
+    return this.serial(() => this.taskTransport.markStageResultsViewed(taskId));
   }
 
   getLongHorizonTaskMemory(taskId: string): Promise<LongHorizonTaskMemorySnapshot> {

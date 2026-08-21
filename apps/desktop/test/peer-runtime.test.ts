@@ -965,11 +965,18 @@ test("long-horizon collaboration survives Host restart, accepts input, and switc
   assert.equal(host.longHorizon?.stages.length, 1);
   assert.equal(host.longHorizon?.checkpoints.length, 1);
   assert.equal(host.longHorizon?.artifacts[0]?.role, "intermediate");
+  assert.equal((await runtimeB.listTaskSummaries()).unreadStageResultCount, 1);
+  await runtimeB.markTaskStageResultsViewed(sent.request.taskId);
+  assert.equal((await runtimeB.listTaskSummaries()).unreadStageResultCount, 0);
   const originalExpiry = host.longHorizon!.continuationExpiresAt;
   host = await runtimeB.pauseTask(sent.request.taskId);
   assert.equal(host.longHorizon?.phase, "paused");
   host = await runtimeB.renewTask(sent.request.taskId, 2 * 60 * 60 * 1_000);
-  assert.ok(Date.parse(host.longHorizon!.continuationExpiresAt) > Date.parse(originalExpiry));
+  assert.equal(
+    Date.parse(host.longHorizon!.continuationExpiresAt),
+    Date.parse(originalExpiry) + 2 * 60 * 60 * 1_000,
+    "renewal must add the requested duration to the existing deadline"
+  );
   assert.ok(host.longHorizon?.audit.some((event) => event.action === "paused"));
   assert.ok(host.longHorizon?.audit.some((event) => event.action === "renewed"));
 
@@ -980,11 +987,19 @@ test("long-horizon collaboration survives Host restart, accepts input, and switc
     taskTransportStore: tasksB,
     taskExecutor: restartedExecutor
   });
+  assert.equal(
+    (await runtimeB.listTaskSummaries()).unreadStageResultCount,
+    0,
+    "viewed stage-result state must survive Runtime restart"
+  );
   await runtimeA.poll();
   const requester = await runtimeA.getTask(sent.request.taskId);
   assert.equal(requester.peerLongHorizon?.phase, "paused");
   assert.equal(requester.artifacts?.length, 1);
   assert.deepEqual(requester.peerArtifactMetadata?.map((entry) => entry.stageIndex), [1]);
+  assert.equal((await runtimeA.listTaskSummaries()).unreadStageResultCount, 1);
+  await runtimeA.markTaskStageResultsViewed(sent.request.taskId);
+  assert.equal((await runtimeA.listTaskSummaries()).unreadStageResultCount, 0);
   await runtimeA.submitTaskInput(sent.request.taskId, "第二阶段改用备用 Child，综合第一阶段结果。 ");
   await runtimeB.poll();
   host = await runtimeB.getTask(sent.request.taskId);
@@ -1015,6 +1030,11 @@ test("long-horizon collaboration survives Host restart, accepts input, and switc
   assert.equal(completed.artifacts?.length, 2, "final status must not overwrite intermediate Artifacts");
   assert.deepEqual(completed.peerArtifactMetadata?.map((entry) => entry.stageIndex), [1, 2]);
   assert.equal(completed.peerLongHorizon?.finalArtifactId, completed.artifacts?.[1]?.artifactId);
+  assert.equal(
+    (await runtimeA.listTaskSummaries()).unreadStageResultCount,
+    1,
+    "each newly completed stage must restore the unread indicator"
+  );
 });
 
 test("ongoing collaboration permits exactly fifteen supplemental instructions for sixteen stages", async () => {

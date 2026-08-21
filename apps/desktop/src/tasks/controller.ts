@@ -3,6 +3,7 @@ import type {
   CollaborationTaskTransportRecord,
   SendCollaborationTaskInput
 } from "../../../../core/task/transport.ts";
+import { latestAvailableLongHorizonStageResultIndex } from "../../../../core/task/transport.ts";
 import { taskArtifactImages, taskInputImages, type TaskImagePart } from "../../../../core/task/types.ts";
 import type { LifecycleBridgeClient } from "../provisioning/bridge-lifecycle.ts";
 import type { TauriInvoker } from "../platform/tauri-api.ts";
@@ -38,6 +39,7 @@ const EMPTY_SUMMARY: CollaborationTaskSummarySnapshot = {
   schemaVersion: 1,
   generatedAt: new Date(0).toISOString(),
   pendingIncomingCount: 0,
+  unreadStageResultCount: 0,
   tasks: []
 };
 
@@ -74,6 +76,10 @@ export interface TaskControllerSnapshot {
   structuredMemoryExpanded: boolean;
   structuredMemoryBusy: boolean;
   structuredMemoryError: "read_failed" | "write_failed" | "preview_stale" | null;
+  renewalStatus: {
+    state: "pending" | "success" | "error";
+    expiresAt?: string;
+  } | null;
   delegationTargets: DelegationTargetOption[];
   delegationSelections: DelegationTargetSelection[];
   selectedImagePaths: Record<string, string>;
@@ -111,6 +117,7 @@ export interface TaskCloseOptions {
 export interface TaskClient {
   summaries(): Promise<CollaborationTaskSummarySnapshot>;
   get(taskId: string): Promise<CollaborationTaskTransportRecord>;
+  markStageResultsViewed?(taskId: string): Promise<CollaborationTaskTransportRecord>;
   getStructuredMemory(taskId: string): Promise<LongHorizonTaskMemorySnapshot>;
   getStructuredMemorySourceDraft(taskId: string, sourceMemoryId: string): Promise<StructuredMemorySourceDraft | null>;
   getStructuredMemoryItem(taskId: string, memoryId: string): Promise<StructuredMemoryItemDetail | null>;
@@ -231,6 +238,7 @@ export class TaskController {
     structuredMemoryExpanded: false,
     structuredMemoryBusy: false,
     structuredMemoryError: null,
+    renewalStatus: null,
     delegationTargets: [],
     delegationSelections: [],
     selectedImagePaths: {},
@@ -500,6 +508,11 @@ export class TaskController {
       this.snapshotValue.selectedImagePaths = imagePaths;
       this.snapshotValue.delegationTargets = delegation.targets;
       this.snapshotValue.delegationSelections = delegation.selections;
+      const viewedRecord = await this.markStageResultsViewedIfNeeded(record);
+      if (this.isSelected(taskId)) {
+        this.snapshotValue.selectedTask = viewedRecord;
+        if (viewedRecord !== record) this.snapshotValue.summary = await this.client.summaries();
+      }
     });
   }
 
@@ -768,7 +781,23 @@ export class TaskController {
   }
 
   renew(ttlMs = 60 * 60 * 1_000): Promise<void> {
-    return this.mutateSelected((taskId) => this.client.renew(taskId, ttlMs));
+    if (this.snapshotValue.busy || !this.snapshotValue.selectedTask) return Promise.resolve();
+    this.snapshotValue.renewalStatus = { state: "pending" };
+    return this.mutateSelected(async (taskId) => {
+      try {
+        const record = await this.client.renew(taskId, ttlMs);
+        this.snapshotValue.renewalStatus = {
+          state: "success",
+          expiresAt: record.longHorizon?.continuationExpiresAt
+            ?? record.peerLongHorizon?.continuationExpiresAt
+            ?? record.request.expiresAt
+        };
+        return record;
+      } catch (error) {
+        this.snapshotValue.renewalStatus = { state: "error" };
+        throw error;
+      }
+    });
   }
 
   dispose(): void {
@@ -855,21 +884,22 @@ export class TaskController {
       ]);
       if (summaryResult.ok) this.snapshotValue.summary = summaryResult.summary;
       if (taskId && detailResult?.ok && this.isVisibleDetail(taskId)) {
-        this.snapshotValue.selectedTask = detailResult.record;
+        const viewedRecord = await this.markStageResultsViewedIfNeeded(detailResult.record);
+        this.snapshotValue.selectedTask = viewedRecord;
         this.snapshotValue.selectedExecution = detailResult.execution;
         this.snapshotValue.selectedStructuredMemory = detailResult.structuredMemory;
         this.snapshotValue.selectedImagePaths = await this.resolveSelectedImagePaths(
-          detailResult.record
+          viewedRecord
         );
         const previewChildAgentId = this.snapshotValue.structuredMemoryPreview?.childAgentId;
         const nextMemoryPreviewKey = structuredMemoryActionKey(
-          detailResult.record,
+          viewedRecord,
           previewChildAgentId
         );
         if (nextMemoryPreviewKey && nextMemoryPreviewKey !== this.structuredMemoryPreviewKey) {
           this.snapshotValue.structuredMemoryExcludedIds = [];
           const preview = await this.readStructuredMemoryPreview(
-            detailResult.record,
+            viewedRecord,
             previewChildAgentId
           );
           this.snapshotValue.structuredMemoryPreview = preview;
@@ -879,6 +909,9 @@ export class TaskController {
           this.snapshotValue.structuredMemoryPreview = null;
           this.snapshotValue.structuredMemoryUseNextExecution = false;
           this.structuredMemoryPreviewKey = null;
+        }
+        if (viewedRecord !== detailResult.record) {
+          this.snapshotValue.summary = await this.client.summaries();
         }
       }
       if (summaryResult.ok && (!taskId || detailResult?.ok)) {
@@ -946,6 +979,20 @@ export class TaskController {
       return await this.client.getExecution(taskId);
     } catch {
       return null;
+    }
+  }
+
+  private async markStageResultsViewedIfNeeded(
+    record: CollaborationTaskTransportRecord
+  ): Promise<CollaborationTaskTransportRecord> {
+    const latestStageResultIndex = latestAvailableLongHorizonStageResultIndex(record);
+    if (!this.client.markStageResultsViewed
+      || latestStageResultIndex <= (record.viewedStageResultIndex ?? 0)) return record;
+    try {
+      return await this.client.markStageResultsViewed(record.request.taskId);
+    } catch {
+      // Read-state persistence is best effort; never hide a stage result on failure.
+      return record;
     }
   }
 
@@ -1091,6 +1138,7 @@ export class TaskController {
     this.snapshotValue.structuredMemoryExpanded = false;
     this.snapshotValue.structuredMemoryBusy = false;
     this.snapshotValue.structuredMemoryError = null;
+    this.snapshotValue.renewalStatus = null;
     this.structuredMemoryPreviewKey = null;
   }
 
@@ -1121,6 +1169,7 @@ export class TaskController {
     const { generatedAt: _generatedAt, tasks, ...summaryState } = this.snapshotValue.summary;
     const summary = {
       ...summaryState,
+      unreadStageResultCount: summaryState.unreadStageResultCount ?? 0,
       tasks: tasks.map((task) => {
         const { updatedAt: _updatedAt, expiresAt: _expiresAt, ...visibleTask } = task;
         return visibleTask;
@@ -1168,6 +1217,7 @@ export class TaskController {
         : false,
       structuredMemoryBusy: detailVisible ? this.snapshotValue.structuredMemoryBusy : false,
       structuredMemoryError: detailVisible ? this.snapshotValue.structuredMemoryError : null,
+      renewalStatus: detailVisible ? this.snapshotValue.renewalStatus : null,
       selectedImagePaths: detailVisible ? this.snapshotValue.selectedImagePaths : {}
     });
   }
@@ -1217,6 +1267,13 @@ export class BridgeTaskClient implements TaskClient {
 
   get(taskId: string): Promise<CollaborationTaskTransportRecord> {
     return this.bridge.request("task.get", { taskId }) as Promise<CollaborationTaskTransportRecord>;
+  }
+
+  markStageResultsViewed(taskId: string): Promise<CollaborationTaskTransportRecord> {
+    return this.bridge.request(
+      "task.stage-results.viewed",
+      { taskId }
+    ) as Promise<CollaborationTaskTransportRecord>;
   }
 
   getStructuredMemory(taskId: string): Promise<LongHorizonTaskMemorySnapshot> {

@@ -832,6 +832,12 @@ export class TetiRuntime {
     return clone(await service.getTask(taskId));
   }
 
+  async markTaskStageResultsViewed(taskId: string): Promise<CollaborationTaskTransportRecord> {
+    const service = await this.rawPeerService();
+    if (!service.markTaskStageResultsViewed) throw new Error("Task read state is unavailable.");
+    return clone(await service.markTaskStageResultsViewed(taskId));
+  }
+
   async getLongHorizonTaskMemory(taskId: string): Promise<LongHorizonTaskMemorySnapshot> {
     const service = await this.rawPeerService();
     if (!service.getLongHorizonTaskMemory) throw new Error("Structured task memory is unavailable.");
@@ -1087,6 +1093,10 @@ class RuntimePeerConnectionFacade implements PeerConnectionService {
 
   getTask(taskId: string): Promise<CollaborationTaskTransportRecord> {
     return this.runtime.getTask(taskId);
+  }
+
+  markTaskStageResultsViewed(taskId: string): Promise<CollaborationTaskTransportRecord> {
+    return this.runtime.markTaskStageResultsViewed(taskId);
   }
 
   getLongHorizonTaskMemory(taskId: string): Promise<LongHorizonTaskMemorySnapshot> {
