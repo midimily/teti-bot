@@ -71,6 +71,10 @@ jobs:
         run: npm test
 
       - name: Run Structured Memory recovery and quality RC gate
+        # Hosted runners are shared compatibility lanes. Strict wall-clock
+        # certification stays on controlled physical/self-hosted machines.
+        env:
+          TETI_STRICT_MEMORY_BENCHMARK: "0"
         run: npm run test:memory-recovery-rc
 
       - name: Build renderer

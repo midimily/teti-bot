@@ -87,6 +87,8 @@ jobs:
           npm test
 
       - name: Run Structured Memory recovery and quality RC gate
+        env:
+          TETI_STRICT_MEMORY_BENCHMARK: "1"
         shell: powershell
         run: |
           . .\apps\desktop\scripts\enter-windows-build-machine.ps1

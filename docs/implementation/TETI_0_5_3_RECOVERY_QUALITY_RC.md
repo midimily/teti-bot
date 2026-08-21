@@ -52,7 +52,7 @@ schema 从 3 升到 4；应用版本为 `0.5.3-rc.1`。
 npm run test:memory-recovery-rc
 ```
 
-它固定启用严格的 5,000 条基准，并覆盖：
+它默认启用严格的 5,000 条基准，并覆盖：
 
 - schema 1→4 迁移、迁移前备份、未知 schema 和迁移证据损坏只读降级；
 - 异常 Sidecar 退出后的 WAL 恢复、完整性、外键、显式导出和离线回退；
@@ -62,9 +62,12 @@ npm run test:memory-recovery-rc
 - Agent 结果质量的确定性评分：当前任务完成度 40%，已批准参考覆盖 60%，覆盖率至少
   80%、总分至少 88，并对矛盾、未批准引用和把参考当指令实行一票否决。
 
-`cross-platform-ci.yml` 在 macOS 15 arm64 和 Windows x64 hosted runner 上运行该门禁；
-Windows 11 自托管认证也单独运行同一命令。Hosted runner 证明代码兼容与性能门槛，
-不替代真实两台设备的协作验收。
+`cross-platform-ci.yml` 在 macOS 15 arm64 和 Windows x64 hosted runner 上运行同一门禁，
+但显式设置 `TETI_STRICT_MEMORY_BENCHMARK=0`，使用 500 ms cold / 250 ms warm P95
+的共享 runner 防退化线。共享云机器的负载和 I/O 无法作为稳定的 150 ms / 40 ms
+发布认证证据。Windows 11 自托管认证显式设置为 `1`；本地不设置该变量时也默认严格，
+继续使用 150 ms cold / 40 ms warm P95。Hosted runner 证明代码兼容与防止数量级退化，
+不替代受控物理机性能认证和真实两台设备的协作验收。
 
 ### 2026-08-21 本机自动化证据
 
@@ -78,9 +81,9 @@ Windows 11 自托管认证也单独运行同一命令。Hosted runner 证明代�
 - `tsc --noEmit`、本地化文案检查和 Vite production renderer build 通过；macOS
   Rust 单测 `32/32` 通过，Windows `x86_64-pc-windows-msvc` Rust shell 交叉检查通过。
 
-由于当前工作按要求尚未 commit / push，上述 GitHub hosted 与 Windows 11 自托管 CI
-尚未被触发；其结果不得预填为通过。物理双机、签名发布包 RSS/DB bytes 和真实 provider
-Agent 质量也仍以验收模板中的“待执行”为准。
+GitHub hosted CI 已纳入上述兼容门禁；Windows 11 自托管认证只有在仓库变量
+`TETI_WINDOWS_11_CI_ENABLED=true` 或手动触发时才运行。物理双机、严格受控机性能、
+签名发布包 RSS/DB bytes 和真实 provider Agent 质量仍以验收模板中的“待执行”为准。
 
 ## Agent 质量证据
 

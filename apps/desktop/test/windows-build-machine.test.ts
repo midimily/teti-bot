@@ -135,3 +135,24 @@ test("Windows 11 certification hydrates the fixed machine before dependency inst
     "every Node/Rust build step must enter the pinned local environment"
   );
 });
+
+test("Memory RC keeps hosted compatibility separate from strict physical certification", async () => {
+  const [hostedWorkflow, windowsWorkflow, runner] = await Promise.all([
+    readFile(join(repoRoot, ".github", "workflows", "cross-platform-ci.yml"), "utf8"),
+    readFile(join(repoRoot, ".github", "workflows", "windows-11-x64-certification.yml"), "utf8"),
+    readFile(join(repoRoot, "apps", "desktop", "scripts", "run-memory-recovery-rc.ts"), "utf8")
+  ]);
+  assert.match(
+    hostedWorkflow,
+    /Run Structured Memory recovery and quality RC gate[\s\S]*TETI_STRICT_MEMORY_BENCHMARK: "0"[\s\S]*npm run test:memory-recovery-rc/
+  );
+  assert.match(
+    windowsWorkflow,
+    /Run Structured Memory recovery and quality RC gate[\s\S]*TETI_STRICT_MEMORY_BENCHMARK: "1"[\s\S]*npm run test:memory-recovery-rc/
+  );
+  assert.match(
+    runner,
+    /process\.env\.TETI_STRICT_MEMORY_BENCHMARK \?\? "1"/,
+    "the RC command must remain strict unless a shared-host lane explicitly opts out"
+  );
+});
