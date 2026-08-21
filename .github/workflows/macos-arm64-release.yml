@@ -1,0 +1,82 @@
+name: macOS arm64 release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing prerelease tag to package and update
+        required: true
+        default: v0.5.3-rc.1
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: macos-arm64-release-${{ inputs.tag }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTUP_TOOLCHAIN: 1.92.0
+
+jobs:
+  package-and-upload:
+    name: Package and upload macOS arm64
+    runs-on: macos-15
+    timeout-minutes: 90
+
+    steps:
+      - name: Validate release tag
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "Invalid release tag: $RELEASE_TAG" >&2
+            exit 1
+          fi
+          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null
+
+      - name: Check out tagged source
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22.22.3
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install 1.92.0 --profile minimal
+          rustup default 1.92.0
+          rustc --version
+          cargo --version
+
+      - name: Install desktop dependencies
+        run: npm ci --prefix apps/desktop
+
+      - name: Build pinned DeltaChat RPC Runtime
+        run: npm run desktop:rpc:install
+
+      - name: Package verified macOS release
+        run: npm run desktop:package:mac:adhoc:release
+
+      - name: Upload macOS assets to existing prerelease
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "$RELEASE_TAG" \
+            apps/desktop/release/Teti-*-arm64-macos15-adhoc-beta.dmg \
+            apps/desktop/release/Teti-*-arm64-macos15-adhoc-beta.dmg.sha256 \
+            apps/desktop/release/Teti-*-arm64-macos15-adhoc-beta.release.json \
+            apps/desktop/release/Teti-*-arm64-macos15-adhoc-beta-README.txt \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
