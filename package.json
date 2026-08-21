@@ -1,6 +1,6 @@
 {
   "name": "teti-bot",
-  "version": "0.5.1-beta.1",
+  "version": "0.5.3-rc.1",
   "private": true,
   "type": "module",
   "scripts": {
@@ -8,6 +8,7 @@
     "test:network:local": "node --experimental-strip-types --test --test-concurrency=1 services/network/integration/client.test.ts services/network/integration/identity.test.ts services/network/integration/presence.test.ts services/network/integration/profile.test.ts services/network/integration/relationship.test.ts apps/desktop/test/network-runtime.integration.ts",
     "test:cloudflare-free": "node --experimental-strip-types apps/desktop/scripts/check-cloudflare-free-runtime.ts",
     "test:security-recovery-rc": "node --experimental-strip-types --test core/workspace/*.test.ts core/delegation/*.test.ts core/task/*.test.ts apps/desktop/test/callable-adapter-kernel.test.ts apps/desktop/test/host-child-agent-core.test.ts apps/desktop/test/codex-callable-adapter.test.ts apps/desktop/test/codex-adapter-jsonl.test.ts apps/desktop/test/codex-image-output.test.ts apps/desktop/test/codebuddy-callability.test.ts apps/desktop/test/codebuddy-adapter-jsonl.test.ts apps/desktop/test/osaurus-connector.test.ts apps/desktop/test/osaurus-native-agent.test.ts apps/desktop/test/osaurus-runtime-identity.test.ts apps/desktop/test/loopback-http-transport.test.ts apps/desktop/test/workspace-store.test.ts apps/desktop/test/child-memory.test.ts apps/desktop/test/durable-execution-handle.test.ts apps/desktop/test/task-attachment-store.test.ts apps/desktop/test/task-transport-store.test.ts apps/desktop/test/peer-runtime.test.ts",
+    "test:memory-recovery-rc": "node --experimental-strip-types apps/desktop/scripts/run-memory-recovery-rc.ts",
     "desktop:dev": "npm --prefix apps/desktop run dev",
     "desktop:tauri-dev": "npm --prefix apps/desktop run tauri:dev",
     "desktop:tauri-dev:windows": "npm --prefix apps/desktop run tauri:dev:windows",
@@ -54,6 +55,7 @@
     "desktop:rpc:install": "npm --prefix apps/desktop run rpc:install",
     "desktop:rpc:verify": "npm --prefix apps/desktop run rpc:verify --",
     "desktop:bootstrap:mac": "npm --prefix apps/desktop run bootstrap:mac",
+    "desktop:memory:recovery": "npm --prefix apps/desktop run memory:recovery --",
     "desktop:real-validation": "TETI_PROVISIONING_MODE=real TETI_ALLOW_REAL_PROVISIONING=1 npm --prefix apps/desktop run tauri:dev --"
   }
 }

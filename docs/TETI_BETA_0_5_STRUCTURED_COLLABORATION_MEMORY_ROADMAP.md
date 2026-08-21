@@ -1,8 +1,8 @@
 # Teti Beta 0.5 — SQLite 与结构化协作任务记忆路线图
 
-状态：`0.5.0` 的收窄实施切片已完成代码接入，正在进入发布质量门禁。Beta 0.5
-以 `0.4.1-beta.2` 的跨平台 Runtime 基线为前置条件；不改变既有 Task、Passport、
-Chatmail 或 Application Envelope 的网络协议。
+状态：`0.5.3-rc.1` 已完成代码接入与本机自动化 RC 门禁，物理 Mac↔Mac、
+Mac↔Windows 验收待执行。Beta 0.5 以 `0.4.1-beta.2` 的跨平台 Runtime 基线为
+前置条件；不改变既有 Task、Passport、Chatmail 或 Application Envelope 的网络协议。
 
 > 2026-08-20 实施决策：为降低首版复杂度，`0.5.0` 不迁移、不读取、不兼容
 > `child-memory-v1.json`，也不交付 FTS、关系、向量或跨任务检索。它只为新版本
@@ -18,6 +18,13 @@ Chatmail 或 Application Envelope 的网络协议。
 > 均由数据库约束固定为关闭；Task Runtime 不改变 Connector / CLI 请求。用户确认
 > 的结构化提升、关系编辑、授权 UI、执行前预览和真正的 Context Composer 注入仍在
 > 后续显式开启版本完成。本决策覆盖下文 `0.5.1` 原计划中“直接注入”的部分。
+
+> 2026-08-21 二次实施决策：`0.5.2-beta.1` 先交付用户要求的真实注入闭环：本地
+> 确认条目、版本化编辑/pin、删除、Workspace/Peer 精确授权、执行前只读预览、
+> 临时排除和单次批准。真实注入只消费当前有效批准；任何缺失或冲突均无记忆执行。
+> supersede/关系、导出、到期策略、隐私仪表和并发/重启压力门禁留在后续 0.5.2 beta，
+> 不作为 beta.1 已完成项。实现证据见
+> `docs/implementation/TETI_0_5_2_USER_CONTROLLED_CONTEXT_INJECTION.md`。
 
 ## 产品目标
 
@@ -320,6 +327,11 @@ Execution Authority 仍由 Host 独立构造，历史文本不能覆盖它们。
   `memory_items.content`、FTS 查询、选择的文本或 SQLite 文件路径。
 
 ### Beta 0.5.3 — 恢复、性能与发布候选
+
+> 2026-08-21 二次实施确认：`0.5.3-rc.1` 已实现 schema 4、迁移前备份、WAL、
+> 显式导出/离线恢复、安全只读、配额、到期/删除清理、本地计数指标、100 路竞争夹具、
+> 严格性能与 Agent 质量评分门禁，并接入 Mac/Windows CI。物理 Mac↔Mac 与
+> Mac↔Windows 记录仍为待执行；完成前维持 RC，不宣称双机通过。
 
 **目标：** 将结构化协作记忆从“功能可演示”推进到跨 Mac / Windows、长程任务、
 升级和故障条件下可交付的 Beta 能力。

@@ -84,6 +84,18 @@ import {
   boundMemoryShadowQueryText,
   type MemoryShadowRetrievalInput
 } from "../../../../../core/memory/shadow-retrieval.ts";
+import {
+  formatStructuredMemoryContextInput,
+  type CreateStructuredMemoryItemInput,
+  type StructuredMemoryContextPreview,
+  type StructuredMemoryExecutionSelection,
+  type StructuredMemoryItemDetail,
+  type StructuredMemorySourceDraft,
+  type StructuredMemoryPreviewApproval,
+  type StructuredMemoryScope,
+  type StructuredMemoryKind,
+  type UpdateStructuredMemoryItemInput
+} from "../../../../../core/memory/context-injection.ts";
 import { WORKSPACE_LIMITS } from "../../../../../core/workspace/types.ts";
 import { validateTaskWorkspaceRequest } from "../../../../../core/workspace/validation.ts";
 import {
@@ -262,6 +274,191 @@ export class TaskTransportRuntime {
     } catch {
       return unavailableLongHorizonTaskMemory(taskId);
     }
+  }
+
+  async getStructuredMemoryItem(input: {
+    taskId: string;
+    memoryId?: string;
+    sourceMemoryId?: string;
+  }): Promise<StructuredMemoryItemDetail | null> {
+    const record = await this.requireStructuredMemoryTask(input.taskId);
+    if (!this.structuredTaskMemoryStore) return null;
+    const item = await this.structuredTaskMemoryStore.getStructuredMemoryItem({
+      ...(input.memoryId ? { memoryId: input.memoryId } : {}),
+      ...(input.sourceMemoryId ? { sourceMemoryId: input.sourceMemoryId } : {})
+    });
+    if (item) await this.requireManageableStructuredMemoryItem(record, item);
+    return item;
+  }
+
+  async getStructuredMemorySourceDraft(input: {
+    taskId: string;
+    sourceMemoryId: string;
+  }): Promise<StructuredMemorySourceDraft | null> {
+    await this.requireStructuredMemoryTask(input.taskId);
+    if (!this.structuredTaskMemoryStore) return null;
+    const draft = await this.structuredTaskMemoryStore.getStructuredMemorySourceDraft(
+      input.sourceMemoryId
+    );
+    if (draft && draft.sourceTaskId !== input.taskId) {
+      throw new TaskTransportRuntimeError(
+        "TASK_MEMORY_SOURCE_INVALID",
+        "Memory source is not part of this Task."
+      );
+    }
+    return draft;
+  }
+
+  async createStructuredMemoryItem(input: {
+    taskId: string;
+    sourceMemoryId: string;
+    scope: StructuredMemoryScope;
+    kind: StructuredMemoryKind;
+    title: string;
+    content: string;
+    pinned: boolean;
+    expiresAt: string | null;
+    confirmed: true;
+  }): Promise<StructuredMemoryItemDetail> {
+    const record = await this.requireStructuredMemoryTask(input.taskId);
+    if (!this.structuredTaskMemoryStore) {
+      throw new TaskTransportRuntimeError("TASK_MEMORY_UNAVAILABLE", "Structured Memory is unavailable.");
+    }
+    const snapshot = await this.structuredTaskMemoryStore.getTaskSnapshot(record.request.taskId);
+    if (!snapshot.records.some((candidate) => candidate.memoryId === input.sourceMemoryId)) {
+      throw new TaskTransportRuntimeError("TASK_MEMORY_SOURCE_INVALID", "Memory source is not part of this Task.");
+    }
+    const storeInput: CreateStructuredMemoryItemInput = {
+      schemaVersion: 1,
+      sourceMemoryId: input.sourceMemoryId,
+      scope: input.scope,
+      kind: input.kind,
+      title: input.title,
+      content: input.content,
+      pinned: input.pinned,
+      expiresAt: input.expiresAt,
+      confirmed: true,
+      changedAt: this.now().toISOString()
+    };
+    return this.structuredTaskMemoryStore.createStructuredMemoryItem(storeInput);
+  }
+
+  async updateStructuredMemoryItem(input: {
+    taskId: string;
+    memoryId: string;
+    expectedVersion: number;
+    scope: StructuredMemoryScope;
+    kind: StructuredMemoryKind;
+    title: string;
+    content: string;
+    pinned: boolean;
+    expiresAt: string | null;
+    confirmed: true;
+  }): Promise<StructuredMemoryItemDetail> {
+    if (!this.structuredTaskMemoryStore) {
+      throw new TaskTransportRuntimeError("TASK_MEMORY_UNAVAILABLE", "Structured Memory is unavailable.");
+    }
+    const existing = await this.structuredTaskMemoryStore.getStructuredMemoryItem({
+      memoryId: input.memoryId
+    });
+    if (!existing) {
+      throw new TaskTransportRuntimeError(
+        "TASK_MEMORY_SOURCE_INVALID",
+        "Memory item is unavailable."
+      );
+    }
+    const record = await this.requireStructuredMemoryTask(input.taskId);
+    await this.requireManageableStructuredMemoryItem(record, existing);
+    const storeInput: UpdateStructuredMemoryItemInput = {
+      schemaVersion: 1,
+      memoryId: input.memoryId,
+      expectedVersion: input.expectedVersion,
+      scope: input.scope,
+      kind: input.kind,
+      title: input.title,
+      content: input.content,
+      pinned: input.pinned,
+      expiresAt: input.expiresAt,
+      confirmed: true,
+      changedAt: this.now().toISOString()
+    };
+    return this.structuredTaskMemoryStore.updateStructuredMemoryItem(storeInput);
+  }
+
+  async deleteStructuredMemoryItem(input: {
+    taskId: string;
+    memoryId: string;
+    confirmed: true;
+  }): Promise<boolean> {
+    const record = await this.requireStructuredMemoryTask(input.taskId);
+    if (!this.structuredTaskMemoryStore) return false;
+    const existing = await this.structuredTaskMemoryStore.getStructuredMemoryItem({
+      memoryId: input.memoryId
+    });
+    if (!existing) {
+      throw new TaskTransportRuntimeError(
+        "TASK_MEMORY_SOURCE_INVALID",
+        "Memory item is unavailable."
+      );
+    }
+    await this.requireManageableStructuredMemoryItem(record, existing);
+    return this.structuredTaskMemoryStore.deleteStructuredMemoryItem({
+      memoryId: input.memoryId,
+      confirmed: true,
+      deletedAt: this.now().toISOString()
+    });
+  }
+
+  async setStructuredMemoryAuthorization(input: {
+    taskId: string;
+    childAgentId: string;
+    scope: "workspace" | "peer";
+    enabled: boolean;
+  }): Promise<StructuredMemoryContextPreview> {
+    const record = await this.requireStructuredMemoryTask(input.taskId);
+    if (!this.structuredTaskMemoryStore) {
+      throw new TaskTransportRuntimeError("TASK_MEMORY_UNAVAILABLE", "Structured Memory is unavailable.");
+    }
+    const context = this.resolveStructuredMemoryPreviewContext(record, input.childAgentId);
+    await this.structuredTaskMemoryStore.setStructuredMemoryAuthorization({
+      schemaVersion: 1,
+      taskId: record.request.taskId,
+      peerTetiId: record.peerTetiId,
+      workspaceId: context.workspaceId,
+      childAgentId: context.childAgentId,
+      scope: input.scope,
+      enabled: input.enabled,
+      changedAt: this.now().toISOString()
+    });
+    return this.createStructuredMemoryPreview(record, context, []);
+  }
+
+  async previewStructuredMemory(input: {
+    taskId: string;
+    childAgentId?: string;
+    excludedMemoryIds: string[];
+  }): Promise<StructuredMemoryContextPreview> {
+    const record = await this.requireStructuredMemoryTask(input.taskId);
+    if (!this.structuredTaskMemoryStore) {
+      throw new TaskTransportRuntimeError("TASK_MEMORY_UNAVAILABLE", "Structured Memory is unavailable.");
+    }
+    const context = this.resolveStructuredMemoryPreviewContext(record, input.childAgentId);
+    return this.createStructuredMemoryPreview(record, context, input.excludedMemoryIds);
+  }
+
+  async approveStructuredMemoryPreview(input: {
+    taskId: string;
+    previewId: string;
+  }): Promise<StructuredMemoryPreviewApproval> {
+    await this.requireStructuredMemoryTask(input.taskId);
+    if (!this.structuredTaskMemoryStore) {
+      throw new TaskTransportRuntimeError("TASK_MEMORY_UNAVAILABLE", "Structured Memory is unavailable.");
+    }
+    return this.structuredTaskMemoryStore.approveContextPreview({
+      taskId: input.taskId,
+      previewId: input.previewId,
+      approvedAt: this.now().toISOString()
+    });
   }
 
   async listDelegationTargets(taskId: string): Promise<DelegationTargetOption[]> {
@@ -1159,6 +1356,22 @@ export class TaskTransportRuntime {
       resume: false
     });
     const now = this.now().toISOString();
+    const memorySelection: StructuredMemoryExecutionSelection = input.delegationStep
+      ? { schemaVersion: 1, manifest: null, records: [], byteLength: 0 }
+      : await this.structuredTaskMemoryStore?.createExecutionContext({
+          schemaVersion: 1,
+          executionId: `${executionTaskId}:epoch:${handle.executionEpoch}`,
+          taskId: record.request.taskId,
+          peerTetiId: record.peerTetiId,
+          workspaceId: workspace.workspaceId,
+          childAgentId: target.childAgentId,
+          queryText: boundMemoryShadowQueryText(stageInstruction),
+          generatedAt: now
+        }).catch(() => ({ schemaVersion: 1 as const, manifest: null, records: [], byteLength: 0 }))
+        ?? { schemaVersion: 1, manifest: null, records: [], byteLength: 0 };
+    if (memorySelection.manifest) {
+      execution.input.text = formatStructuredMemoryContextInput(memorySelection, stageInstruction);
+    }
     if (input.delegationStep && record.delegationPlan) {
       input.delegationStep.state = "working";
       input.delegationStep.executionTaskId = executionTaskId;
@@ -1237,16 +1450,18 @@ export class TaskTransportRuntime {
     delete record.safeErrorCode;
     await this.store.save(state);
     await this.trySendPendingForRecord(state, record);
-    await this.persistMemoryShadowManifest({
-      schemaVersion: 1,
-      executionId: `${executionTaskId}:epoch:${handle.executionEpoch}`,
-      taskId: record.request.taskId,
-      peerTetiId: record.peerTetiId,
-      workspaceId: workspace.workspaceId,
-      childAgentId: target.childAgentId,
-      queryText: boundMemoryShadowQueryText(stageInstruction),
-      generatedAt: now
-    });
+    if (!memorySelection.manifest) {
+      await this.persistMemoryShadowManifest({
+        schemaVersion: 1,
+        executionId: `${executionTaskId}:epoch:${handle.executionEpoch}`,
+        taskId: record.request.taskId,
+        peerTetiId: record.peerTetiId,
+        workspaceId: workspace.workspaceId,
+        childAgentId: target.childAgentId,
+        queryText: boundMemoryShadowQueryText(stageInstruction),
+        generatedAt: now
+      });
+    }
 
     const grant = createExecutionGrant(
       record.request,
@@ -2685,6 +2900,101 @@ export class TaskTransportRuntime {
   private async persistMemoryShadowManifest(input: MemoryShadowRetrievalInput): Promise<void> {
     if (!this.structuredTaskMemoryStore) return;
     await this.structuredTaskMemoryStore.createShadowManifest(input).catch(() => undefined);
+  }
+
+  private async requireStructuredMemoryTask(
+    taskId: string
+  ): Promise<CollaborationTaskTransportRecord> {
+    const record = await this.get(taskId);
+    if (record.direction !== "incoming"
+      || record.request.executionMode !== "long_horizon"
+      || !record.longHorizon) {
+      throw new TaskTransportRuntimeError(
+        "TASK_LONG_HORIZON_REQUIRED",
+        "Structured Memory controls require a locally hosted ongoing collaboration."
+      );
+    }
+    return record;
+  }
+
+  private async requireManageableStructuredMemoryItem(
+    record: CollaborationTaskTransportRecord,
+    item: StructuredMemoryItemDetail
+  ): Promise<void> {
+    if (item.sourceTaskId === record.request.taskId) return;
+    if (!this.structuredTaskMemoryStore) {
+      throw new TaskTransportRuntimeError("TASK_MEMORY_UNAVAILABLE", "Structured Memory is unavailable.");
+    }
+    const context = this.resolveStructuredMemoryPreviewContext(record, item.childAgentId);
+    const preview = await this.createStructuredMemoryPreview(record, context, []);
+    if (!preview.candidates.some((candidate) => candidate.memoryId === item.memoryId)) {
+      throw new TaskTransportRuntimeError(
+        "TASK_MEMORY_SOURCE_INVALID",
+        "Memory item is outside the current Task's authorized scope."
+      );
+    }
+  }
+
+  private resolveStructuredMemoryPreviewContext(
+    record: CollaborationTaskTransportRecord,
+    requestedChildAgentId?: string
+  ): {
+    childAgentId: string;
+    workspaceId: string | null;
+    queryText: string;
+  } {
+    const session = record.longHorizon!;
+    const targets = this.executor?.listTargets?.(
+      record.request.offerId,
+      record.request.capabilityId,
+      ["text"]
+    ) ?? (() => {
+      const target = this.executor?.resolveTarget(
+        record.request.offerId,
+        record.request.capabilityId,
+        ["text"]
+      );
+      return target ? [target] : [];
+    })();
+    const previousChildAgentId = session.stages.at(-1)?.childAgentId;
+    const target = requestedChildAgentId
+      ? targets.find((candidate) => candidate.childAgentId === requestedChildAgentId)
+      : targets.find((candidate) => candidate.childAgentId === previousChildAgentId)
+        ?? targets[0];
+    if (!target) {
+      throw new TaskTransportRuntimeError(
+        "TASK_CHILD_UNAVAILABLE",
+        "No Child Agent is available for Structured Memory preview."
+      );
+    }
+    const instruction = session.pendingInput?.instruction ?? taskInputText(record.request.input);
+    const queryText = boundedStageInstruction(record, instruction, session.stages.length + 1);
+    const workspaceId = record.workspaceBinding?.workspaceId
+      ?? (record.request.workspace?.kind === "reference"
+        ? record.request.workspace.workspaceId
+        : null);
+    return {
+      childAgentId: target.childAgentId,
+      workspaceId,
+      queryText: boundMemoryShadowQueryText(queryText)
+    };
+  }
+
+  private createStructuredMemoryPreview(
+    record: CollaborationTaskTransportRecord,
+    context: { childAgentId: string; workspaceId: string | null; queryText: string },
+    excludedMemoryIds: string[]
+  ): Promise<StructuredMemoryContextPreview> {
+    return this.structuredTaskMemoryStore!.createContextPreview({
+      schemaVersion: 1,
+      taskId: record.request.taskId,
+      peerTetiId: record.peerTetiId,
+      workspaceId: context.workspaceId,
+      childAgentId: context.childAgentId,
+      queryText: context.queryText,
+      excludedMemoryIds,
+      generatedAt: this.now().toISOString()
+    });
   }
 
   private async synchronizeStructuredTaskMemory(

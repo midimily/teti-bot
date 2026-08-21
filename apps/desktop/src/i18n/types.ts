@@ -150,6 +150,7 @@ export interface AppMessages {
         readonly reachable: string;
         readonly checking: string;
         readonly unreachable: string;
+        readonly unavailable: string;
         readonly peerStatus: string;
       };
       readonly accept: string;
@@ -540,8 +541,43 @@ export interface AppMessages {
         readonly automaticNote: string;
         readonly loading: string;
         readonly unavailable: string;
+        readonly readOnly: string;
         readonly ready: string;
         readonly stage: string;
+        readonly prepare: string;
+        readonly edit: string;
+        readonly delete: string;
+        readonly confirmDelete: string;
+        readonly deleteWarning: string;
+        readonly cancel: string;
+        readonly save: string;
+        readonly editorTitle: string;
+        readonly titleField: string;
+        readonly contentField: string;
+        readonly scopeField: string;
+        readonly kindField: string;
+        readonly pinned: string;
+        readonly expiryField: string;
+        readonly expiryHint: string;
+        readonly scopesTitle: string;
+        readonly scopes: Record<"task" | "workspace" | "peer", string>;
+        readonly scopeEnabled: string;
+        readonly scopeDisabled: string;
+        readonly candidatesTitle: string;
+        readonly candidatesEmpty: string;
+        readonly temporaryExclude: string;
+        readonly budgetExcluded: string;
+        readonly injectNext: string;
+        readonly injectNote: string;
+        readonly refreshPreview: string;
+        readonly previewSummary: string;
+        readonly lastInjection: string;
+        readonly kinds: Record<
+          "decision" | "constraint" | "fact" | "open_question"
+            | "handoff" | "summary" | "local_note",
+          string
+        >;
+        readonly errors: Record<"read_failed" | "write_failed" | "preview_stale", string>;
       };
       readonly phase: Record<
         "pending_approval" | "queued" | "working" | "input_required" | "paused"

@@ -124,6 +124,14 @@ import type {
   StructuredTaskMemoryStore
 } from "../../../core/memory/structured-task.ts";
 import type {
+  StructuredMemoryContextPreview,
+  StructuredMemoryItemDetail,
+  StructuredMemoryKind,
+  StructuredMemoryPreviewApproval,
+  StructuredMemoryScope,
+  StructuredMemorySourceDraft
+} from "../../../core/memory/context-injection.ts";
+import type {
   DelegationTargetOption,
   DelegationTargetSelection
 } from "../../../core/delegation/types.ts";
@@ -176,6 +184,44 @@ export interface PeerConnectionService {
   listTaskSummaries?(): Promise<CollaborationTaskSummarySnapshot>;
   getTask?(taskId: string): Promise<CollaborationTaskTransportRecord>;
   getLongHorizonTaskMemory?(taskId: string): Promise<LongHorizonTaskMemorySnapshot>;
+  getStructuredMemorySourceDraft?(taskId: string, sourceMemoryId: string): Promise<StructuredMemorySourceDraft | null>;
+  getStructuredMemoryItem?(taskId: string, memoryId: string): Promise<StructuredMemoryItemDetail | null>;
+  createStructuredMemoryItem?(input: {
+    taskId: string;
+    sourceMemoryId: string;
+    scope: StructuredMemoryScope;
+    kind: StructuredMemoryKind;
+    title: string;
+    content: string;
+    pinned: boolean;
+    expiresAt: string | null;
+    confirmed: true;
+  }): Promise<StructuredMemoryItemDetail>;
+  updateStructuredMemoryItem?(input: {
+    taskId: string;
+    memoryId: string;
+    expectedVersion: number;
+    scope: StructuredMemoryScope;
+    kind: StructuredMemoryKind;
+    title: string;
+    content: string;
+    pinned: boolean;
+    expiresAt: string | null;
+    confirmed: true;
+  }): Promise<StructuredMemoryItemDetail>;
+  deleteStructuredMemoryItem?(taskId: string, memoryId: string, confirmed: true): Promise<boolean>;
+  setStructuredMemoryAuthorization?(input: {
+    taskId: string;
+    childAgentId: string;
+    scope: "workspace" | "peer";
+    enabled: boolean;
+  }): Promise<StructuredMemoryContextPreview>;
+  previewStructuredMemory?(input: {
+    taskId: string;
+    childAgentId?: string;
+    excludedMemoryIds: string[];
+  }): Promise<StructuredMemoryContextPreview>;
+  approveStructuredMemoryPreview?(taskId: string, previewId: string): Promise<StructuredMemoryPreviewApproval>;
   stageTaskImage?(sourcePath: string): Promise<StagedTaskImage>;
   resolveTaskImage?(taskId: string, attachmentId: string): Promise<string>;
   approveTask?(taskId: string): Promise<CollaborationTaskTransportRecord>;
@@ -693,6 +739,59 @@ export class PeerConnectionRuntime implements PeerConnectionService {
 
   getLongHorizonTaskMemory(taskId: string): Promise<LongHorizonTaskMemorySnapshot> {
     return this.taskInitialization.then(() => this.taskTransport.getLongHorizonMemory(taskId));
+  }
+
+  getStructuredMemorySourceDraft(
+    taskId: string,
+    sourceMemoryId: string
+  ): Promise<StructuredMemorySourceDraft | null> {
+    return this.taskInitialization.then(() =>
+      this.taskTransport.getStructuredMemorySourceDraft({ taskId, sourceMemoryId })
+    );
+  }
+
+  getStructuredMemoryItem(
+    taskId: string,
+    memoryId: string
+  ): Promise<StructuredMemoryItemDetail | null> {
+    return this.taskInitialization.then(() =>
+      this.taskTransport.getStructuredMemoryItem({ taskId, memoryId })
+    );
+  }
+
+  createStructuredMemoryItem(input: Parameters<TaskTransportRuntime["createStructuredMemoryItem"]>[0]) {
+    return this.serial(() => this.taskTransport.createStructuredMemoryItem(input));
+  }
+
+  updateStructuredMemoryItem(input: Parameters<TaskTransportRuntime["updateStructuredMemoryItem"]>[0]) {
+    return this.serial(() => this.taskTransport.updateStructuredMemoryItem(input));
+  }
+
+  deleteStructuredMemoryItem(taskId: string, memoryId: string, confirmed: true): Promise<boolean> {
+    return this.serial(() => this.taskTransport.deleteStructuredMemoryItem({
+      taskId,
+      memoryId,
+      confirmed
+    }));
+  }
+
+  setStructuredMemoryAuthorization(
+    input: Parameters<TaskTransportRuntime["setStructuredMemoryAuthorization"]>[0]
+  ): Promise<StructuredMemoryContextPreview> {
+    return this.serial(() => this.taskTransport.setStructuredMemoryAuthorization(input));
+  }
+
+  previewStructuredMemory(
+    input: Parameters<TaskTransportRuntime["previewStructuredMemory"]>[0]
+  ): Promise<StructuredMemoryContextPreview> {
+    return this.taskInitialization.then(() => this.taskTransport.previewStructuredMemory(input));
+  }
+
+  approveStructuredMemoryPreview(
+    taskId: string,
+    previewId: string
+  ): Promise<StructuredMemoryPreviewApproval> {
+    return this.serial(() => this.taskTransport.approveStructuredMemoryPreview({ taskId, previewId }));
   }
 
   stageTaskImage(sourcePath: string): Promise<StagedTaskImage> {

@@ -14,6 +14,12 @@ import type {
   MemoryExportResult
 } from "../../../../core/memory/types.ts";
 import type { LongHorizonTaskMemorySnapshot } from "../../../../core/memory/structured-task.ts";
+import type {
+  StructuredMemoryContextPreview,
+  StructuredMemoryItemDetail,
+  StructuredMemoryPreviewApproval,
+  StructuredMemorySourceDraft
+} from "../../../../core/memory/context-injection.ts";
 import type { LocalReleaseStatus } from "../../../../core/release/policy.ts";
 import type { DelegationTargetOption } from "../../../../core/delegation/types.ts";
 
@@ -41,6 +47,14 @@ export type LifecycleMethod =
   | "task.summary"
   | "task.get"
   | "task.memory.get"
+  | "task.memory.source.get"
+  | "task.memory.item.get"
+  | "task.memory.item.create"
+  | "task.memory.item.update"
+  | "task.memory.item.delete"
+  | "task.memory.authorization.set"
+  | "task.memory.preview"
+  | "task.memory.preview.approve"
   | "task.attachment.stage"
   | "task.attachment.resolve"
   | "task.approve"
@@ -89,6 +103,14 @@ export const LIFECYCLE_METHODS: readonly LifecycleMethod[] = [
   "task.summary",
   "task.get",
   "task.memory.get",
+  "task.memory.source.get",
+  "task.memory.item.get",
+  "task.memory.item.create",
+  "task.memory.item.update",
+  "task.memory.item.delete",
+  "task.memory.authorization.set",
+  "task.memory.preview",
+  "task.memory.preview.approve",
   "task.attachment.stage",
   "task.attachment.resolve",
   "task.approve",
@@ -156,6 +178,10 @@ export type LifecycleResult =
   | DelegationTargetOption[]
   | ChildMemorySnapshot
   | LongHorizonTaskMemorySnapshot
+  | StructuredMemorySourceDraft
+  | StructuredMemoryItemDetail
+  | StructuredMemoryContextPreview
+  | StructuredMemoryPreviewApproval
   | MemoryExportResult
   | OsaurusNativeChildSettingsDto
   | TetiNetworkEnvironmentSettingsDto
@@ -347,6 +373,14 @@ export const LIFECYCLE_TIMEOUT_MS: Record<LifecycleMethod, number> = {
   "task.summary": 2_000,
   "task.get": 2_000,
   "task.memory.get": 2_000,
+  "task.memory.source.get": 2_000,
+  "task.memory.item.get": 2_000,
+  "task.memory.item.create": 5_000,
+  "task.memory.item.update": 5_000,
+  "task.memory.item.delete": 5_000,
+  "task.memory.authorization.set": 5_000,
+  "task.memory.preview": 5_000,
+  "task.memory.preview.approve": 5_000,
   "task.attachment.stage": 10_000,
   "task.attachment.resolve": 2_000,
   "task.approve": 10_000,

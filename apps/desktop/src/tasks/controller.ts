@@ -17,6 +17,14 @@ import type {
 import { readStableErrorCode } from "../errors/stable-error-code.ts";
 import type { AppMessages } from "../i18n/index.ts";
 import type { LongHorizonTaskMemorySnapshot } from "../../../../core/memory/structured-task.ts";
+import type {
+  StructuredMemoryContextPreview,
+  StructuredMemoryItemDetail,
+  StructuredMemoryKind,
+  StructuredMemoryPreviewApproval,
+  StructuredMemoryScope,
+  StructuredMemorySourceDraft
+} from "../../../../core/memory/context-injection.ts";
 
 export const TASK_REFRESH_DELAYS_MS = {
   visibleActive: 2_000,
@@ -58,6 +66,13 @@ export interface TaskControllerSnapshot {
   selectedTask: CollaborationTaskTransportRecord | null;
   selectedExecution: ExecutionHandle | null;
   selectedStructuredMemory: LongHorizonTaskMemorySnapshot | null;
+  structuredMemoryPreview: StructuredMemoryContextPreview | null;
+  structuredMemoryUseNextExecution: boolean;
+  structuredMemoryExcludedIds: string[];
+  structuredMemoryEditor: StructuredMemoryEditor | null;
+  structuredMemoryDeleteConfirmationId: string | null;
+  structuredMemoryBusy: boolean;
+  structuredMemoryError: "read_failed" | "write_failed" | "preview_stale" | null;
   delegationTargets: DelegationTargetOption[];
   delegationSelections: DelegationTargetSelection[];
   selectedImagePaths: Record<string, string>;
@@ -73,6 +88,20 @@ export interface TaskControllerSnapshot {
   errorCode?: TaskUiErrorCode;
 }
 
+export interface StructuredMemoryEditor {
+  mode: "create" | "edit";
+  sourceMemoryId: string;
+  memoryId: string | null;
+  expectedVersion: number | null;
+  workspaceScopeAvailable: boolean;
+  scope: StructuredMemoryScope;
+  kind: StructuredMemoryKind;
+  title: string;
+  content: string;
+  pinned: boolean;
+  expiresAt: string | null;
+}
+
 export interface TaskCloseOptions {
   notify?: boolean;
   updateWindowMode?: boolean;
@@ -82,6 +111,44 @@ export interface TaskClient {
   summaries(): Promise<CollaborationTaskSummarySnapshot>;
   get(taskId: string): Promise<CollaborationTaskTransportRecord>;
   getStructuredMemory(taskId: string): Promise<LongHorizonTaskMemorySnapshot>;
+  getStructuredMemorySourceDraft(taskId: string, sourceMemoryId: string): Promise<StructuredMemorySourceDraft | null>;
+  getStructuredMemoryItem(taskId: string, memoryId: string): Promise<StructuredMemoryItemDetail | null>;
+  createStructuredMemoryItem(input: {
+    taskId: string;
+    sourceMemoryId: string;
+    scope: StructuredMemoryScope;
+    kind: StructuredMemoryKind;
+    title: string;
+    content: string;
+    pinned: boolean;
+    expiresAt: string | null;
+    confirmed: true;
+  }): Promise<StructuredMemoryItemDetail>;
+  updateStructuredMemoryItem(input: {
+    taskId: string;
+    memoryId: string;
+    expectedVersion: number;
+    scope: StructuredMemoryScope;
+    kind: StructuredMemoryKind;
+    title: string;
+    content: string;
+    pinned: boolean;
+    expiresAt: string | null;
+    confirmed: true;
+  }): Promise<StructuredMemoryItemDetail>;
+  deleteStructuredMemoryItem(taskId: string, memoryId: string): Promise<boolean>;
+  setStructuredMemoryAuthorization(input: {
+    taskId: string;
+    childAgentId: string;
+    scope: "workspace" | "peer";
+    enabled: boolean;
+  }): Promise<StructuredMemoryContextPreview>;
+  previewStructuredMemory(input: {
+    taskId: string;
+    childAgentId?: string;
+    excludedMemoryIds: string[];
+  }): Promise<StructuredMemoryContextPreview>;
+  approveStructuredMemoryPreview(taskId: string, previewId: string): Promise<StructuredMemoryPreviewApproval>;
   resolveImage(taskId: string, attachmentId: string): Promise<string>;
   stageImage(path: string): Promise<StagedTaskImageDto>;
   send(input: SendCollaborationTaskInput): Promise<CollaborationTaskTransportRecord>;
@@ -155,6 +222,13 @@ export class TaskController {
     selectedTask: null,
     selectedExecution: null,
     selectedStructuredMemory: null,
+    structuredMemoryPreview: null,
+    structuredMemoryUseNextExecution: false,
+    structuredMemoryExcludedIds: [],
+    structuredMemoryEditor: null,
+    structuredMemoryDeleteConfirmationId: null,
+    structuredMemoryBusy: false,
+    structuredMemoryError: null,
     delegationTargets: [],
     delegationSelections: [],
     selectedImagePaths: {},
@@ -175,6 +249,7 @@ export class TaskController {
   private disposed = false;
   private outsideDismissPending = false;
   private readonly imageResolutionFailures = new Map<string, string>();
+  private structuredMemoryPreviewKey: string | null = null;
 
   constructor(options: {
     client: TaskClient;
@@ -284,6 +359,7 @@ export class TaskController {
     this.snapshotValue.selectedTask = null;
     this.snapshotValue.selectedExecution = null;
     this.snapshotValue.selectedStructuredMemory = null;
+    this.resetStructuredMemoryControls();
     this.snapshotValue.delegationTargets = [];
     this.snapshotValue.delegationSelections = [];
     this.snapshotValue.selectedImagePaths = {};
@@ -404,15 +480,21 @@ export class TaskController {
       this.beginDetail(record);
       this.snapshotValue.screen = "detail";
       this.onChange();
-      const [execution, structuredMemory, imagePaths, delegation] = await Promise.all([
+      const [execution, structuredMemory, memoryPreview, imagePaths, delegation] = await Promise.all([
         executionPromise,
         this.readStructuredMemory(record),
+        this.readStructuredMemoryPreview(record),
         this.resolveSelectedImagePaths(record),
         this.readDelegationState(record)
       ]);
       if (!this.isSelected(taskId)) return;
       this.snapshotValue.selectedExecution = execution;
       this.snapshotValue.selectedStructuredMemory = structuredMemory;
+      this.snapshotValue.structuredMemoryPreview = memoryPreview;
+      if (structuredMemory && structuredMemory.status !== "unavailable" && !memoryPreview
+        && structuredMemoryActionKey(record)) {
+        this.snapshotValue.structuredMemoryError = "read_failed";
+      }
       this.snapshotValue.selectedImagePaths = imagePaths;
       this.snapshotValue.delegationTargets = delegation.targets;
       this.snapshotValue.delegationSelections = delegation.selections;
@@ -420,7 +502,171 @@ export class TaskController {
   }
 
   approve(): Promise<void> {
-    return this.mutateSelected((taskId) => this.client.approve(taskId));
+    return this.mutateSelected(async (taskId) => {
+      await this.tryApproveStructuredMemoryPreview(taskId);
+      return this.client.approve(taskId);
+    });
+  }
+
+  setStructuredMemoryUseNextExecution(enabled: boolean): void {
+    const preview = this.snapshotValue.structuredMemoryPreview;
+    this.snapshotValue.structuredMemoryUseNextExecution = enabled
+      && Boolean(preview && preview.candidateCount > 0 && Date.parse(preview.expiresAt) > Date.now());
+    this.onChange();
+  }
+
+  refreshStructuredMemoryPreview(childAgentId?: string): Promise<void> {
+    return this.runStructuredMemory(async (taskId) => {
+      const preview = await this.client.previewStructuredMemory({
+        taskId,
+        ...(childAgentId ? { childAgentId } : {}),
+        excludedMemoryIds: [...this.snapshotValue.structuredMemoryExcludedIds]
+      });
+      this.setStructuredMemoryPreview(preview, childAgentId);
+    });
+  }
+
+  toggleStructuredMemoryExclusion(memoryId: string, excluded: boolean): Promise<void> {
+    const ids = new Set(this.snapshotValue.structuredMemoryExcludedIds);
+    if (excluded) ids.add(memoryId);
+    else ids.delete(memoryId);
+    this.snapshotValue.structuredMemoryExcludedIds = [...ids];
+    const childAgentId = this.snapshotValue.structuredMemoryPreview?.childAgentId;
+    return this.refreshStructuredMemoryPreview(childAgentId);
+  }
+
+  setStructuredMemoryAuthorization(
+    scope: "workspace" | "peer",
+    enabled: boolean
+  ): Promise<void> {
+    return this.runStructuredMemory(async (taskId) => {
+      const childAgentId = this.snapshotValue.structuredMemoryPreview?.childAgentId;
+      if (!childAgentId) throw new Error("STRUCTURED_MEMORY_PREVIEW_UNAVAILABLE");
+      const preview = await this.client.setStructuredMemoryAuthorization({
+        taskId,
+        childAgentId,
+        scope,
+        enabled
+      });
+      this.snapshotValue.structuredMemoryExcludedIds = [];
+      this.setStructuredMemoryPreview(preview, childAgentId);
+    });
+  }
+
+  openStructuredMemorySourceEditor(sourceMemoryId: string): Promise<void> {
+    return this.runStructuredMemory(async (taskId) => {
+      const draft = await this.client.getStructuredMemorySourceDraft(taskId, sourceMemoryId);
+      if (!draft) throw new Error("STRUCTURED_MEMORY_SOURCE_UNAVAILABLE");
+      this.snapshotValue.structuredMemoryEditor = draft.existingItem
+        ? editorFromItem(draft.existingItem, draft.workspaceScopeAvailable)
+        : {
+            mode: "create",
+            sourceMemoryId: draft.sourceMemoryId,
+            memoryId: null,
+            expectedVersion: null,
+            workspaceScopeAvailable: draft.workspaceScopeAvailable,
+            scope: "task",
+            kind: "handoff",
+            title: draft.suggestedTitle,
+            content: draft.content,
+            pinned: false,
+            expiresAt: null
+          };
+      this.snapshotValue.structuredMemoryDeleteConfirmationId = null;
+    });
+  }
+
+  openStructuredMemoryItemEditor(memoryId: string): Promise<void> {
+    return this.runStructuredMemory(async (taskId) => {
+      const item = await this.client.getStructuredMemoryItem(taskId, memoryId);
+      if (!item) throw new Error("STRUCTURED_MEMORY_ITEM_UNAVAILABLE");
+      const source = await this.client.getStructuredMemorySourceDraft(
+        taskId,
+        item.sourceMemoryId
+      ).catch(() => null);
+      this.snapshotValue.structuredMemoryEditor = editorFromItem(
+        item,
+        source?.workspaceScopeAvailable ?? item.scope === "workspace"
+      );
+      this.snapshotValue.structuredMemoryDeleteConfirmationId = null;
+    });
+  }
+
+  updateStructuredMemoryEditor(input: Partial<Pick<
+    StructuredMemoryEditor,
+    "scope" | "kind" | "title" | "content" | "pinned" | "expiresAt"
+  >>): void {
+    const editor = this.snapshotValue.structuredMemoryEditor;
+    if (!editor) return;
+    if (input.scope !== undefined) editor.scope = input.scope;
+    if (input.kind !== undefined) editor.kind = input.kind;
+    if (input.title !== undefined) editor.title = [...input.title].slice(0, 80).join("");
+    if (input.content !== undefined) editor.content = boundEditorContent(input.content);
+    if (input.pinned !== undefined) editor.pinned = input.pinned;
+    if (input.expiresAt !== undefined) editor.expiresAt = input.expiresAt;
+  }
+
+  cancelStructuredMemoryEditor(): void {
+    this.snapshotValue.structuredMemoryEditor = null;
+    this.onChange();
+  }
+
+  saveStructuredMemoryEditor(): Promise<void> {
+    return this.runStructuredMemory(async (taskId) => {
+      const editor = this.snapshotValue.structuredMemoryEditor;
+      if (!editor || !editor.title.trim() || !editor.content.trim()) {
+        throw new Error("STRUCTURED_MEMORY_EDITOR_INVALID");
+      }
+      if (editor.mode === "create") {
+        await this.client.createStructuredMemoryItem({
+          taskId,
+          sourceMemoryId: editor.sourceMemoryId,
+          scope: editor.scope,
+          kind: editor.kind,
+          title: editor.title.trim(),
+          content: editor.content.trim(),
+          pinned: editor.pinned,
+          expiresAt: editor.expiresAt,
+          confirmed: true
+        });
+      } else {
+        await this.client.updateStructuredMemoryItem({
+          taskId,
+          memoryId: editor.memoryId!,
+          expectedVersion: editor.expectedVersion!,
+          scope: editor.scope,
+          kind: editor.kind,
+          title: editor.title.trim(),
+          content: editor.content.trim(),
+          pinned: editor.pinned,
+          expiresAt: editor.expiresAt,
+          confirmed: true
+        });
+      }
+      this.snapshotValue.structuredMemoryEditor = null;
+      await this.refreshStructuredMemoryAfterMutation(taskId);
+    });
+  }
+
+  requestStructuredMemoryDelete(memoryId: string | null): void {
+    this.snapshotValue.structuredMemoryDeleteConfirmationId = memoryId;
+    this.onChange();
+  }
+
+  confirmStructuredMemoryDelete(memoryId: string): Promise<void> {
+    return this.runStructuredMemory(async (taskId) => {
+      if (this.snapshotValue.structuredMemoryDeleteConfirmationId !== memoryId) {
+        throw new Error("STRUCTURED_MEMORY_DELETE_CONFIRMATION_REQUIRED");
+      }
+      await this.client.deleteStructuredMemoryItem(taskId, memoryId);
+      this.snapshotValue.structuredMemoryDeleteConfirmationId = null;
+      if (this.snapshotValue.structuredMemoryEditor?.memoryId === memoryId) {
+        this.snapshotValue.structuredMemoryEditor = null;
+      }
+      this.snapshotValue.structuredMemoryExcludedIds = this.snapshotValue
+        .structuredMemoryExcludedIds.filter((candidate) => candidate !== memoryId);
+      await this.refreshStructuredMemoryAfterMutation(taskId);
+    });
   }
 
   addDelegationStep(): void {
@@ -461,6 +707,10 @@ export class TaskController {
       );
       this.snapshotValue.delegationTargets = [];
       this.snapshotValue.delegationSelections = [];
+      this.snapshotValue.structuredMemoryPreview = null;
+      this.snapshotValue.structuredMemoryUseNextExecution = false;
+      this.snapshotValue.structuredMemoryExcludedIds = [];
+      this.structuredMemoryPreviewKey = null;
       this.onChange();
       const record = this.snapshotValue.selectedTask;
       const [execution, structuredMemory, imagePaths, summary] = await Promise.all([
@@ -499,7 +749,10 @@ export class TaskController {
   }
 
   continue(childAgentId?: string): Promise<void> {
-    return this.mutateSelected((taskId) => this.client.continue(taskId, childAgentId));
+    return this.mutateSelected(async (taskId) => {
+      await this.tryApproveStructuredMemoryPreview(taskId, childAgentId);
+      return this.client.continue(taskId, childAgentId);
+    });
   }
 
   complete(): Promise<void> {
@@ -525,6 +778,12 @@ export class TaskController {
     await this.run(async () => {
       const record = await operation(taskId);
       this.snapshotValue.selectedTask = record;
+      if (!structuredMemoryActionKey(record, this.snapshotValue.structuredMemoryPreview?.childAgentId)) {
+        this.snapshotValue.structuredMemoryPreview = null;
+        this.snapshotValue.structuredMemoryUseNextExecution = false;
+        this.snapshotValue.structuredMemoryExcludedIds = [];
+        this.structuredMemoryPreviewKey = null;
+      }
       this.onChange();
       const [execution, structuredMemory, imagePaths, summary] = await Promise.all([
         this.readExecution(taskId),
@@ -594,6 +853,25 @@ export class TaskController {
         this.snapshotValue.selectedImagePaths = await this.resolveSelectedImagePaths(
           detailResult.record
         );
+        const previewChildAgentId = this.snapshotValue.structuredMemoryPreview?.childAgentId;
+        const nextMemoryPreviewKey = structuredMemoryActionKey(
+          detailResult.record,
+          previewChildAgentId
+        );
+        if (nextMemoryPreviewKey && nextMemoryPreviewKey !== this.structuredMemoryPreviewKey) {
+          this.snapshotValue.structuredMemoryExcludedIds = [];
+          const preview = await this.readStructuredMemoryPreview(
+            detailResult.record,
+            previewChildAgentId
+          );
+          this.snapshotValue.structuredMemoryPreview = preview;
+          this.snapshotValue.structuredMemoryUseNextExecution = false;
+          if (!preview) this.snapshotValue.structuredMemoryError = "read_failed";
+        } else if (!nextMemoryPreviewKey) {
+          this.snapshotValue.structuredMemoryPreview = null;
+          this.snapshotValue.structuredMemoryUseNextExecution = false;
+          this.structuredMemoryPreviewKey = null;
+        }
       }
       if (summaryResult.ok && (!taskId || detailResult?.ok)) {
         this.consecutiveRefreshFailures = 0;
@@ -676,6 +954,95 @@ export class TaskController {
     }
   }
 
+  private async readStructuredMemoryPreview(
+    record: CollaborationTaskTransportRecord,
+    childAgentId?: string
+  ): Promise<StructuredMemoryContextPreview | null> {
+    const key = structuredMemoryActionKey(record, childAgentId);
+    if (!key) return null;
+    try {
+      const preview = await this.client.previewStructuredMemory({
+        taskId: record.request.taskId,
+        ...(childAgentId ? { childAgentId } : {}),
+        excludedMemoryIds: [...this.snapshotValue.structuredMemoryExcludedIds]
+      });
+      this.structuredMemoryPreviewKey = key;
+      return preview;
+    } catch {
+      return null;
+    }
+  }
+
+  private setStructuredMemoryPreview(
+    preview: StructuredMemoryContextPreview,
+    requestedChildAgentId?: string
+  ): void {
+    this.snapshotValue.structuredMemoryPreview = preview;
+    this.snapshotValue.structuredMemoryUseNextExecution = false;
+    this.snapshotValue.structuredMemoryError = null;
+    const record = this.snapshotValue.selectedTask;
+    this.structuredMemoryPreviewKey = record
+      ? structuredMemoryActionKey(record, requestedChildAgentId ?? preview.childAgentId)
+      : null;
+  }
+
+  private async runStructuredMemory(
+    operation: (taskId: string) => Promise<void>
+  ): Promise<void> {
+    const taskId = this.snapshotValue.selectedTask?.request.taskId;
+    if (!taskId || this.snapshotValue.structuredMemoryBusy) return;
+    this.snapshotValue.structuredMemoryBusy = true;
+    this.snapshotValue.structuredMemoryError = null;
+    this.onChange();
+    try {
+      await operation(taskId);
+    } catch {
+      this.snapshotValue.structuredMemoryError = "write_failed";
+      this.snapshotValue.structuredMemoryUseNextExecution = false;
+    } finally {
+      this.snapshotValue.structuredMemoryBusy = false;
+      if (!this.disposed) this.onChange();
+    }
+  }
+
+  private async tryApproveStructuredMemoryPreview(
+    taskId: string,
+    childAgentId?: string
+  ): Promise<void> {
+    if (!this.snapshotValue.structuredMemoryUseNextExecution) return;
+    const preview = this.snapshotValue.structuredMemoryPreview;
+    this.snapshotValue.structuredMemoryUseNextExecution = false;
+    if (!preview || preview.taskId !== taskId || preview.candidateCount === 0
+      || Date.parse(preview.expiresAt) <= Date.now()
+      || (childAgentId && preview.childAgentId !== childAgentId)) {
+      this.snapshotValue.structuredMemoryError = "preview_stale";
+      return;
+    }
+    try {
+      await this.client.approveStructuredMemoryPreview(taskId, preview.previewId);
+      this.snapshotValue.structuredMemoryError = null;
+    } catch {
+      // Memory is optional: stale approval always degrades to a memory-free execution.
+      this.snapshotValue.structuredMemoryError = "preview_stale";
+    }
+  }
+
+  private async refreshStructuredMemoryAfterMutation(taskId: string): Promise<void> {
+    const record = this.snapshotValue.selectedTask;
+    if (!record || record.request.taskId !== taskId) return;
+    const childAgentId = this.snapshotValue.structuredMemoryPreview?.childAgentId;
+    const [memory, preview] = await Promise.all([
+      this.client.getStructuredMemory(taskId),
+      this.client.previewStructuredMemory({
+        taskId,
+        ...(childAgentId ? { childAgentId } : {}),
+        excludedMemoryIds: [...this.snapshotValue.structuredMemoryExcludedIds]
+      })
+    ]);
+    this.snapshotValue.selectedStructuredMemory = memory;
+    this.setStructuredMemoryPreview(preview, childAgentId);
+  }
+
   private async readDelegationState(record: CollaborationTaskTransportRecord): Promise<{
     targets: DelegationTargetOption[];
     selections: DelegationTargetSelection[];
@@ -700,10 +1067,22 @@ export class TaskController {
     this.snapshotValue.selectedTask = record;
     this.snapshotValue.selectedExecution = null;
     this.snapshotValue.selectedStructuredMemory = null;
+    this.resetStructuredMemoryControls();
     this.snapshotValue.delegationTargets = [];
     this.snapshotValue.delegationSelections = [];
     this.snapshotValue.selectedImagePaths = {};
     this.imageResolutionFailures.clear();
+  }
+
+  private resetStructuredMemoryControls(): void {
+    this.snapshotValue.structuredMemoryPreview = null;
+    this.snapshotValue.structuredMemoryUseNextExecution = false;
+    this.snapshotValue.structuredMemoryExcludedIds = [];
+    this.snapshotValue.structuredMemoryEditor = null;
+    this.snapshotValue.structuredMemoryDeleteConfirmationId = null;
+    this.snapshotValue.structuredMemoryBusy = false;
+    this.snapshotValue.structuredMemoryError = null;
+    this.structuredMemoryPreviewKey = null;
   }
 
   private isSelected(taskId: string): boolean {
@@ -764,6 +1143,19 @@ export class TaskController {
         resumeCapability: execution.resumeCapability
       } : null,
       selectedStructuredMemory: detailVisible ? this.snapshotValue.selectedStructuredMemory : null,
+      structuredMemoryPreview: detailVisible ? this.snapshotValue.structuredMemoryPreview : null,
+      structuredMemoryUseNextExecution: detailVisible
+        ? this.snapshotValue.structuredMemoryUseNextExecution
+        : false,
+      structuredMemoryExcludedIds: detailVisible
+        ? this.snapshotValue.structuredMemoryExcludedIds
+        : [],
+      structuredMemoryEditor: detailVisible ? this.snapshotValue.structuredMemoryEditor : null,
+      structuredMemoryDeleteConfirmationId: detailVisible
+        ? this.snapshotValue.structuredMemoryDeleteConfirmationId
+        : null,
+      structuredMemoryBusy: detailVisible ? this.snapshotValue.structuredMemoryBusy : false,
+      structuredMemoryError: detailVisible ? this.snapshotValue.structuredMemoryError : null,
       selectedImagePaths: detailVisible ? this.snapshotValue.selectedImagePaths : {}
     });
   }
@@ -817,6 +1209,65 @@ export class BridgeTaskClient implements TaskClient {
 
   getStructuredMemory(taskId: string): Promise<LongHorizonTaskMemorySnapshot> {
     return this.bridge.request("task.memory.get", { taskId }) as Promise<LongHorizonTaskMemorySnapshot>;
+  }
+
+  getStructuredMemorySourceDraft(taskId: string, sourceMemoryId: string) {
+    return this.bridge.request("task.memory.source.get", {
+      taskId,
+      sourceMemoryId
+    }) as Promise<StructuredMemorySourceDraft | null>;
+  }
+
+  getStructuredMemoryItem(taskId: string, memoryId: string) {
+    return this.bridge.request("task.memory.item.get", {
+      taskId,
+      memoryId
+    }) as Promise<StructuredMemoryItemDetail | null>;
+  }
+
+  createStructuredMemoryItem(input: Parameters<TaskClient["createStructuredMemoryItem"]>[0]) {
+    return this.bridge.request(
+      "task.memory.item.create",
+      input as unknown as Record<string, unknown>
+    ) as Promise<StructuredMemoryItemDetail>;
+  }
+
+  updateStructuredMemoryItem(input: Parameters<TaskClient["updateStructuredMemoryItem"]>[0]) {
+    return this.bridge.request(
+      "task.memory.item.update",
+      input as unknown as Record<string, unknown>
+    ) as Promise<StructuredMemoryItemDetail>;
+  }
+
+  deleteStructuredMemoryItem(taskId: string, memoryId: string): Promise<boolean> {
+    return this.bridge.request("task.memory.item.delete", {
+      taskId,
+      memoryId,
+      confirmed: true
+    }) as Promise<boolean>;
+  }
+
+  setStructuredMemoryAuthorization(
+    input: Parameters<TaskClient["setStructuredMemoryAuthorization"]>[0]
+  ) {
+    return this.bridge.request(
+      "task.memory.authorization.set",
+      input as unknown as Record<string, unknown>
+    ) as Promise<StructuredMemoryContextPreview>;
+  }
+
+  previewStructuredMemory(input: Parameters<TaskClient["previewStructuredMemory"]>[0]) {
+    return this.bridge.request(
+      "task.memory.preview",
+      input as unknown as Record<string, unknown>
+    ) as Promise<StructuredMemoryContextPreview>;
+  }
+
+  approveStructuredMemoryPreview(taskId: string, previewId: string) {
+    return this.bridge.request("task.memory.preview.approve", {
+      taskId,
+      previewId
+    }) as Promise<StructuredMemoryPreviewApproval>;
   }
 
   async resolveImage(taskId: string, attachmentId: string): Promise<string> {
@@ -896,6 +1347,14 @@ export class MockTaskClient implements TaskClient {
   async summaries(): Promise<CollaborationTaskSummarySnapshot> { return structuredClone(EMPTY_SUMMARY); }
   async get(): Promise<CollaborationTaskTransportRecord> { throw new Error("TASK_NOT_FOUND"); }
   async getStructuredMemory(): Promise<LongHorizonTaskMemorySnapshot> { throw new Error("MEMORY_STORE_UNAVAILABLE"); }
+  async getStructuredMemorySourceDraft(): Promise<StructuredMemorySourceDraft | null> { return null; }
+  async getStructuredMemoryItem(): Promise<StructuredMemoryItemDetail | null> { return null; }
+  async createStructuredMemoryItem(): Promise<StructuredMemoryItemDetail> { throw new Error("MEMORY_STORE_UNAVAILABLE"); }
+  async updateStructuredMemoryItem(): Promise<StructuredMemoryItemDetail> { throw new Error("MEMORY_STORE_UNAVAILABLE"); }
+  async deleteStructuredMemoryItem(): Promise<boolean> { return false; }
+  async setStructuredMemoryAuthorization(): Promise<StructuredMemoryContextPreview> { throw new Error("MEMORY_STORE_UNAVAILABLE"); }
+  async previewStructuredMemory(): Promise<StructuredMemoryContextPreview> { throw new Error("MEMORY_STORE_UNAVAILABLE"); }
+  async approveStructuredMemoryPreview(): Promise<StructuredMemoryPreviewApproval> { throw new Error("MEMORY_STORE_UNAVAILABLE"); }
   async resolveImage(): Promise<string> { throw new Error("TASK_ATTACHMENT_NOT_FOUND"); }
   async stageImage(_path: string): Promise<StagedTaskImageDto> { throw new Error("TASK_ATTACHMENTS_UNAVAILABLE"); }
   async send(): Promise<CollaborationTaskTransportRecord> { throw new Error("TASK_TRANSPORT_UNAVAILABLE"); }
@@ -911,6 +1370,57 @@ export class MockTaskClient implements TaskClient {
   async continue(): Promise<CollaborationTaskTransportRecord> { throw new Error("TASK_CONTINUE_UNAVAILABLE"); }
   async complete(): Promise<CollaborationTaskTransportRecord> { throw new Error("TASK_COMPLETE_UNAVAILABLE"); }
   async renew(): Promise<CollaborationTaskTransportRecord> { throw new Error("TASK_RENEW_UNAVAILABLE"); }
+}
+
+function structuredMemoryActionKey(
+  record: CollaborationTaskTransportRecord,
+  childAgentId?: string
+): string | null {
+  if (record.direction !== "incoming"
+    || record.request.executionMode !== "long_horizon"
+    || !record.longHorizon
+    || record.delegationPlan) return null;
+  const initialApproval = record.approval === "pending";
+  const continuation = (record.longHorizon.phase === "input_required"
+    || record.longHorizon.phase === "paused") && Boolean(record.longHorizon.pendingInput);
+  if (!initialApproval && !continuation) return null;
+  return [
+    record.request.taskId,
+    record.longHorizon.stages.length + 1,
+    record.longHorizon.pendingInput?.inputId ?? "initial",
+    childAgentId ?? "default"
+  ].join(":");
+}
+
+function editorFromItem(
+  item: StructuredMemoryItemDetail,
+  workspaceScopeAvailable: boolean
+): StructuredMemoryEditor {
+  return {
+    mode: "edit",
+    sourceMemoryId: item.sourceMemoryId,
+    memoryId: item.memoryId,
+    expectedVersion: item.version,
+    workspaceScopeAvailable,
+    scope: item.scope,
+    kind: item.kind,
+    title: item.title,
+    content: item.content,
+    pinned: item.pinned,
+    expiresAt: item.expiresAt
+  };
+}
+
+function boundEditorContent(value: string): string {
+  const encoder = new TextEncoder();
+  if (encoder.encode(value).byteLength <= 4 * 1_024) return value;
+  let result = "";
+  for (const character of value) {
+    const next = result + character;
+    if (encoder.encode(next).byteLength > 4 * 1_024) break;
+    result = next;
+  }
+  return result;
 }
 
 export function delegationTargetKey(target: DelegationTargetSelection): string {

@@ -1,7 +1,7 @@
-import { createHash } from "node:crypto";
-import { chmod, mkdir } from "node:fs/promises";
-import { dirname } from "node:path";
-import { DatabaseSync } from "node:sqlite";
+import { createHash, randomUUID } from "node:crypto";
+import { access, chmod, mkdir, readFile, rename, rm, stat } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { backup, DatabaseSync } from "node:sqlite";
 import {
   MEMORY_SHADOW_RETRIEVAL_LIMITS,
   TETI_MEMORY_SHADOW_RETRIEVAL_SCHEMA_VERSION,
@@ -17,10 +17,50 @@ import {
   type LongHorizonStageMemoryInput,
   type LongHorizonStageMemorySummary,
   type LongHorizonTaskMemorySnapshot,
-  type StructuredTaskMemoryStore
+  type StructuredTaskMemoryStore,
+  unavailableLongHorizonTaskMemory
 } from "../../../../../core/memory/structured-task.ts";
+import type {
+  CreateStructuredMemoryItemInput,
+  StructuredMemoryAuthorizationInput,
+  StructuredMemoryContextPreview,
+  StructuredMemoryExecutionInput,
+  StructuredMemoryExecutionSelection,
+  StructuredMemoryItemDetail,
+  StructuredMemoryPreviewApproval,
+  StructuredMemoryPreviewInput,
+  UpdateStructuredMemoryItemInput
+} from "../../../../../core/memory/context-injection.ts";
+import {
+  STRUCTURED_MEMORY_STORE_LIMITS,
+  TETI_STRUCTURED_MEMORY_RECOVERY_SCHEMA_VERSION,
+  type StructuredMemoryBackupReport,
+  type StructuredMemoryLocalMetrics,
+  type StructuredMemoryMaintenanceInput,
+  type StructuredMemoryMaintenanceReport,
+  type StructuredMemoryMigrationStatus,
+  type StructuredMemoryRestoreReport,
+  type StructuredMemoryStoreHealth
+} from "../../../../../core/memory/recovery-quality.ts";
+import {
+  DATABASE_MIGRATION_V3_SQL,
+  DATABASE_MIGRATION_V4_SQL,
+  StructuredContextSqliteError,
+  approveStructuredMemoryContextPreview,
+  createStructuredMemoryContextPreview,
+  createStructuredMemoryExecutionContext,
+  createStructuredMemoryItem,
+  cleanupExpiredStructuredMemory,
+  deleteStructuredMemoryItem,
+  getLatestStructuredMemoryInjectionManifest,
+  getStructuredMemoryItem,
+  getStructuredMemorySourceDraft,
+  listStructuredMemoryItemsForTask,
+  setStructuredMemoryAuthorization,
+  updateStructuredMemoryItem
+} from "./structured-context-sqlite.ts";
 
-const DATABASE_SCHEMA_VERSION = 2;
+const DATABASE_SCHEMA_VERSION = 4;
 const SAFE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$/;
 const SAFE_AGENT_PATTERN = /^[a-z0-9]+(?:[._-][a-z0-9]+)*$/;
 const DATABASE_SCHEMA_V1_SQL = `
@@ -177,6 +217,7 @@ interface ShadowCandidateRow {
 export class StructuredTaskMemoryStoreError extends Error {
   readonly code:
     | "MEMORY_STORE_UNAVAILABLE"
+    | "MEMORY_STORE_READ_ONLY"
     | "MEMORY_INPUT_INVALID"
     | "MEMORY_SOURCE_CONFLICT"
     | "MEMORY_STORE_FULL";
@@ -184,6 +225,7 @@ export class StructuredTaskMemoryStoreError extends Error {
   constructor(
     code:
       | "MEMORY_STORE_UNAVAILABLE"
+      | "MEMORY_STORE_READ_ONLY"
       | "MEMORY_INPUT_INVALID"
       | "MEMORY_SOURCE_CONFLICT"
       | "MEMORY_STORE_FULL",
@@ -203,14 +245,27 @@ export class StructuredTaskMemoryStoreError extends Error {
 export class SqliteStructuredTaskMemoryStore implements StructuredTaskMemoryStore {
   private readonly path: string;
   private readonly now: () => Date;
+  private readonly maximumDatabaseBytes: number;
   private database: DatabaseSync | null = null;
+  private mode: "ready" | "read_only" = "ready";
+  private databaseSchemaVersion = 0;
+  private migrationStatus: StructuredMemoryMigrationStatus = "current";
+  private integrity: "ok" | "failed" | "unknown" = "unknown";
+  private foreignKeys: "ok" | "failed" | "unknown" = "unknown";
+  private recoveryBackupAvailable = false;
+  private safeErrorCount = 0;
   private featureEnabledAt: string | null = null;
   private initialization: Promise<void> | null = null;
   private operation: Promise<void> = Promise.resolve();
 
-  constructor(options: { path: string; now?: () => Date }) {
+  constructor(options: { path: string; now?: () => Date; maximumDatabaseBytes?: number }) {
     this.path = options.path;
     this.now = options.now ?? (() => new Date());
+    this.maximumDatabaseBytes = options.maximumDatabaseBytes
+      ?? STRUCTURED_MEMORY_STORE_LIMITS.maximumDatabaseBytes;
+    if (!Number.isSafeInteger(this.maximumDatabaseBytes) || this.maximumDatabaseBytes < 1) {
+      throw new Error("Structured task memory quota is invalid.");
+    }
   }
 
   initialize(): Promise<void> {
@@ -227,18 +282,24 @@ export class SqliteStructuredTaskMemoryStore implements StructuredTaskMemoryStor
     validateStageInput(input);
     await this.initialize();
     await this.serial(() => {
-      const database = this.requireDatabase();
+      const database = this.requireWritableDatabase();
+      this.requireQuotaAvailable(database);
       if (Date.parse(input.taskCreatedAt) < Date.parse(this.featureEnabledAt!)) return;
       const existing = database.prepare(`
-        SELECT artifact_id, content_digest
+        SELECT memory_id, artifact_id, content_digest
         FROM long_horizon_task_memory
         WHERE task_id = ? AND stage_index = ?
       `).get(input.taskId, input.stageIndex) as {
+        memory_id: string;
         artifact_id: string;
         content_digest: string;
       } | undefined;
       const contentDigest = digest(input.content);
       if (existing) {
+        const deletion = database.prepare(`
+          SELECT 1 AS found FROM structured_memory_deletions WHERE source_memory_id = ?
+        `).get(existing.memory_id) as { found: number } | undefined;
+        if (deletion) return;
         if (existing.artifact_id === input.artifactId && existing.content_digest === contentDigest) return;
         throw new StructuredTaskMemoryStoreError(
           "MEMORY_SOURCE_CONFLICT",
@@ -302,7 +363,8 @@ export class SqliteStructuredTaskMemoryStore implements StructuredTaskMemoryStor
     validateShadowInput(input);
     await this.initialize();
     return this.serial(() => {
-      const database = this.requireDatabase();
+      const database = this.requireWritableDatabase();
+      this.requireQuotaAvailable(database);
       const queryDigest = digest(input.queryText);
       const existing = selectShadowManifestByExecution(database, input.executionId, {
         taskId: input.taskId,
@@ -329,6 +391,7 @@ export class SqliteStructuredTaskMemoryStore implements StructuredTaskMemoryStor
           content, content_digest, created_at
         FROM long_horizon_task_memory
         WHERE child_agent_id = ?
+          AND content <> ''
           AND (task_id = ? OR workspace_id = ? OR peer_teti_id = ?)
       `).all(
         input.childAgentId,
@@ -451,29 +514,217 @@ export class SqliteStructuredTaskMemoryStore implements StructuredTaskMemoryStor
     return this.serial(() => selectLatestShadowManifest(this.requireDatabase(), taskId));
   }
 
+  async getStructuredMemoryItem(input: {
+    memoryId?: string;
+    sourceMemoryId?: string;
+  }): Promise<StructuredMemoryItemDetail | null> {
+    await this.initialize();
+    return this.serial(() => getStructuredMemoryItem(this.requireDatabase(), input));
+  }
+
+  async getStructuredMemorySourceDraft(sourceMemoryId: string) {
+    await this.initialize();
+    return this.serial(() => getStructuredMemorySourceDraft(
+      this.requireDatabase(),
+      sourceMemoryId
+    ));
+  }
+
+  async createStructuredMemoryItem(
+    input: CreateStructuredMemoryItemInput
+  ): Promise<StructuredMemoryItemDetail> {
+    await this.initialize();
+    return this.serial(() => {
+      const database = this.requireWritableDatabase();
+      this.requireQuotaAvailable(database);
+      return createStructuredMemoryItem(database, input);
+    });
+  }
+
+  async updateStructuredMemoryItem(
+    input: UpdateStructuredMemoryItemInput
+  ): Promise<StructuredMemoryItemDetail> {
+    await this.initialize();
+    return this.serial(() => {
+      const database = this.requireWritableDatabase();
+      this.requireQuotaAvailable(database);
+      return updateStructuredMemoryItem(database, input);
+    });
+  }
+
+  async deleteStructuredMemoryItem(input: {
+    memoryId: string;
+    confirmed: true;
+    deletedAt: string;
+  }): Promise<boolean> {
+    await this.initialize();
+    return this.serial(() => {
+      const deleted = deleteStructuredMemoryItem(this.requireWritableDatabase(), input);
+      if (deleted) this.checkpoint("TRUNCATE");
+      return deleted;
+    });
+  }
+
+  async setStructuredMemoryAuthorization(input: StructuredMemoryAuthorizationInput): Promise<void> {
+    await this.initialize();
+    return this.serial(() => setStructuredMemoryAuthorization(this.requireWritableDatabase(), input));
+  }
+
+  async createContextPreview(
+    input: StructuredMemoryPreviewInput
+  ): Promise<StructuredMemoryContextPreview> {
+    await this.initialize();
+    return this.serial(() => {
+      const database = this.requireWritableDatabase();
+      this.requireQuotaAvailable(database);
+      return createStructuredMemoryContextPreview(database, input);
+    });
+  }
+
+  async approveContextPreview(input: {
+    taskId: string;
+    previewId: string;
+    approvedAt: string;
+  }): Promise<StructuredMemoryPreviewApproval> {
+    await this.initialize();
+    return this.serial(() => approveStructuredMemoryContextPreview(
+      this.requireWritableDatabase(),
+      input
+    ));
+  }
+
+  async createExecutionContext(
+    input: StructuredMemoryExecutionInput
+  ): Promise<StructuredMemoryExecutionSelection> {
+    await this.initialize();
+    return this.serial(() => {
+      const database = this.requireWritableDatabase();
+      this.requireQuotaAvailable(database);
+      return createStructuredMemoryExecutionContext(database, input);
+    });
+  }
+
   async getTaskSnapshot(taskId: string): Promise<LongHorizonTaskMemorySnapshot> {
     requireSafeId(taskId, "Task ID");
     await this.initialize();
     return this.serial(() => {
-      const rows = this.requireDatabase().prepare(`
+      const database = this.requireDatabase();
+      if (!hasTable(database, "long_horizon_task_memory")) {
+        return {
+          ...unavailableLongHorizonTaskMemory(taskId),
+          safeErrorCode: this.mode === "read_only"
+            ? "MEMORY_STORE_READ_ONLY" as const
+            : "MEMORY_STORE_UNAVAILABLE" as const
+        };
+      }
+      const rows = database.prepare(`
         SELECT memory_id, task_id, stage_id, stage_index, child_agent_id,
           connector_id, artifact_id, workspace_revision, content,
           content_digest, created_at
         FROM long_horizon_task_memory
-        WHERE task_id = ?
+        WHERE task_id = ? AND content <> ''
         ORDER BY stage_index DESC
       `).all(taskId) as unknown as MemoryRow[];
       const records = rows.map(toSummary);
+      const structuredContextAvailable = hasTable(database, "structured_memory_items")
+        && hasTable(database, "structured_memory_versions");
       return {
         schemaVersion: TETI_STRUCTURED_TASK_MEMORY_SCHEMA_VERSION,
         taskId,
-        status: "ready",
+        status: this.mode,
         recordCount: records.length,
         latestStageIndex: records[0]?.stageIndex ?? null,
         updatedAt: records[0]?.createdAt ?? null,
         records,
-        latestShadowManifest: selectLatestShadowManifest(this.requireDatabase(), taskId)
+        items: structuredContextAvailable
+          ? listStructuredMemoryItemsForTask(database, taskId)
+          : [],
+        latestShadowManifest: hasTable(database, "memory_shadow_manifests")
+          ? selectLatestShadowManifest(database, taskId)
+          : null,
+        latestInjectionManifest: hasTable(database, "structured_memory_injection_manifests")
+          ? getLatestStructuredMemoryInjectionManifest(database, taskId)
+          : null,
+        ...(this.mode === "read_only"
+          ? { safeErrorCode: "MEMORY_STORE_READ_ONLY" as const }
+          : {})
       };
+    });
+  }
+
+  async getHealth(): Promise<StructuredMemoryStoreHealth> {
+    await this.initialize();
+    return this.serial(() => {
+      const database = this.requireDatabase();
+      const bytes = databaseBytes(database);
+      return {
+        schemaVersion: TETI_STRUCTURED_MEMORY_RECOVERY_SCHEMA_VERSION,
+        mode: this.mode,
+        databaseSchemaVersion: this.databaseSchemaVersion,
+        supportedSchemaVersion: DATABASE_SCHEMA_VERSION,
+        migrationStatus: this.migrationStatus,
+        integrity: this.integrity,
+        foreignKeys: this.foreignKeys,
+        journalMode: this.mode === "read_only" ? "read_only" : "wal",
+        databaseBytes: bytes,
+        quotaBytes: this.maximumDatabaseBytes,
+        quotaStatus: quotaStatus(bytes, this.maximumDatabaseBytes),
+        recoveryBackupAvailable: this.recoveryBackupAvailable,
+        metrics: readLocalMetrics(database, this.safeErrorCount)
+      };
+    });
+  }
+
+  async runMaintenance(
+    input: StructuredMemoryMaintenanceInput
+  ): Promise<StructuredMemoryMaintenanceReport> {
+    if (input.schemaVersion !== TETI_STRUCTURED_MEMORY_RECOVERY_SCHEMA_VERSION
+      || input.confirmed !== true || !isTimestamp(input.executedAt)) {
+      invalid("Structured Memory maintenance");
+    }
+    await this.initialize();
+    return this.serial(() => {
+      const database = this.requireWritableDatabase();
+      const previewRetentionCutoff = new Date(
+        Date.parse(input.executedAt) - STRUCTURED_MEMORY_STORE_LIMITS.expiredPreviewRetentionMs
+      ).toISOString();
+      const cleanup = cleanupExpiredStructuredMemory(database, {
+        executedAt: input.executedAt,
+        previewRetentionCutoff
+      });
+      if (cleanup.expiredItemCount > 0) database.exec("VACUUM");
+      this.checkpoint("TRUNCATE");
+      requireDatabaseIntegrity(database);
+      const bytes = databaseBytes(database);
+      return {
+        schemaVersion: TETI_STRUCTURED_MEMORY_RECOVERY_SCHEMA_VERSION,
+        executedAt: input.executedAt,
+        ...cleanup,
+        checkpointed: true,
+        integrity: "ok",
+        databaseBytes: bytes,
+        quotaStatus: quotaStatus(bytes, this.maximumDatabaseBytes)
+      };
+    });
+  }
+
+  async exportBackup(
+    destinationPath: string,
+    input: { confirmed: true; createdAt: string }
+  ): Promise<StructuredMemoryBackupReport> {
+    if (input.confirmed !== true || !isTimestamp(input.createdAt)
+      || destinationPath === this.path) invalid("Structured Memory backup");
+    await this.initialize();
+    return this.serial(async () => {
+      if (await fileExists(destinationPath)) {
+        throw new StructuredTaskMemoryStoreError(
+          "MEMORY_SOURCE_CONFLICT",
+          "Structured Memory backup destination already exists."
+        );
+      }
+      const database = this.requireDatabase();
+      if (this.mode === "ready") this.checkpoint("FULL");
+      return createVerifiedBackup(database, destinationPath, input.createdAt);
     });
   }
 
@@ -481,51 +732,98 @@ export class SqliteStructuredTaskMemoryStore implements StructuredTaskMemoryStor
     const initialization = this.initialization;
     if (initialization) await initialization.catch(() => undefined);
     await this.operation.catch(() => undefined);
-    this.database?.close();
+    try {
+      if (this.database && this.mode === "ready") this.checkpoint("TRUNCATE");
+    } catch {
+      this.safeErrorCount += 1;
+    } finally {
+      this.database?.close();
+    }
     this.database = null;
     this.featureEnabledAt = null;
+    this.mode = "ready";
+    this.databaseSchemaVersion = 0;
     this.initialization = null;
   }
 
   private async open(): Promise<void> {
-    await mkdir(dirname(this.path), { recursive: true, mode: 0o700 });
-    const database = new DatabaseSync(this.path, {
-      allowExtension: false,
-      enableDoubleQuotedStringLiterals: false,
-      enableForeignKeyConstraints: true,
-      timeout: 250
-    });
-    this.database = database;
-    database.exec("PRAGMA journal_mode = DELETE");
-    database.exec("PRAGMA synchronous = FULL");
-    database.exec("PRAGMA trusted_schema = OFF");
-    database.exec("PRAGMA secure_delete = ON");
-    const version = Number((database.prepare("PRAGMA user_version").get() as {
-      user_version: number;
-    }).user_version);
-    if (version === 0) this.createSchemaV1(database);
-    else if (version < 1 || version > DATABASE_SCHEMA_VERSION) {
-      throw new Error("Unsupported structured task memory schema.");
+    const databaseDirectory = dirname(this.path);
+    const databaseDirectoryAlreadyExisted = await fileExists(databaseDirectory);
+    await mkdir(databaseDirectory, { recursive: true, mode: 0o700 });
+    try {
+      const database = openDatabase(this.path);
+      this.database = database;
+      const originalVersion = userVersion(database);
+      this.databaseSchemaVersion = originalVersion;
+      if (originalVersion > DATABASE_SCHEMA_VERSION) {
+        database.close();
+        this.database = openDatabase(this.path, true);
+        this.mode = "read_only";
+        this.migrationStatus = "future_schema_read_only";
+        this.integrity = safeIntegrity(this.database) ? "ok" : "unknown";
+        this.foreignKeys = "unknown";
+        return;
+      }
+      if (originalVersion < 0) throw new Error("Unsupported structured task memory schema.");
+      database.exec("PRAGMA journal_mode = WAL");
+      database.exec("PRAGMA synchronous = FULL");
+      database.exec("PRAGMA trusted_schema = OFF");
+      database.exec("PRAGMA secure_delete = ON");
+      database.exec(`PRAGMA wal_autocheckpoint = ${STRUCTURED_MEMORY_STORE_LIMITS.walAutoCheckpointPages}`);
+      const fresh = originalVersion === 0;
+      if (fresh) this.createSchemaV1(database);
+      else if (originalVersion < DATABASE_SCHEMA_VERSION) {
+        await this.createPreMigrationBackup(database, originalVersion);
+      }
+      this.requireMigrationEvidence(database, 1, DATABASE_SCHEMA_V1_SQL);
+      let currentVersion = userVersion(database);
+      if (currentVersion === 1) {
+        this.migrateToV2(database);
+        currentVersion = 2;
+      }
+      this.requireMigrationEvidence(database, 2, DATABASE_MIGRATION_V2_SQL);
+      if (currentVersion === 2) {
+        this.migrateToV3(database);
+        currentVersion = 3;
+      }
+      this.requireMigrationEvidence(database, 3, DATABASE_MIGRATION_V3_SQL);
+      if (currentVersion === 3) this.migrateToV4(database);
+      this.requireMigrationEvidence(database, 4, DATABASE_MIGRATION_V4_SQL);
+      requireDatabaseIntegrity(database);
+      this.integrity = "ok";
+      this.foreignKeys = "ok";
+      this.databaseSchemaVersion = DATABASE_SCHEMA_VERSION;
+      this.mode = "ready";
+      this.migrationStatus = fresh
+        ? "created"
+        : originalVersion < DATABASE_SCHEMA_VERSION ? "migrated" : "current";
+      const metadata = database.prepare(`
+        SELECT value FROM runtime_metadata WHERE key = 'feature_enabled_at'
+      `).get() as { value: string } | undefined;
+      if (!metadata || !isTimestamp(metadata.value)) {
+        throw new Error("Structured task memory metadata is invalid.");
+      }
+      this.featureEnabledAt = metadata.value;
+      // The production profile directory is already private. Only chmod a
+      // directory this store created; a recovery CLI may point at a database
+      // inside an existing operator-owned directory such as /private/tmp.
+      if (!databaseDirectoryAlreadyExisted) await chmod(databaseDirectory, 0o700);
+      await chmod(this.path, 0o600);
+    } catch (error) {
+      this.database?.close();
+      this.database = null;
+      try {
+        await access(this.path);
+        this.database = openDatabase(this.path, true);
+        this.mode = "read_only";
+        this.databaseSchemaVersion = safeUserVersion(this.database);
+        this.migrationStatus = "integrity_failure_read_only";
+        this.integrity = safeIntegrity(this.database) ? "ok" : "failed";
+        this.foreignKeys = "unknown";
+      } catch {
+        throw error;
+      }
     }
-    this.requireMigrationEvidence(database, 1, DATABASE_SCHEMA_V1_SQL);
-    const currentVersion = Number((database.prepare("PRAGMA user_version").get() as {
-      user_version: number;
-    }).user_version);
-    if (currentVersion === 1) this.migrateToV2(database);
-    this.requireMigrationEvidence(database, 2, DATABASE_MIGRATION_V2_SQL);
-    const integrity = database.prepare("PRAGMA integrity_check").get() as {
-      integrity_check: string;
-    };
-    if (integrity.integrity_check !== "ok") throw new Error("Structured task memory integrity check failed.");
-    const foreignKeyFailures = database.prepare("PRAGMA foreign_key_check").all();
-    if (foreignKeyFailures.length > 0) throw new Error("Structured task memory foreign key check failed.");
-    const metadata = database.prepare(`
-      SELECT value FROM runtime_metadata WHERE key = 'feature_enabled_at'
-    `).get() as { value: string } | undefined;
-    if (!metadata || !isTimestamp(metadata.value)) throw new Error("Structured task memory metadata is invalid.");
-    this.featureEnabledAt = metadata.value;
-    await chmod(dirname(this.path), 0o700);
-    await chmod(this.path, 0o600);
   }
 
   private createSchemaV1(database: DatabaseSync): void {
@@ -563,6 +861,57 @@ export class SqliteStructuredTaskMemoryStore implements StructuredTaskMemoryStor
     }
   }
 
+  private migrateToV3(database: DatabaseSync): void {
+    const appliedAt = this.now().toISOString();
+    database.exec("BEGIN IMMEDIATE");
+    try {
+      database.exec(DATABASE_MIGRATION_V3_SQL);
+      database.prepare(`
+        INSERT INTO schema_migrations (version, applied_at, checksum) VALUES (?, ?, ?)
+      `).run(3, appliedAt, digest(DATABASE_MIGRATION_V3_SQL));
+      database.exec("PRAGMA user_version = 3");
+      database.exec("COMMIT");
+    } catch (error) {
+      database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  private migrateToV4(database: DatabaseSync): void {
+    const appliedAt = this.now().toISOString();
+    database.exec("BEGIN IMMEDIATE");
+    try {
+      database.exec(DATABASE_MIGRATION_V4_SQL);
+      database.prepare(`
+        INSERT INTO schema_migrations (version, applied_at, checksum) VALUES (?, ?, ?)
+      `).run(4, appliedAt, digest(DATABASE_MIGRATION_V4_SQL));
+      database.exec("PRAGMA user_version = 4");
+      database.exec("COMMIT");
+    } catch (error) {
+      database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  private async createPreMigrationBackup(database: DatabaseSync, version: number): Promise<void> {
+    const metadata = hasTable(database, "runtime_metadata")
+      ? database.prepare(`
+          SELECT value FROM runtime_metadata WHERE key = 'feature_enabled_at'
+        `).get() as { value: string } | undefined
+      : undefined;
+    const identity = digest(`${version}\0${metadata?.value ?? "unknown"}`).slice(-12);
+    const recoveryRoot = `${this.path}.recovery`;
+    const destination = join(recoveryRoot, `schema-${version}-pre-v4-${identity}.sqlite`);
+    await mkdir(recoveryRoot, { recursive: true, mode: 0o700 });
+    try {
+      await access(destination);
+      requireDatabaseFileIntegrity(destination);
+    } catch {
+      await createVerifiedBackup(database, destination, this.now().toISOString());
+    }
+    this.recoveryBackupAvailable = true;
+  }
+
   private requireMigrationEvidence(database: DatabaseSync, version: number, sql: string): void {
     const migration = database.prepare(`
       SELECT version, checksum FROM schema_migrations WHERE version = ?
@@ -577,11 +926,40 @@ export class SqliteStructuredTaskMemoryStore implements StructuredTaskMemoryStor
     return this.database;
   }
 
-  private serial<T>(operation: () => T): Promise<T> {
+  private requireWritableDatabase(): DatabaseSync {
+    const database = this.requireDatabase();
+    if (this.mode !== "ready") {
+      throw new StructuredTaskMemoryStoreError(
+        "MEMORY_STORE_READ_ONLY",
+        "Structured task memory is in safe read-only mode."
+      );
+    }
+    return database;
+  }
+
+  private requireQuotaAvailable(database: DatabaseSync): void {
+    if (databaseBytes(database) >= this.maximumDatabaseBytes) {
+      throw new StructuredTaskMemoryStoreError(
+        "MEMORY_STORE_FULL",
+        "Structured task memory reached its database quota."
+      );
+    }
+  }
+
+  private checkpoint(mode: "FULL" | "TRUNCATE"): void {
+    if (!this.database || this.mode !== "ready") return;
+    this.database.prepare(`PRAGMA wal_checkpoint(${mode})`).get();
+  }
+
+  private serial<T>(operation: () => T | Promise<T>): Promise<T> {
     const pending = this.operation.then(operation, operation);
     this.operation = pending.then(() => undefined, () => undefined);
     return pending.catch((error) => {
+      this.safeErrorCount += 1;
       if (error instanceof StructuredTaskMemoryStoreError) throw error;
+      if (error instanceof StructuredContextSqliteError) {
+        throw new StructuredTaskMemoryStoreError(error.code, error.message);
+      }
       throw asStoreUnavailable(error);
     });
   }
@@ -596,6 +974,230 @@ interface RankedShadowMemory {
   itemDigest: string;
   contentBytes: number;
   createdAt: string;
+}
+
+function openDatabase(path: string, readOnly = false): DatabaseSync {
+  return new DatabaseSync(path, {
+    allowExtension: false,
+    enableDoubleQuotedStringLiterals: false,
+    enableForeignKeyConstraints: true,
+    readOnly,
+    timeout: 250
+  });
+}
+
+function userVersion(database: DatabaseSync): number {
+  const version = Number((database.prepare("PRAGMA user_version").get() as {
+    user_version: number;
+  }).user_version);
+  if (!Number.isSafeInteger(version) || version < 0) {
+    throw new Error("Structured task memory schema version is invalid.");
+  }
+  return version;
+}
+
+function safeUserVersion(database: DatabaseSync): number {
+  try {
+    return userVersion(database);
+  } catch {
+    return 0;
+  }
+}
+
+function hasTable(database: DatabaseSync, table: string): boolean {
+  try {
+    return Boolean(database.prepare(`
+      SELECT 1 AS found FROM sqlite_schema WHERE type = 'table' AND name = ?
+    `).get(table));
+  } catch {
+    return false;
+  }
+}
+
+function requireDatabaseIntegrity(database: DatabaseSync): void {
+  const integrity = database.prepare("PRAGMA integrity_check").get() as {
+    integrity_check: string;
+  };
+  if (integrity.integrity_check !== "ok") {
+    throw new Error("Structured task memory integrity check failed.");
+  }
+  if (database.prepare("PRAGMA foreign_key_check").all().length > 0) {
+    throw new Error("Structured task memory foreign key check failed.");
+  }
+}
+
+function safeIntegrity(database: DatabaseSync): boolean {
+  try {
+    const integrity = database.prepare("PRAGMA integrity_check").get() as {
+      integrity_check: string;
+    };
+    return integrity.integrity_check === "ok";
+  } catch {
+    return false;
+  }
+}
+
+function requireDatabaseFileIntegrity(path: string): void {
+  const database = openDatabase(path, true);
+  try {
+    requireDatabaseIntegrity(database);
+  } finally {
+    database.close();
+  }
+}
+
+async function createVerifiedBackup(
+  source: DatabaseSync,
+  destinationPath: string,
+  createdAt: string
+): Promise<StructuredMemoryBackupReport> {
+  requireDatabaseIntegrity(source);
+  await mkdir(dirname(destinationPath), { recursive: true, mode: 0o700 });
+  const temporaryPath = `${destinationPath}.tmp-${randomUUID()}`;
+  try {
+    await backup(source, temporaryPath, { rate: 64 });
+    await chmod(temporaryPath, 0o600);
+    requireDatabaseFileIntegrity(temporaryPath);
+    await rename(temporaryPath, destinationPath);
+    const bytes = (await stat(destinationPath)).size;
+    const sha256 = createHash("sha256").update(await readFile(destinationPath)).digest("hex");
+    return {
+      schemaVersion: TETI_STRUCTURED_MEMORY_RECOVERY_SCHEMA_VERSION,
+      sourceSchemaVersion: userVersion(source),
+      integrity: "ok",
+      bytes,
+      sha256: `sha256:${sha256}`,
+      createdAt
+    };
+  } catch (error) {
+    await rm(temporaryPath, { force: true }).catch(() => undefined);
+    throw error;
+  }
+}
+
+export async function restoreStructuredTaskMemoryBackup(input: {
+  databasePath: string;
+  backupPath: string;
+  confirmed: true;
+  restoredAt: string;
+}): Promise<StructuredMemoryRestoreReport> {
+  if (input.confirmed !== true || !isTimestamp(input.restoredAt)
+    || input.databasePath === input.backupPath) invalid("Structured Memory restore");
+  if (await fileExists(`${input.databasePath}-wal`)
+    || await fileExists(`${input.databasePath}-shm`)) {
+    throw new StructuredTaskMemoryStoreError(
+      "MEMORY_STORE_UNAVAILABLE",
+      "Close Structured Memory and checkpoint WAL before restore."
+    );
+  }
+  const source = openDatabase(input.backupPath, true);
+  const restoreTemporaryPath = `${input.databasePath}.restore-${randomUUID()}`;
+  let replacedPath: string | null = null;
+  let safetyBackupCreated = false;
+  try {
+    requireDatabaseIntegrity(source);
+    const restoredSchemaVersion = userVersion(source);
+    if (restoredSchemaVersion < 1 || restoredSchemaVersion > DATABASE_SCHEMA_VERSION) {
+      throw new StructuredTaskMemoryStoreError(
+        "MEMORY_INPUT_INVALID",
+        "Structured Memory backup schema is unsupported."
+      );
+    }
+    if (await fileExists(input.databasePath)) {
+      const current = openDatabase(input.databasePath, true);
+      try {
+        requireDatabaseIntegrity(current);
+        const recoveryRoot = `${input.databasePath}.recovery`;
+        const safetyPath = join(
+          recoveryRoot,
+          `pre-restore-${input.restoredAt.replaceAll(/[^0-9]/gu, "")}-${randomUUID()}.sqlite`
+        );
+        await createVerifiedBackup(current, safetyPath, input.restoredAt);
+        safetyBackupCreated = true;
+      } finally {
+        current.close();
+      }
+      replacedPath = `${input.databasePath}.replaced-${randomUUID()}`;
+    }
+    await createVerifiedBackup(source, restoreTemporaryPath, input.restoredAt);
+    if (replacedPath) await rename(input.databasePath, replacedPath);
+    try {
+      await rename(restoreTemporaryPath, input.databasePath);
+    } catch (error) {
+      if (replacedPath) await rename(replacedPath, input.databasePath).catch(() => undefined);
+      throw error;
+    }
+    if (replacedPath) await rm(replacedPath, { force: true });
+    await chmod(input.databasePath, 0o600);
+    requireDatabaseFileIntegrity(input.databasePath);
+    return {
+      schemaVersion: TETI_STRUCTURED_MEMORY_RECOVERY_SCHEMA_VERSION,
+      restoredSchemaVersion,
+      safetyBackupCreated,
+      integrity: "ok",
+      restoredAt: input.restoredAt
+    };
+  } finally {
+    source.close();
+    await rm(restoreTemporaryPath, { force: true }).catch(() => undefined);
+  }
+}
+
+async function fileExists(path: string): Promise<boolean> {
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function databaseBytes(database: DatabaseSync): number {
+  try {
+    const pages = Number((database.prepare("PRAGMA page_count").get() as { page_count: number }).page_count);
+    const pageSize = Number((database.prepare("PRAGMA page_size").get() as { page_size: number }).page_size);
+    return Number.isSafeInteger(pages) && Number.isSafeInteger(pageSize) ? pages * pageSize : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function quotaStatus(bytes: number, maximumBytes: number): "ok" | "warning" | "exceeded" {
+  if (bytes >= maximumBytes) return "exceeded";
+  if (bytes >= Math.floor(maximumBytes * 0.8)) return "warning";
+  return "ok";
+}
+
+function readLocalMetrics(
+  database: DatabaseSync,
+  safeErrorCount: number
+): StructuredMemoryLocalMetrics {
+  const metrics: StructuredMemoryLocalMetrics = {
+    candidateCount: 0,
+    selectedCount: 0,
+    budgetRejectedCount: 0,
+    scopeRejectedCount: 0,
+    deletionSuccessCount: 0,
+    expirationSuccessCount: 0,
+    safeErrorCount
+  };
+  if (!hasTable(database, "structured_memory_metrics")) return metrics;
+  const rows = database.prepare(`
+    SELECT key, value FROM structured_memory_metrics ORDER BY key
+  `).all() as unknown as Array<{ key: string; value: number }>;
+  const keys: Record<string, keyof Omit<StructuredMemoryLocalMetrics, "safeErrorCount">> = {
+    candidate_count: "candidateCount",
+    selected_count: "selectedCount",
+    budget_rejected_count: "budgetRejectedCount",
+    scope_rejected_count: "scopeRejectedCount",
+    deletion_success_count: "deletionSuccessCount",
+    expiration_success_count: "expirationSuccessCount"
+  };
+  for (const row of rows) {
+    const key = keys[row.key];
+    if (key && Number.isSafeInteger(row.value) && row.value >= 0) metrics[key] = row.value;
+  }
+  return metrics;
 }
 
 function validateShadowInput(input: MemoryShadowRetrievalInput): void {

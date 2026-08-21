@@ -2,6 +2,25 @@ import type {
   MemoryShadowRetrievalInput,
   MemoryShadowSelectionManifest
 } from "./shadow-retrieval.ts";
+import type {
+  CreateStructuredMemoryItemInput,
+  StructuredMemoryAuthorizationInput,
+  StructuredMemoryContextPreview,
+  StructuredMemoryExecutionInput,
+  StructuredMemoryExecutionSelection,
+  StructuredMemoryInjectionManifest,
+  StructuredMemoryItemDetail,
+  StructuredMemoryItemSummary,
+  StructuredMemorySourceDraft,
+  StructuredMemoryPreviewApproval,
+  StructuredMemoryPreviewInput,
+  UpdateStructuredMemoryItemInput
+} from "./context-injection.ts";
+import type {
+  StructuredMemoryMaintenanceInput,
+  StructuredMemoryMaintenanceReport,
+  StructuredMemoryStoreHealth
+} from "./recovery-quality.ts";
 
 export const TETI_STRUCTURED_TASK_MEMORY_SCHEMA_VERSION = 1;
 
@@ -54,13 +73,15 @@ export interface LongHorizonStageMemorySummary {
 export interface LongHorizonTaskMemorySnapshot {
   schemaVersion: 1;
   taskId: string;
-  status: "ready" | "unavailable";
+  status: "ready" | "read_only" | "unavailable";
   recordCount: number;
   latestStageIndex: number | null;
   updatedAt: string | null;
   records: LongHorizonStageMemorySummary[];
+  items?: StructuredMemoryItemSummary[];
   latestShadowManifest?: MemoryShadowSelectionManifest | null;
-  safeErrorCode?: "MEMORY_STORE_UNAVAILABLE";
+  latestInjectionManifest?: StructuredMemoryInjectionManifest | null;
+  safeErrorCode?: "MEMORY_STORE_UNAVAILABLE" | "MEMORY_STORE_READ_ONLY";
 }
 
 export interface StructuredTaskMemoryStore {
@@ -68,7 +89,41 @@ export interface StructuredTaskMemoryStore {
   saveStage(input: LongHorizonStageMemoryInput): Promise<void>;
   createShadowManifest(input: MemoryShadowRetrievalInput): Promise<MemoryShadowSelectionManifest>;
   getLatestShadowManifest(taskId: string): Promise<MemoryShadowSelectionManifest | null>;
+  getStructuredMemoryItem(input: {
+    memoryId?: string;
+    sourceMemoryId?: string;
+  }): Promise<StructuredMemoryItemDetail | null>;
+  getStructuredMemorySourceDraft(sourceMemoryId: string): Promise<StructuredMemorySourceDraft | null>;
+  createStructuredMemoryItem(
+    input: CreateStructuredMemoryItemInput
+  ): Promise<StructuredMemoryItemDetail>;
+  updateStructuredMemoryItem(
+    input: UpdateStructuredMemoryItemInput
+  ): Promise<StructuredMemoryItemDetail>;
+  deleteStructuredMemoryItem(input: {
+    memoryId: string;
+    confirmed: true;
+    deletedAt: string;
+  }): Promise<boolean>;
+  setStructuredMemoryAuthorization(
+    input: StructuredMemoryAuthorizationInput
+  ): Promise<void>;
+  createContextPreview(
+    input: StructuredMemoryPreviewInput
+  ): Promise<StructuredMemoryContextPreview>;
+  approveContextPreview(input: {
+    taskId: string;
+    previewId: string;
+    approvedAt: string;
+  }): Promise<StructuredMemoryPreviewApproval>;
+  createExecutionContext(
+    input: StructuredMemoryExecutionInput
+  ): Promise<StructuredMemoryExecutionSelection>;
   getTaskSnapshot(taskId: string): Promise<LongHorizonTaskMemorySnapshot>;
+  getHealth(): Promise<StructuredMemoryStoreHealth>;
+  runMaintenance(
+    input: StructuredMemoryMaintenanceInput
+  ): Promise<StructuredMemoryMaintenanceReport>;
   close(): Promise<void>;
 }
 

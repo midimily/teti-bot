@@ -3,7 +3,7 @@ const remoteTetiSilhouetteUrl = new URL(
   import.meta.url
 ).href;
 
-export type RemoteTetiReachability = "reachable" | "checking" | "unreachable";
+export type RemoteTetiReachability = "reachable" | "checking" | "unreachable" | "unavailable";
 
 export interface RemoteTetiAvatarOptions {
   reachability: RemoteTetiReachability;

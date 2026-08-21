@@ -20,6 +20,7 @@ import type {
   DelegationTargetSelection
 } from "../../../core/delegation/types.ts";
 import type { LongHorizonTaskMemorySnapshot } from "../../../core/memory/structured-task.ts";
+import type { StructuredMemoryContextPreview } from "../../../core/memory/context-injection.ts";
 
 const chinese = createDesktopI18n("zh-Hans");
 const english = createDesktopI18n("en");
@@ -331,6 +332,33 @@ test("long-horizon detail loads execution and delegation targets without a seria
   await selecting;
   assert.equal(controller.snapshot.delegationTargets.length, 2);
   assert.equal(controller.snapshot.selectedStructuredMemory?.status, "ready");
+  controller.dispose();
+});
+
+test("Structured Memory preview is opt-in, approved before execution, and never blocks Task approval", async () => {
+  const client = new MemoryPreviewTaskClient();
+  client.seed(longHorizonDetailRecord("task-memory-preview"));
+  const controller = new TaskController({
+    client,
+    tauri: new RecordingTauriInvoker(),
+    notchWindow: { setMode: async () => undefined } as never,
+    onChange: () => undefined
+  });
+
+  await controller.select("task-memory-preview");
+  assert.equal(controller.snapshot.structuredMemoryPreview?.candidateCount, 1);
+  assert.equal(controller.snapshot.structuredMemoryUseNextExecution, false);
+  controller.setStructuredMemoryUseNextExecution(true);
+  await controller.approve();
+  assert.deepEqual(client.order, ["memory-preview-approved", "task-approved"]);
+
+  client.failPreviewApproval = true;
+  client.order.length = 0;
+  await controller.select("task-memory-preview");
+  controller.setStructuredMemoryUseNextExecution(true);
+  await controller.approve();
+  assert.deepEqual(client.order, ["memory-preview-failed", "task-approved"]);
+  assert.equal(controller.snapshot.structuredMemoryError, "preview_stale");
   controller.dispose();
 });
 
@@ -802,6 +830,83 @@ class RecordingTaskClient implements TaskClient {
   }
   async reject(): Promise<CollaborationTaskTransportRecord> { return this.get(); }
   async cancel(): Promise<CollaborationTaskTransportRecord> { return this.get(); }
+}
+
+class MemoryPreviewTaskClient extends RecordingTaskClient {
+  readonly order: string[] = [];
+  failPreviewApproval = false;
+
+  async previewStructuredMemory(input: {
+    taskId: string;
+    childAgentId?: string;
+    excludedMemoryIds: string[];
+  }): Promise<StructuredMemoryContextPreview> {
+    return {
+      schemaVersion: 1,
+      previewId: `smp_${input.taskId}`,
+      taskId: input.taskId,
+      childAgentId: input.childAgentId ?? "osaurus-runtime",
+      queryDigest: `sha256:${"a".repeat(64)}`,
+      generatedAt: "2099-01-01T00:00:00.000Z",
+      expiresAt: "2099-01-01T00:10:00.000Z",
+      cliInjectionEnabled: false,
+      scopeAuthorizations: [{
+        schemaVersion: 1,
+        scope: "task",
+        available: true,
+        enabled: true,
+        requiresExplicitAuthorization: false,
+        authorizedAt: null,
+        revokedAt: null,
+        eligibleItemCount: 1
+      }],
+      candidateCount: 1,
+      candidateBytes: 32,
+      candidates: [{
+        schemaVersion: 1,
+        memoryId: "smi_preview_001",
+        sourceMemoryId: "lhm_preview_001",
+        sourceTaskId: input.taskId,
+        scope: "task",
+        kind: "decision",
+        title: "Previewed decision",
+        contentPreview: "Only this bounded reference",
+        contentDigest: `sha256:${"b".repeat(64)}`,
+        version: 1,
+        pinned: false,
+        trust: "local_user_confirmed",
+        childAgentId: input.childAgentId ?? "osaurus-runtime",
+        createdAt: "2099-01-01T00:00:00.000Z",
+        updatedAt: "2099-01-01T00:00:00.000Z",
+        included: true,
+        rank: 1,
+        score: 400,
+        reasons: ["exact_task"],
+        contentBytes: 32
+      }],
+      previewDigest: `sha256:${"c".repeat(64)}`
+    };
+  }
+
+  async approveStructuredMemoryPreview() {
+    if (this.failPreviewApproval) {
+      this.order.push("memory-preview-failed");
+      throw new Error("STALE_PREVIEW");
+    }
+    this.order.push("memory-preview-approved");
+    return {
+      schemaVersion: 1 as const,
+      previewId: "smp_task-memory-preview",
+      taskId: "task-memory-preview",
+      approvedAt: "2099-01-01T00:01:00.000Z",
+      expiresAt: "2099-01-01T00:10:00.000Z"
+    };
+  }
+
+  override async approve(): Promise<CollaborationTaskTransportRecord> {
+    this.order.push("task-approved");
+    return this.get();
+  }
 }
 
 class DeferredSummaryTaskClient extends RecordingTaskClient {

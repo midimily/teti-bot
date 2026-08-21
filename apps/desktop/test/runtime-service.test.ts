@@ -24,6 +24,8 @@ import {
 } from "../lifecycle-sidecar/runtime/passport/sharing.ts";
 import { TetiNetworkClientError } from "../../../services/network/errors.ts";
 import { FakeTetiNetworkClient } from "../../../services/network/fake-client.ts";
+import type { TetiNetworkPresenceReadResponse } from "../../../services/network/types.ts";
+import type { RuntimePresencePolicyController } from "../lifecycle-sidecar/runtime/presence/controller.ts";
 
 test("Runtime owns an opt-in Network contract preflight without requiring an account", async () => {
   const clock = fakeClock();
@@ -218,6 +220,91 @@ test("Peer nicknames recover after Network connectivity returns without dependin
   assert.equal(peer.profileRefreshCalls, 2);
   assert.equal((await runtime.getPassportSnapshot()).connections[0]?.identity.displayName, "Remote");
   await runtime.stop();
+});
+
+test("peer Presence publishes atomically and transport failures never fabricate online state", async () => {
+  const clock = fakeClock();
+  let nowMs = Date.parse("2026-08-21T04:00:00.000Z");
+  let generation = 1;
+  const peerIds = ["teti_peer00001", "teti_peer00002", "teti_peer00003"];
+  const firstReads = new Map(peerIds.map((id) => [id, deferred<TetiNetworkPresenceReadResponse>()]));
+  const presenceController = {
+    start() {},
+    async stop() {},
+    reportStateChange() {},
+    setSleeping() {},
+    setForeground() {},
+    setPanelVisible() {},
+    setCollaborationActive() {},
+    get snapshot() { return undefined; },
+    async read(tetiId: string) {
+      if (generation === 1) return firstReads.get(tetiId)!.promise;
+      throw new TetiNetworkClientError({
+        code: "NETWORK_TIMEOUT",
+        operation: "presence_read",
+        message: "timeout",
+        retryable: true
+      });
+    }
+  } as unknown as RuntimePresencePolicyController;
+  const runtime = new TetiRuntime({
+    dependencies: {
+      async loadTetiAccount() { return createAccount(); },
+      async synchronizeNetworkIdentity() { return createAccount(); },
+      async getPeerConnectionService() { return confirmedPeerService(peerIds); },
+      passportSharingStore: new MemoryPassportSharingStore(),
+      codexUsageService: new FakeCodexUsageService(),
+      presenceController
+    },
+    schedule: clock.schedule,
+    cancel: clock.cancel,
+    now: () => new Date(nowMs)
+  });
+
+  try {
+    runtime.start();
+    await drain();
+    assert.deepEqual(await peerPresenceStates(runtime), ["checking", "checking", "checking"]);
+
+    firstReads.get(peerIds[0]!)!.resolve(offlinePresence(peerIds[0]!, nowMs));
+    await drain();
+    assert.deepEqual(
+      await peerPresenceStates(runtime),
+      ["checking", "checking", "checking"],
+      "one early response must not publish a mixed refresh generation"
+    );
+
+    firstReads.get(peerIds[1]!)!.resolve(onlinePresence(peerIds[1]!, nowMs, nowMs + 10_000));
+    firstReads.get(peerIds[2]!)!.reject(new TetiNetworkClientError({
+      code: "NETWORK_TIMEOUT",
+      operation: "presence_read",
+      message: "timeout",
+      retryable: true
+    }));
+    await drain();
+    assert.deepEqual(await peerPresenceStates(runtime), ["offline", "online", "unavailable"]);
+
+    generation = 2;
+    nowMs += 5_000;
+    assert.equal(clock.fireDelay(TETI_RUNTIME_INTERVALS.peerPresenceRefreshMs), true);
+    await drain();
+    assert.deepEqual(
+      await peerPresenceStates(runtime),
+      ["offline", "online", "unavailable"],
+      "failure preserves known offline and only a still-valid server online TTL"
+    );
+
+    nowMs += 6_000;
+    assert.equal(clock.fireDelay(TETI_RUNTIME_INTERVALS.peerPresenceRefreshMs), true);
+    await drain();
+    assert.deepEqual(
+      await peerPresenceStates(runtime),
+      ["offline", "unavailable", "unavailable"],
+      "an expired online TTL fails closed when refresh is unavailable"
+    );
+  } finally {
+    await runtime.stop();
+  }
 });
 
 test("an obsolete local build stops background collaboration and shuts down Child execution", async () => {
@@ -520,6 +607,93 @@ test("Runtime shutdown owns the local Callable Adapter Kernel without exposing r
   assert.equal(kernelShutdownCalls, 1);
 });
 
+function confirmedPeerService(peerIds: readonly string[]): PeerConnectionService {
+  let sharing = resourceSharingPolicy(false);
+  const connections: PeerConnectionDto[] = peerIds.map((remoteTetiId, index) => ({
+    requestId: `req-presence-${index + 1}`,
+    state: "Confirmed",
+    direction: "outgoing",
+    remoteTetiId,
+    remoteAddress: `${remoteTetiId.slice("teti_".length)}@mail.seep.im`,
+    createdAt: "2026-08-20T00:00:00.000Z",
+    updatedAt: "2026-08-20T00:00:00.000Z",
+    confirmedAt: "2026-08-20T00:00:00.000Z"
+  }));
+  const result = (): PeerConnectionResult => ({
+    connections: clone(connections),
+    receivedCount: 0,
+    heartbeatCount: 0,
+    aiStatusCount: 0
+  });
+  return {
+    async resolve(query: string) {
+      return { id: `teti_${query}`, address: `${query}@mail.seep.im`, publicProfile: {} };
+    },
+    async request() { return result(); },
+    async list() { return result(); },
+    async poll() { return result(); },
+    async accept() { return result(); },
+    async reject() { return result(); },
+    async getPassportSharing() { return { ...sharing }; },
+    async setPassportSharing(policy) {
+      sharing = { ...policy };
+      return { ...sharing };
+    }
+  };
+}
+
+async function peerPresenceStates(runtime: TetiRuntime): Promise<string[]> {
+  return (await runtime.getPassportSnapshot()).connections.map(
+    (connection) => connection.networkPresence?.state ?? "missing"
+  );
+}
+
+function offlinePresence(tetiId: string, observedAtMs: number): TetiNetworkPresenceReadResponse {
+  return {
+    schemaVersion: 1,
+    tetiId,
+    state: "offline",
+    mode: null,
+    activityMarker: null,
+    reportedAt: null,
+    observedAt: new Date(observedAtMs).toISOString(),
+    expiresAt: null,
+    expiresInSeconds: 0
+  };
+}
+
+function onlinePresence(
+  tetiId: string,
+  observedAtMs: number,
+  expiresAtMs: number
+): TetiNetworkPresenceReadResponse {
+  return {
+    schemaVersion: 1,
+    tetiId,
+    state: "online",
+    mode: "online",
+    activityMarker: null,
+    reportedAt: new Date(observedAtMs).toISOString(),
+    observedAt: new Date(observedAtMs).toISOString(),
+    expiresAt: new Date(expiresAtMs).toISOString(),
+    expiresInSeconds: Math.ceil((expiresAtMs - observedAtMs) / 1_000)
+  };
+}
+
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve(value: T): void;
+  reject(error: unknown): void;
+} {
+  let resolvePromise!: (value: T) => void;
+  let rejectPromise!: (error: unknown) => void;
+  const promise = new Promise<T>((resolve, reject) => {
+    resolvePromise = resolve;
+    rejectPromise = reject;
+  });
+  return { promise, resolve: resolvePromise, reject: rejectPromise };
+}
+
 class FakeCodexUsageService implements RuntimeCodexUsageService {
   refreshCalls = 0;
   private state: CodexUsageState = {
@@ -771,14 +945,6 @@ function emptyAgentSnapshot(
     agents: [],
     errors: []
   };
-}
-
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((resolveValue) => {
-    resolve = resolveValue;
-  });
-  return { promise, resolve };
 }
 
 async function drain(): Promise<void> {

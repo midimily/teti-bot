@@ -1006,6 +1006,64 @@ test("only new long-horizon stages enter SQLite structured task memory", async (
     assert.match(snapshot.records[0]?.contentPreview ?? "", /safe:fake-agent-a:1/);
     assert.equal(snapshot.latestShadowManifest?.manifestId, shadowManifest?.manifestId);
 
+    const history = await memory.getTaskSnapshot("shadow-peer-history-001");
+    const confirmedPeerItem = await memory.createStructuredMemoryItem({
+      schemaVersion: 1,
+      sourceMemoryId: history.records[0]!.memoryId,
+      scope: "peer",
+      kind: "constraint",
+      title: "Locally confirmed rollout constraint",
+      content: "CONFIRMED_LOCAL_CONTEXT_FOR_NEXT_EXECUTION",
+      pinned: true,
+      confirmed: true,
+      changedAt: "2026-08-20T00:10:00.000Z"
+    });
+    const injectedTask = await runtimeA.sendTask({
+      connectionRequestId: connection.requestId,
+      taskId: "structured-memory-injected-001",
+      capabilityId: "code-analysis",
+      text: "Use only locally previewed reference data when explicitly approved.",
+      executionMode: "long_horizon"
+    });
+    await runtimeB.poll();
+    const authorizedPreview = await runtimeB.setStructuredMemoryAuthorization({
+      taskId: injectedTask.request.taskId,
+      childAgentId: "fake-agent-a",
+      scope: "peer",
+      enabled: true
+    });
+    assert.equal(authorizedPreview.scopeAuthorizations.find((item) => item.scope === "peer")?.enabled, true);
+    const injectionPreview = await runtimeB.previewStructuredMemory({
+      taskId: injectedTask.request.taskId,
+      childAgentId: "fake-agent-a",
+      excludedMemoryIds: []
+    });
+    assert.deepEqual(injectionPreview.candidates.map((item) => item.memoryId), [
+      confirmedPeerItem.memoryId
+    ]);
+    await runtimeB.approveStructuredMemoryPreview(
+      injectedTask.request.taskId,
+      injectionPreview.previewId
+    );
+    await runtimeB.approveTask(injectedTask.request.taskId);
+    await flushBackgroundWork();
+    assert.match(executor.requests[1]?.input.text ?? "", /\[TETI_STRUCTURED_MEMORY_V1\]/);
+    assert.match(
+      executor.requests[1]?.input.text ?? "",
+      /CONFIRMED_LOCAL_CONTEXT_FOR_NEXT_EXECUTION/
+    );
+    assert.match(executor.requests[1]?.input.text ?? "", /\[CURRENT_TASK\]/);
+    assert.doesNotMatch(
+      JSON.stringify(await runtimeB.getTask(injectedTask.request.taskId)),
+      /CONFIRMED_LOCAL_CONTEXT_FOR_NEXT_EXECUTION/
+    );
+    const injectionSnapshot = await runtimeB.getLongHorizonTaskMemory(
+      injectedTask.request.taskId
+    );
+    assert.equal(injectionSnapshot.latestInjectionManifest?.cliInjectionEnabled, true);
+    assert.equal(injectionSnapshot.latestInjectionManifest?.candidateCount, 1);
+    assert.equal(await memory.getLatestShadowManifest(injectedTask.request.taskId), null);
+
     const single = await runtimeA.sendTask({
       connectionRequestId: connection.requestId,
       taskId: "structured-memory-single-001",

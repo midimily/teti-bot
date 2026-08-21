@@ -131,7 +131,7 @@ test("Windows 11 certification hydrates the fixed machine before dependency inst
   );
   assert.equal(
     workflow.match(/enter-windows-build-machine\.ps1/g)?.length,
-    8,
+    9,
     "every Node/Rust build step must enter the pinned local environment"
   );
 });

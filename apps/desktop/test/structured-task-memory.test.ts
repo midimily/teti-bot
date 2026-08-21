@@ -16,6 +16,8 @@ import {
   StructuredTaskMemoryStoreError
 } from "../lifecycle-sidecar/runtime/memory/structured-task-sqlite.ts";
 
+const FEATURE_TIME = "2026-08-20T00:00:00.000Z";
+
 test("SQLite structured memory is durable, idempotent, and private on POSIX", async () => {
   const root = await mkdtemp(join(tmpdir(), "teti-structured-memory-"));
   const path = join(root, "collaboration-memory-v2.sqlite");
@@ -231,7 +233,271 @@ test("Shadow Retrieval enforces the prospective 8 item and 12 KiB context budget
   }
 });
 
-test("a schema v1 task ledger migrates to v2 and backfills its FTS shadow index", async () => {
+test("Structured Memory requires confirmation, exact authorization, preview, and one-shot approval", async () => {
+  const root = await mkdtemp(join(tmpdir(), "teti-context-injection-"));
+  const path = join(root, "collaboration-memory-v3.sqlite");
+  const featureTime = "2026-08-20T00:00:00.000Z";
+  const store = new SqliteStructuredTaskMemoryStore({
+    path,
+    now: () => new Date(featureTime)
+  });
+  let deletedPeerMemoryId = "";
+  try {
+    await store.initialize();
+    const sources = [
+      stageInput("task-current", "artifact-task", featureTime, {
+        content: "Current task deployment decision"
+      }),
+      stageInput("task-workspace", "artifact-workspace", featureTime, {
+        content: "Workspace deployment constraint"
+      }),
+      stageInput("task-peer", "artifact-peer", featureTime, {
+        workspaceId: "workspace:other",
+        content: "Peer deployment fact"
+      }),
+      stageInput("task-foreign", "artifact-foreign", featureTime, {
+        peerTetiId: "teti_foreign0001",
+        workspaceId: "workspace:foreign",
+        content: "Foreign peer secret"
+      }),
+      stageInput("task-other-child", "artifact-other-child", featureTime, {
+        childAgentId: "codebuddy",
+        content: "Other Child secret"
+      })
+    ];
+    for (const source of sources) await store.saveStage(source);
+    const sourceIds = new Map(sources.map((source) => [
+      source.taskId,
+      store.getTaskSnapshot(source.taskId).then((snapshot) => snapshot.records[0]!.memoryId)
+    ]));
+    const sourceId = async (taskId: string) => await sourceIds.get(taskId)!;
+
+    const taskItem = await store.createStructuredMemoryItem({
+      schemaVersion: 1,
+      sourceMemoryId: await sourceId("task-current"),
+      scope: "task",
+      kind: "decision",
+      title: "Deployment decision",
+      content: "Use a blue-green deployment for the current task.",
+      pinned: true,
+      confirmed: true,
+      changedAt: "2026-08-20T01:00:00.000Z"
+    });
+    const workspaceItem = await store.createStructuredMemoryItem({
+      schemaVersion: 1,
+      sourceMemoryId: await sourceId("task-workspace"),
+      scope: "workspace",
+      kind: "constraint",
+      title: "Workspace constraint",
+      content: "Keep the deployment manifest in the current workspace.",
+      pinned: false,
+      confirmed: true,
+      changedAt: "2026-08-20T01:01:00.000Z"
+    });
+    const peerItem = await store.createStructuredMemoryItem({
+      schemaVersion: 1,
+      sourceMemoryId: await sourceId("task-peer"),
+      scope: "peer",
+      kind: "fact",
+      title: "Peer preference",
+      content: "This peer prefers a deployment summary before rollout.",
+      pinned: false,
+      confirmed: true,
+      changedAt: "2026-08-20T01:02:00.000Z"
+    });
+    deletedPeerMemoryId = peerItem.memoryId;
+    await store.createStructuredMemoryItem({
+      schemaVersion: 1,
+      sourceMemoryId: await sourceId("task-foreign"),
+      scope: "peer",
+      kind: "local_note",
+      title: "Foreign",
+      content: "Never visible to the current peer.",
+      pinned: false,
+      confirmed: true,
+      changedAt: "2026-08-20T01:03:00.000Z"
+    });
+    await store.createStructuredMemoryItem({
+      schemaVersion: 1,
+      sourceMemoryId: await sourceId("task-other-child"),
+      scope: "workspace",
+      kind: "local_note",
+      title: "Other Child",
+      content: "Never visible to the current Child.",
+      pinned: false,
+      confirmed: true,
+      changedAt: "2026-08-20T01:04:00.000Z"
+    });
+
+    const previewInput = {
+      schemaVersion: 1 as const,
+      taskId: "task-current",
+      peerTetiId: "teti_peer00001",
+      workspaceId: "workspace:task-memory",
+      childAgentId: "codex",
+      queryText: "Review the deployment decision and constraint",
+      excludedMemoryIds: [] as string[],
+      generatedAt: "2026-08-21T00:00:00.000Z"
+    };
+    const defaultPreview = await store.createContextPreview(previewInput);
+    assert.deepEqual(defaultPreview.candidates.map((item) => item.memoryId), [taskItem.memoryId]);
+    assert.equal(defaultPreview.scopeAuthorizations.find((item) => item.scope === "peer")?.enabled, false);
+    assert.equal(defaultPreview.cliInjectionEnabled, false);
+
+    await store.setStructuredMemoryAuthorization({
+      schemaVersion: 1,
+      taskId: "task-current",
+      peerTetiId: "teti_peer00001",
+      workspaceId: "workspace:task-memory",
+      childAgentId: "codex",
+      scope: "workspace",
+      enabled: true,
+      changedAt: "2026-08-21T00:01:00.000Z"
+    });
+    await store.setStructuredMemoryAuthorization({
+      schemaVersion: 1,
+      taskId: "task-current",
+      peerTetiId: "teti_peer00001",
+      workspaceId: "workspace:task-memory",
+      childAgentId: "codex",
+      scope: "peer",
+      enabled: true,
+      changedAt: "2026-08-21T00:02:00.000Z"
+    });
+    const preview = await store.createContextPreview({
+      ...previewInput,
+      excludedMemoryIds: [workspaceItem.memoryId],
+      generatedAt: "2026-08-21T00:03:00.000Z"
+    });
+    assert.deepEqual(new Set(preview.candidates.map((item) => item.memoryId)), new Set([
+      taskItem.memoryId,
+      workspaceItem.memoryId,
+      peerItem.memoryId
+    ]));
+    assert.equal(preview.candidates.find((item) => item.memoryId === workspaceItem.memoryId)?.included, false);
+    assert.deepEqual(preview.candidates.filter((item) => item.included).map((item) => item.memoryId), [
+      taskItem.memoryId,
+      peerItem.memoryId
+    ]);
+
+    await store.approveContextPreview({
+      taskId: "task-current",
+      previewId: preview.previewId,
+      approvedAt: "2026-08-21T00:04:00.000Z"
+    });
+    const selection = await store.createExecutionContext({
+      schemaVersion: 1,
+      executionId: "lh_task-current_2:epoch:1",
+      taskId: "task-current",
+      peerTetiId: "teti_peer00001",
+      workspaceId: "workspace:task-memory",
+      childAgentId: "codex",
+      queryText: previewInput.queryText,
+      generatedAt: "2026-08-21T00:05:00.000Z"
+    });
+    assert.equal(selection.manifest?.cliInjectionEnabled, true);
+    assert.deepEqual(selection.records.map((record) => record.memoryId), [
+      taskItem.memoryId,
+      peerItem.memoryId
+    ]);
+    assert.equal((await store.createExecutionContext({
+      schemaVersion: 1,
+      executionId: "lh_task-current_3:epoch:1",
+      taskId: "task-current",
+      peerTetiId: "teti_peer00001",
+      workspaceId: "workspace:task-memory",
+      childAgentId: "codex",
+      queryText: previewInput.queryText,
+      generatedAt: "2026-08-21T00:06:00.000Z"
+    })).manifest, null);
+
+    const stalePreview = await store.createContextPreview({
+      ...previewInput,
+      generatedAt: "2026-08-21T00:07:00.000Z"
+    });
+    await store.approveContextPreview({
+      taskId: "task-current",
+      previewId: stalePreview.previewId,
+      approvedAt: "2026-08-21T00:08:00.000Z"
+    });
+    const updated = await store.updateStructuredMemoryItem({
+      schemaVersion: 1,
+      memoryId: taskItem.memoryId,
+      expectedVersion: 1,
+      scope: "task",
+      kind: "decision",
+      title: "Deployment decision v2",
+      content: "Use a canary deployment after local review.",
+      pinned: false,
+      confirmed: true,
+      changedAt: "2026-08-21T00:09:00.000Z"
+    });
+    assert.equal(updated.version, 2);
+    assert.equal((await store.createExecutionContext({
+      schemaVersion: 1,
+      executionId: "lh_task-current_4:epoch:1",
+      taskId: "task-current",
+      peerTetiId: "teti_peer00001",
+      workspaceId: "workspace:task-memory",
+      childAgentId: "codex",
+      queryText: previewInput.queryText,
+      generatedAt: "2026-08-21T00:10:00.000Z"
+    })).manifest, null);
+
+    assert.equal(await store.deleteStructuredMemoryItem({
+      memoryId: peerItem.memoryId,
+      confirmed: true,
+      deletedAt: "2026-08-21T00:11:00.000Z"
+    }), true);
+    assert.equal(await store.getStructuredMemoryItem({ memoryId: peerItem.memoryId }), null);
+    assert.equal((await store.getTaskSnapshot("task-current")).latestInjectionManifest?.candidateCount, 2);
+    const database = new DatabaseSync(path, { readOnly: true });
+    assert.equal((database.prepare(`
+      SELECT COUNT(*) AS count FROM structured_memory_versions WHERE memory_id = ?
+    `).get(taskItem.memoryId) as { count: number }).count, 2);
+    assert.equal((database.prepare(`
+      SELECT COUNT(*) AS count FROM structured_memory_deletions WHERE memory_id = ?
+    `).get(peerItem.memoryId) as { count: number }).count, 1);
+    assert.equal((database.prepare(`
+      SELECT COUNT(*) AS count FROM structured_memory_items_fts WHERE memory_id = ?
+    `).get(peerItem.memoryId) as { count: number }).count, 0);
+    database.close();
+
+    await store.setStructuredMemoryAuthorization({
+      schemaVersion: 1,
+      taskId: "task-current",
+      peerTetiId: "teti_peer00001",
+      workspaceId: "workspace:task-memory",
+      childAgentId: "codex",
+      scope: "peer",
+      enabled: false,
+      changedAt: "2026-08-21T00:12:00.000Z"
+    });
+  } finally {
+    await store.close();
+  }
+
+  const reopened = new SqliteStructuredTaskMemoryStore({ path });
+  try {
+    const preview = await reopened.createContextPreview({
+      schemaVersion: 1,
+      taskId: "task-current",
+      peerTetiId: "teti_peer00001",
+      workspaceId: "workspace:task-memory",
+      childAgentId: "codex",
+      queryText: "deployment",
+      excludedMemoryIds: [],
+      generatedAt: "2026-08-21T00:13:00.000Z"
+    });
+    assert.equal(preview.scopeAuthorizations.find((item) => item.scope === "peer")?.enabled, false);
+    assert.equal(preview.candidates.some((item) => item.memoryId === deletedPeerMemoryId), false);
+  } finally {
+    await reopened.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a schema v1 task ledger backs up and migrates through v4", async () => {
   const root = await mkdtemp(join(tmpdir(), "teti-shadow-migration-"));
   const path = join(root, "collaboration-memory-v2.sqlite");
   const featureTime = "2026-08-20T00:00:00.000Z";
@@ -247,6 +513,22 @@ test("a schema v1 task ledger migrates to v2 and backfills its FTS shadow index"
 
   const legacy = new DatabaseSync(path);
   legacy.exec(`
+    DROP TRIGGER structured_memory_maintenance_events_no_update;
+    DROP TABLE structured_memory_maintenance_events;
+    DROP TABLE structured_memory_metrics;
+    DROP TRIGGER structured_memory_injection_candidates_no_update;
+    DROP TRIGGER structured_memory_injection_manifests_no_update;
+    DROP TRIGGER structured_memory_deletions_no_update;
+    DROP TRIGGER structured_memory_versions_no_update;
+    DROP TABLE structured_memory_injection_candidates;
+    DROP TABLE structured_memory_injection_manifests;
+    DROP TABLE structured_memory_preview_candidates;
+    DROP TABLE structured_memory_previews;
+    DROP TABLE structured_memory_deletions;
+    DROP TABLE structured_memory_authorizations;
+    DROP TABLE structured_memory_items_fts;
+    DROP TABLE structured_memory_versions;
+    DROP TABLE structured_memory_items;
     DROP TRIGGER memory_shadow_candidates_no_update;
     DROP TRIGGER memory_shadow_manifests_no_update;
     DROP TABLE memory_shadow_candidates;
@@ -255,7 +537,7 @@ test("a schema v1 task ledger migrates to v2 and backfills its FTS shadow index"
     DROP INDEX long_horizon_task_memory_child_task_created;
     DROP INDEX long_horizon_task_memory_child_workspace_created;
     DROP INDEX long_horizon_task_memory_child_peer_created;
-    DELETE FROM schema_migrations WHERE version = 2;
+    DELETE FROM schema_migrations WHERE version IN (2, 3, 4);
     PRAGMA user_version = 1;
   `);
   legacy.close();
@@ -278,13 +560,14 @@ test("a schema v1 task ledger migrates to v2 and backfills its FTS shadow index"
     assert.equal(manifest.candidateCount, 1);
     assert.ok(manifest.candidates[0]?.reasons.includes("keyword_match"));
     const database = new DatabaseSync(path, { readOnly: true });
-    assert.equal((database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 2);
+    assert.equal((database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 4);
     assert.deepEqual(
       (database.prepare("SELECT version FROM schema_migrations ORDER BY version").all() as Array<{
         version: number;
       }>).map((row) => row.version),
-      [1, 2]
+      [1, 2, 3, 4]
     );
+    assert.equal((await migrated.getHealth()).recoveryBackupAvailable, true);
     database.close();
   } finally {
     await migrated.close();
@@ -401,21 +684,151 @@ test("Shadow Retrieval stays deterministic and bounded with 5,000 scoped memorie
   }
 });
 
+test("approved Structured Memory preview stays deterministic and bounded with 5,000 items", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "teti-context-scale-"));
+  const path = join(root, "collaboration-memory-v2.sqlite");
+  const initial = new SqliteStructuredTaskMemoryStore({
+    path,
+    now: () => new Date(FEATURE_TIME)
+  });
+  await initial.initialize();
+  await initial.close();
+
+  const database = new DatabaseSync(path);
+  const insertSource = database.prepare(`
+    INSERT INTO long_horizon_task_memory (
+      memory_id, task_id, peer_teti_id, workspace_id, stage_id, stage_index,
+      execution_task_id, execution_epoch, child_agent_id, connector_id,
+      artifact_id, workspace_revision, kind, trust, content, content_digest,
+      created_at, captured_at
+    ) VALUES (?, ?, 'teti_peer00001', 'workspace:context-scale', 'stage:1', 1,
+      ?, 1, 'codex', 'codex.process', ?, 1, 'stage_handoff',
+      'peer_originated_reference', ?, ?, ?, ?)
+  `);
+  const insertRawFts = database.prepare(`
+    INSERT INTO long_horizon_task_memory_fts (memory_id, content) VALUES (?, ?)
+  `);
+  const insertItem = database.prepare(`
+    INSERT INTO structured_memory_items (
+      memory_id, source_memory_id, source_task_id, peer_teti_id,
+      workspace_id, child_agent_id, current_version, trust,
+      created_at, updated_at, expires_at
+    ) VALUES (?, ?, ?, 'teti_peer00001', 'workspace:context-scale',
+      'codex', 1, 'local_user_confirmed', ?, ?, NULL)
+  `);
+  const insertVersion = database.prepare(`
+    INSERT INTO structured_memory_versions (
+      memory_id, version, scope, kind, title, content, content_digest,
+      pinned, editor, created_at
+    ) VALUES (?, 1, 'workspace', 'constraint', ?, ?, ?, 0, 'local_user', ?)
+  `);
+  const insertFts = database.prepare(`
+    INSERT INTO structured_memory_items_fts (memory_id, title, content) VALUES (?, ?, ?)
+  `);
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    for (let index = 0; index < 5_000; index += 1) {
+      const sourceMemoryId = `memory:context-scale:${index}`;
+      const memoryId = `item:context-scale:${index}`;
+      const taskId = `task-context-scale-${index}`;
+      const title = `Deployment constraint ${index}`;
+      const content = `Use bounded rollout policy ${index}`;
+      const contentDigest = `sha256:${createHash("sha256").update(content).digest("hex")}`;
+      insertSource.run(
+        sourceMemoryId,
+        taskId,
+        `lh_${taskId}_1`,
+        `artifact-context-scale-${index}`,
+        content,
+        contentDigest,
+        FEATURE_TIME,
+        FEATURE_TIME
+      );
+      insertRawFts.run(sourceMemoryId, content);
+      insertItem.run(memoryId, sourceMemoryId, taskId, FEATURE_TIME, FEATURE_TIME);
+      insertVersion.run(memoryId, title, content, contentDigest, FEATURE_TIME);
+      insertFts.run(memoryId, title, content);
+    }
+    database.prepare(`
+      INSERT INTO structured_memory_authorizations (
+        scope, scope_key, workspace_id, peer_teti_id, child_agent_id,
+        enabled, authorized_at, revoked_at
+      ) VALUES ('workspace', 'workspace:context-scale', 'workspace:context-scale',
+        NULL, 'codex', 1, ?, NULL)
+    `).run(FEATURE_TIME);
+    database.exec("COMMIT");
+  } catch (error) {
+    database.exec("ROLLBACK");
+    throw error;
+  } finally {
+    database.close();
+  }
+
+  const store = new SqliteStructuredTaskMemoryStore({ path });
+  try {
+    const durations: number[] = [];
+    let firstSelection: string | null = null;
+    for (let iteration = 0; iteration < 20; iteration += 1) {
+      const startedAt = performance.now();
+      const preview = await store.createContextPreview({
+        schemaVersion: 1,
+        taskId: "task-context-scale-0",
+        peerTetiId: "teti_peer00001",
+        workspaceId: "workspace:context-scale",
+        childAgentId: "codex",
+        queryText: "deployment constraint bounded rollout",
+        excludedMemoryIds: [],
+        generatedAt: "2026-08-21T00:00:00.000Z"
+      });
+      durations.push(performance.now() - startedAt);
+      assert.equal(preview.candidateCount, 8);
+      assert.equal(preview.candidates.length, 16);
+      assert.ok(preview.candidateBytes <= 12 * 1_024);
+      const selection = JSON.stringify(preview.candidates.map((candidate) => ({
+        memoryId: candidate.memoryId,
+        included: candidate.included,
+        rank: candidate.rank,
+        score: candidate.score
+      })));
+      firstSelection ??= selection;
+      assert.equal(selection, firstSelection);
+    }
+    const coldQueryMs = durations[0] ?? Number.POSITIVE_INFINITY;
+    const warmDurations = durations.slice(1).sort((left, right) => left - right);
+    const warmP95Ms = warmDurations[Math.ceil(warmDurations.length * 0.95) - 1]
+      ?? Number.POSITIVE_INFINITY;
+    const strictBenchmark = process.env.TETI_STRICT_MEMORY_BENCHMARK === "1";
+    const coldLimitMs = strictBenchmark ? 150 : 500;
+    const warmP95LimitMs = strictBenchmark ? 40 : 250;
+    context.diagnostic(`5,000-item Structured Memory preview (${strictBenchmark ? "strict" : "shared-run"}): cold=${coldQueryMs.toFixed(2)}ms, warm-p95=${warmP95Ms.toFixed(2)}ms`);
+    assert.ok(coldQueryMs <= coldLimitMs);
+    assert.ok(warmP95Ms <= warmP95LimitMs);
+  } finally {
+    await store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("an unknown future SQLite schema fails closed without rebuilding the file", async () => {
   const root = await mkdtemp(join(tmpdir(), "teti-structured-memory-future-"));
   const path = join(root, "collaboration-memory-v2.sqlite");
   const future = new DatabaseSync(path);
-  future.exec("PRAGMA user_version = 3");
+  future.exec("PRAGMA user_version = 5");
   future.close();
   const store = new SqliteStructuredTaskMemoryStore({ path });
   try {
+    await store.initialize();
+    assert.deepEqual(
+      await store.getHealth().then((health) => [health.mode, health.migrationStatus]),
+      ["read_only", "future_schema_read_only"]
+    );
     await assert.rejects(
-      () => store.initialize(),
+      () => store.saveStage(stageInput("future-task", "future-artifact", new Date().toISOString())),
       (error: unknown) => error instanceof StructuredTaskMemoryStoreError
-        && error.code === "MEMORY_STORE_UNAVAILABLE"
+        && error.code === "MEMORY_STORE_READ_ONLY"
     );
     const preserved = new DatabaseSync(path, { readOnly: true });
-    assert.equal((preserved.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 3);
+    assert.equal((preserved.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 5);
     preserved.close();
   } finally {
     await store.close();

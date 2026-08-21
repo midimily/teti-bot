@@ -17,6 +17,13 @@ import type {
   MemoryRecord
 } from "../../../../core/memory/types.ts";
 import type {
+  StructuredMemoryContextPreview,
+  StructuredMemoryItemDetail,
+  StructuredMemoryPreviewApproval,
+  StructuredMemorySourceDraft
+} from "../../../../core/memory/context-injection.ts";
+import type { LongHorizonTaskMemorySnapshot } from "../../../../core/memory/structured-task.ts";
+import type {
   CollaborationTaskTransportRecord,
   CollaborationTaskTransportSnapshot,
   CollaborationTaskSummarySnapshot,
@@ -211,6 +218,7 @@ export class TetiRuntime {
   private networkIdentityStatus: NetworkIdentityStatus = { state: "unknown" };
   private networkIdentityAttempt = 0;
   private readonly onNetworkIdentityStatusChange: NonNullable<TetiRuntimeOptions["onNetworkIdentityStatusChange"]>;
+  private readonly now: () => Date;
   private peerConnections: PeerConnectionResult["connections"] | null = null;
   private readonly peerPresence = new Map<string, NetworkPeerPresenceSnapshot>();
   private accountLoadInFlight: Promise<TetiAccount | null> | null = null;
@@ -223,6 +231,7 @@ export class TetiRuntime {
 
   constructor(options: TetiRuntimeOptions) {
     this.dependencies = options.dependencies;
+    this.now = options.now ?? (() => new Date());
     this.onNetworkStatusChange = options.onNetworkStatusChange ?? (() => undefined);
     this.onNetworkIdentityStatusChange = options.onNetworkIdentityStatusChange ?? (() => undefined);
     this.stateChanges = new RuntimeNetworkStateChangeDeduplicator({
@@ -724,10 +733,12 @@ export class TetiRuntime {
     const ids = [...new Set((this.peerConnections ?? [])
       .filter((connection) => connection.state === "Confirmed")
       .map((connection) => connection.remoteTetiId))];
-    await Promise.all(ids.map(async (tetiId) => {
+    const observed = await Promise.all(ids.map(async (
+      tetiId
+    ): Promise<readonly [string, NetworkPeerPresenceSnapshot]> => {
       try {
         const response = await controller.read(tetiId);
-        this.peerPresence.set(tetiId, response.state === "online"
+        return [tetiId, response.state === "online"
           ? {
               state: "online",
               mode: response.mode,
@@ -735,17 +746,20 @@ export class TetiRuntime {
               observedAt: response.observedAt,
               expiresAt: response.expiresAt
             }
-          : { state: "offline", observedAt: response.observedAt });
+          : { state: "offline", observedAt: response.observedAt }] as const;
       } catch (error) {
-        this.peerPresence.set(tetiId, {
-          state: "unavailable",
-          checkedAt: new Date().toISOString(),
-          errorCode: error instanceof TetiNetworkClientError
-            ? error.code
-            : "NETWORK_UNAVAILABLE"
-        });
+        const checkedAt = this.now().toISOString();
+        return [tetiId, presenceAfterReadFailure(
+          this.peerPresence.get(tetiId),
+          checkedAt,
+          error instanceof TetiNetworkClientError ? error.code : "NETWORK_UNAVAILABLE"
+        )] as const;
       }
     }));
+    // Publish one complete refresh generation. Passport reads must never see a
+    // partially updated list merely because peer requests settled at different
+    // times.
+    for (const [tetiId, presence] of observed) this.peerPresence.set(tetiId, presence);
   }
 
   private async readPeerResult(): Promise<PeerConnectionResult> {
@@ -816,6 +830,81 @@ export class TetiRuntime {
     const service = await this.rawPeerService();
     if (!service.getTask) throw new Error("Task detail service is unavailable.");
     return clone(await service.getTask(taskId));
+  }
+
+  async getLongHorizonTaskMemory(taskId: string): Promise<LongHorizonTaskMemorySnapshot> {
+    const service = await this.rawPeerService();
+    if (!service.getLongHorizonTaskMemory) throw new Error("Structured task memory is unavailable.");
+    return clone(await service.getLongHorizonTaskMemory(taskId));
+  }
+
+  async getStructuredMemorySourceDraft(
+    taskId: string,
+    sourceMemoryId: string
+  ): Promise<StructuredMemorySourceDraft | null> {
+    const service = await this.rawPeerService();
+    if (!service.getStructuredMemorySourceDraft) throw new Error("Structured Memory source is unavailable.");
+    return clone(await service.getStructuredMemorySourceDraft(taskId, sourceMemoryId));
+  }
+
+  async getStructuredMemoryItem(
+    taskId: string,
+    memoryId: string
+  ): Promise<StructuredMemoryItemDetail | null> {
+    const service = await this.rawPeerService();
+    if (!service.getStructuredMemoryItem) throw new Error("Structured Memory item is unavailable.");
+    return clone(await service.getStructuredMemoryItem(taskId, memoryId));
+  }
+
+  async createStructuredMemoryItem(
+    input: Parameters<NonNullable<PeerConnectionService["createStructuredMemoryItem"]>>[0]
+  ): Promise<StructuredMemoryItemDetail> {
+    const service = await this.rawPeerService();
+    if (!service.createStructuredMemoryItem) throw new Error("Structured Memory creation is unavailable.");
+    return clone(await service.createStructuredMemoryItem(input));
+  }
+
+  async updateStructuredMemoryItem(
+    input: Parameters<NonNullable<PeerConnectionService["updateStructuredMemoryItem"]>>[0]
+  ): Promise<StructuredMemoryItemDetail> {
+    const service = await this.rawPeerService();
+    if (!service.updateStructuredMemoryItem) throw new Error("Structured Memory update is unavailable.");
+    return clone(await service.updateStructuredMemoryItem(input));
+  }
+
+  async deleteStructuredMemoryItem(
+    taskId: string,
+    memoryId: string,
+    confirmed: true
+  ): Promise<boolean> {
+    const service = await this.rawPeerService();
+    if (!service.deleteStructuredMemoryItem) throw new Error("Structured Memory deletion is unavailable.");
+    return service.deleteStructuredMemoryItem(taskId, memoryId, confirmed);
+  }
+
+  async setStructuredMemoryAuthorization(
+    input: Parameters<NonNullable<PeerConnectionService["setStructuredMemoryAuthorization"]>>[0]
+  ): Promise<StructuredMemoryContextPreview> {
+    const service = await this.rawPeerService();
+    if (!service.setStructuredMemoryAuthorization) throw new Error("Structured Memory authorization is unavailable.");
+    return clone(await service.setStructuredMemoryAuthorization(input));
+  }
+
+  async previewStructuredMemory(
+    input: Parameters<NonNullable<PeerConnectionService["previewStructuredMemory"]>>[0]
+  ): Promise<StructuredMemoryContextPreview> {
+    const service = await this.rawPeerService();
+    if (!service.previewStructuredMemory) throw new Error("Structured Memory preview is unavailable.");
+    return clone(await service.previewStructuredMemory(input));
+  }
+
+  async approveStructuredMemoryPreview(
+    taskId: string,
+    previewId: string
+  ): Promise<StructuredMemoryPreviewApproval> {
+    const service = await this.rawPeerService();
+    if (!service.approveStructuredMemoryPreview) throw new Error("Structured Memory preview approval is unavailable.");
+    return clone(await service.approveStructuredMemoryPreview(taskId, previewId));
   }
 
   async stageTaskImage(sourcePath: string): Promise<StagedTaskImage> {
@@ -1000,6 +1089,42 @@ class RuntimePeerConnectionFacade implements PeerConnectionService {
     return this.runtime.getTask(taskId);
   }
 
+  getLongHorizonTaskMemory(taskId: string): Promise<LongHorizonTaskMemorySnapshot> {
+    return this.runtime.getLongHorizonTaskMemory(taskId);
+  }
+
+  getStructuredMemorySourceDraft(taskId: string, sourceMemoryId: string) {
+    return this.runtime.getStructuredMemorySourceDraft(taskId, sourceMemoryId);
+  }
+
+  getStructuredMemoryItem(taskId: string, memoryId: string) {
+    return this.runtime.getStructuredMemoryItem(taskId, memoryId);
+  }
+
+  createStructuredMemoryItem(input: Parameters<TetiRuntime["createStructuredMemoryItem"]>[0]) {
+    return this.runtime.createStructuredMemoryItem(input);
+  }
+
+  updateStructuredMemoryItem(input: Parameters<TetiRuntime["updateStructuredMemoryItem"]>[0]) {
+    return this.runtime.updateStructuredMemoryItem(input);
+  }
+
+  deleteStructuredMemoryItem(taskId: string, memoryId: string, confirmed: true) {
+    return this.runtime.deleteStructuredMemoryItem(taskId, memoryId, confirmed);
+  }
+
+  setStructuredMemoryAuthorization(input: Parameters<TetiRuntime["setStructuredMemoryAuthorization"]>[0]) {
+    return this.runtime.setStructuredMemoryAuthorization(input);
+  }
+
+  previewStructuredMemory(input: Parameters<TetiRuntime["previewStructuredMemory"]>[0]) {
+    return this.runtime.previewStructuredMemory(input);
+  }
+
+  approveStructuredMemoryPreview(taskId: string, previewId: string) {
+    return this.runtime.approveStructuredMemoryPreview(taskId, previewId);
+  }
+
   stageTaskImage(sourcePath: string): Promise<StagedTaskImage> {
     return this.runtime.stageTaskImage(sourcePath);
   }
@@ -1055,6 +1180,21 @@ class RuntimePeerConnectionFacade implements PeerConnectionService {
   setPassportSharing(policy: PassportSharingPolicy): Promise<PassportSharingPolicy> {
     return this.runtime.updatePassportSharing(policy);
   }
+}
+
+function presenceAfterReadFailure(
+  previous: NetworkPeerPresenceSnapshot | undefined,
+  checkedAt: string,
+  errorCode: string
+): NetworkPeerPresenceSnapshot {
+  // A transport failure is not new reachability evidence. Preserve a known
+  // offline answer, or an online answer only until its server-issued TTL.
+  if (previous?.state === "offline") return { ...previous };
+  if (previous?.state === "online"
+    && Date.parse(previous.expiresAt) > Date.parse(checkedAt)) {
+    return { ...previous };
+  }
+  return { state: "unavailable", checkedAt, errorCode };
 }
 
 function clone<T>(value: T): T {

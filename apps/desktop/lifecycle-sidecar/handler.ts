@@ -48,6 +48,11 @@ import type {
   DurableMemoryScope,
   MemoryExportResult
 } from "../../../core/memory/types.ts";
+import {
+  STRUCTURED_MEMORY_CONTEXT_LIMITS,
+  type StructuredMemoryKind,
+  type StructuredMemoryScope
+} from "../../../core/memory/context-injection.ts";
 import type { LocalReleaseStatus } from "../../../core/release/policy.ts";
 import type { DelegationTargetSelection } from "../../../core/delegation/types.ts";
 import { isSafeAbsoluteLocalPath } from "../../../core/application/local-path.ts";
@@ -277,6 +282,87 @@ async function dispatchLifecycleRequest(
       const service = await dependencies.getPeerConnectionService();
       if (!service.getLongHorizonTaskMemory) throw new Error("Structured task memory is unavailable.");
       return service.getLongHorizonTaskMemory(validateTaskId(request.params?.taskId));
+    }
+
+    case "task.memory.source.get": {
+      const params = validateParameterFields(request.params, ["taskId", "sourceMemoryId"]);
+      const service = await dependencies.getPeerConnectionService();
+      if (!service.getStructuredMemorySourceDraft) throw new Error("Structured Memory source is unavailable.");
+      return service.getStructuredMemorySourceDraft(
+        validateTaskId(params.taskId),
+        validateMemoryId(params.sourceMemoryId)
+      );
+    }
+
+    case "task.memory.item.get": {
+      const params = validateParameterFields(request.params, ["taskId", "memoryId"]);
+      const service = await dependencies.getPeerConnectionService();
+      if (!service.getStructuredMemoryItem) throw new Error("Structured Memory item is unavailable.");
+      return service.getStructuredMemoryItem(
+        validateTaskId(params.taskId),
+        validateMemoryId(params.memoryId)
+      );
+    }
+
+    case "task.memory.item.create": {
+      const service = await dependencies.getPeerConnectionService();
+      if (!service.createStructuredMemoryItem) throw new Error("Structured Memory creation is unavailable.");
+      return service.createStructuredMemoryItem(validateStructuredMemoryItemMutation(request.params, false));
+    }
+
+    case "task.memory.item.update": {
+      const service = await dependencies.getPeerConnectionService();
+      if (!service.updateStructuredMemoryItem) throw new Error("Structured Memory update is unavailable.");
+      return service.updateStructuredMemoryItem(validateStructuredMemoryItemMutation(request.params, true));
+    }
+
+    case "task.memory.item.delete": {
+      const params = validateParameterFields(request.params, ["taskId", "memoryId", "confirmed"]);
+      const service = await dependencies.getPeerConnectionService();
+      if (!service.deleteStructuredMemoryItem) throw new Error("Structured Memory deletion is unavailable.");
+      return service.deleteStructuredMemoryItem(
+        validateTaskId(params.taskId),
+        validateMemoryId(params.memoryId),
+        validateExplicitMemoryConfirmation(params.confirmed)
+      );
+    }
+
+    case "task.memory.authorization.set": {
+      const params = validateParameterFields(request.params, ["taskId", "childAgentId", "scope", "enabled"]);
+      const service = await dependencies.getPeerConnectionService();
+      if (!service.setStructuredMemoryAuthorization) throw new Error("Structured Memory authorization is unavailable.");
+      return service.setStructuredMemoryAuthorization({
+        taskId: validateTaskId(params.taskId),
+        childAgentId: validateChildAgentId(params.childAgentId),
+        scope: validateStructuredMemoryAuthorizationScope(params.scope),
+        enabled: validateBoolean(params.enabled, "Structured Memory authorization")
+      });
+    }
+
+    case "task.memory.preview": {
+      const params = validateParameterFields(
+        request.params,
+        ["taskId", "childAgentId", "excludedMemoryIds"]
+      );
+      const service = await dependencies.getPeerConnectionService();
+      if (!service.previewStructuredMemory) throw new Error("Structured Memory preview is unavailable.");
+      return service.previewStructuredMemory({
+        taskId: validateTaskId(params.taskId),
+        ...(params.childAgentId === undefined
+          ? {}
+          : { childAgentId: validateChildAgentId(params.childAgentId) }),
+        excludedMemoryIds: validateStructuredMemoryExclusions(params.excludedMemoryIds)
+      });
+    }
+
+    case "task.memory.preview.approve": {
+      const params = validateParameterFields(request.params, ["taskId", "previewId"]);
+      const service = await dependencies.getPeerConnectionService();
+      if (!service.approveStructuredMemoryPreview) throw new Error("Structured Memory preview approval is unavailable.");
+      return service.approveStructuredMemoryPreview(
+        validateTaskId(params.taskId),
+        validateMemoryId(params.previewId)
+      );
     }
 
     case "task.attachment.stage": {
@@ -631,6 +717,140 @@ function validateTaskId(value: unknown): string {
   return value;
 }
 
+function validateParameterFields(
+  value: unknown,
+  allowed: readonly string[]
+): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("Lifecycle parameters are required.");
+  }
+  const params = value as Record<string, unknown>;
+  if (Object.keys(params).some((key) => !allowed.includes(key))) {
+    throw new Error("Lifecycle parameters contain an unsupported field.");
+  }
+  return params;
+}
+
+function validateStructuredMemoryItemMutation(
+  value: unknown,
+  update: false
+): {
+  taskId: string;
+  sourceMemoryId: string;
+  scope: StructuredMemoryScope;
+  kind: StructuredMemoryKind;
+  title: string;
+  content: string;
+  pinned: boolean;
+  expiresAt: string | null;
+  confirmed: true;
+};
+function validateStructuredMemoryItemMutation(
+  value: unknown,
+  update: true
+): {
+  taskId: string;
+  memoryId: string;
+  expectedVersion: number;
+  scope: StructuredMemoryScope;
+  kind: StructuredMemoryKind;
+  title: string;
+  content: string;
+  pinned: boolean;
+  expiresAt: string | null;
+  confirmed: true;
+};
+function validateStructuredMemoryItemMutation(value: unknown, update: boolean) {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("Structured Memory parameters are required.");
+  }
+  const params = value as Record<string, unknown>;
+  const allowed = update
+    ? ["taskId", "memoryId", "expectedVersion", "scope", "kind", "title", "content", "pinned", "expiresAt", "confirmed"]
+    : ["taskId", "sourceMemoryId", "scope", "kind", "title", "content", "pinned", "expiresAt", "confirmed"];
+  if (Object.keys(params).some((key) => !allowed.includes(key))) {
+    throw new Error("Structured Memory parameters contain an unsupported field.");
+  }
+  const common = {
+    taskId: validateTaskId(params.taskId),
+    scope: validateStructuredMemoryScope(params.scope),
+    kind: validateStructuredMemoryKind(params.kind),
+    title: validateStructuredMemoryTitle(params.title),
+    content: validateStructuredMemoryContent(params.content),
+    pinned: validateBoolean(params.pinned, "Structured Memory pin state"),
+    expiresAt: validateOptionalTimestamp(params.expiresAt, "Structured Memory expiry"),
+    confirmed: validateExplicitMemoryConfirmation(params.confirmed)
+  };
+  if (!update) return { ...common, sourceMemoryId: validateMemoryId(params.sourceMemoryId) };
+  if (!Number.isSafeInteger(params.expectedVersion) || Number(params.expectedVersion) < 1) {
+    throw new Error("Structured Memory version is invalid.");
+  }
+  return {
+    ...common,
+    memoryId: validateMemoryId(params.memoryId),
+    expectedVersion: Number(params.expectedVersion)
+  };
+}
+
+function validateOptionalTimestamp(value: unknown, label: string): string | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string" || !Number.isFinite(Date.parse(value))) {
+    throw new Error(`${label} is invalid.`);
+  }
+  return new Date(value).toISOString();
+}
+
+function validateStructuredMemoryScope(value: unknown): StructuredMemoryScope {
+  if (value !== "task" && value !== "workspace" && value !== "peer") {
+    throw new Error("Structured Memory scope is invalid.");
+  }
+  return value;
+}
+
+function validateStructuredMemoryAuthorizationScope(value: unknown): "workspace" | "peer" {
+  if (value !== "workspace" && value !== "peer") {
+    throw new Error("Structured Memory authorization scope is invalid.");
+  }
+  return value;
+}
+
+function validateStructuredMemoryKind(value: unknown): StructuredMemoryKind {
+  if (value !== "decision" && value !== "constraint" && value !== "fact"
+    && value !== "open_question" && value !== "handoff" && value !== "summary"
+    && value !== "local_note") {
+    throw new Error("Structured Memory kind is invalid.");
+  }
+  return value;
+}
+
+function validateStructuredMemoryTitle(value: unknown): string {
+  if (typeof value !== "string" || !value.trim()
+    || [...value.trim()].length > STRUCTURED_MEMORY_CONTEXT_LIMITS.maximumTitleCharacters) {
+    throw new Error("Structured Memory title is invalid.");
+  }
+  return value.trim();
+}
+
+function validateStructuredMemoryContent(value: unknown): string {
+  if (typeof value !== "string" || !value.trim()
+    || Buffer.byteLength(value.trim(), "utf8") > STRUCTURED_MEMORY_CONTEXT_LIMITS.maximumContentBytes) {
+    throw new Error("Structured Memory content is invalid or too large.");
+  }
+  return value.trim();
+}
+
+function validateStructuredMemoryExclusions(value: unknown): string[] {
+  if (!Array.isArray(value)
+    || value.length > STRUCTURED_MEMORY_CONTEXT_LIMITS.maximumPreviewCandidates) {
+    throw new Error("Structured Memory exclusions are invalid.");
+  }
+  const exclusions = value.map(validateMemoryId);
+  if (new Set(exclusions).size !== exclusions.length) {
+    throw new Error("Structured Memory exclusions are invalid.");
+  }
+  return exclusions;
+}
+
 function validateDelegationSelections(value: unknown): DelegationTargetSelection[] {
   if (!Array.isArray(value) || value.length < 1 || value.length > 4) {
     throw new Error("Delegation requires one to four Child Agent selections.");
@@ -801,6 +1021,14 @@ function fallbackCodeForMethod(method: LifecycleRequest["method"]) {
     case "task.summary":
     case "task.get":
     case "task.memory.get":
+    case "task.memory.source.get":
+    case "task.memory.item.get":
+    case "task.memory.item.create":
+    case "task.memory.item.update":
+    case "task.memory.item.delete":
+    case "task.memory.authorization.set":
+    case "task.memory.preview":
+    case "task.memory.preview.approve":
     case "task.attachment.stage":
     case "task.attachment.resolve":
     case "task.approve":

@@ -490,6 +490,134 @@ test("sidecar exposes only a bounded local DTO for ongoing-collaboration SQLite 
   assert.equal(!invalid.ok && invalid.error.code, "TASK_TRANSPORT_FAILED");
 });
 
+test("sidecar keeps Structured Memory editing, authorization, preview, and approval local and bounded", async () => {
+  const deps = fakeDependencies({ account: createAccount("Milo") });
+  const service = await deps.getPeerConnectionService();
+  const calls: string[] = [];
+  const item = {
+    schemaVersion: 1 as const,
+    memoryId: "smi_001",
+    sourceMemoryId: "lhm_001",
+    sourceTaskId: "task-long-memory-001",
+    scope: "task" as const,
+    kind: "decision" as const,
+    title: "Local decision",
+    contentPreview: "Use local review",
+    contentDigest: `sha256:${"b".repeat(64)}`,
+    version: 1,
+    pinned: false,
+    trust: "local_user_confirmed" as const,
+    childAgentId: "codex",
+    createdAt: "2026-08-21T00:00:00.000Z",
+    updatedAt: "2026-08-21T00:00:00.000Z",
+    content: "Use local review before rollout."
+  };
+  const preview = {
+    schemaVersion: 1 as const,
+    previewId: "smp_001",
+    taskId: item.sourceTaskId,
+    childAgentId: "codex",
+    queryDigest: `sha256:${"c".repeat(64)}`,
+    generatedAt: "2026-08-21T00:00:00.000Z",
+    expiresAt: "2026-08-21T00:10:00.000Z",
+    cliInjectionEnabled: false as const,
+    scopeAuthorizations: [{
+      schemaVersion: 1 as const,
+      scope: "task" as const,
+      available: true,
+      enabled: true,
+      requiresExplicitAuthorization: false,
+      authorizedAt: null,
+      revokedAt: null,
+      eligibleItemCount: 1
+    }],
+    candidateCount: 1,
+    candidateBytes: 32,
+    candidates: [],
+    previewDigest: `sha256:${"d".repeat(64)}`
+  };
+  deps.getPeerConnectionService = async () => ({
+    ...service,
+    async getStructuredMemorySourceDraft() {
+      calls.push("source");
+      return {
+        schemaVersion: 1 as const,
+        sourceMemoryId: item.sourceMemoryId,
+        sourceTaskId: item.sourceTaskId,
+        childAgentId: item.childAgentId,
+        workspaceScopeAvailable: true,
+        suggestedTitle: item.title,
+        content: item.content,
+        existingItem: null
+      };
+    },
+    async getStructuredMemoryItem() { calls.push("get"); return item; },
+    async createStructuredMemoryItem() { calls.push("create"); return item; },
+    async updateStructuredMemoryItem() { calls.push("update"); return { ...item, version: 2 }; },
+    async deleteStructuredMemoryItem() { calls.push("delete"); return true; },
+    async setStructuredMemoryAuthorization() { calls.push("authorize"); return preview; },
+    async previewStructuredMemory() { calls.push("preview"); return preview; },
+    async approveStructuredMemoryPreview() {
+      calls.push("approve");
+      return {
+        schemaVersion: 1 as const,
+        previewId: preview.previewId,
+        taskId: preview.taskId,
+        approvedAt: "2026-08-21T00:01:00.000Z",
+        expiresAt: preview.expiresAt
+      };
+    }
+  });
+
+  const created = await handleLifecycleRequest(request("task.memory.item.create", {
+    taskId: item.sourceTaskId,
+    sourceMemoryId: item.sourceMemoryId,
+    scope: "task",
+    kind: "decision",
+    title: item.title,
+    content: item.content,
+    pinned: false,
+    confirmed: true
+  }), deps);
+  const previewed = await handleLifecycleRequest(request("task.memory.preview", {
+    taskId: item.sourceTaskId,
+    childAgentId: "codex",
+    excludedMemoryIds: [item.memoryId]
+  }), deps);
+  const approved = await handleLifecycleRequest(request("task.memory.preview.approve", {
+    taskId: item.sourceTaskId,
+    previewId: preview.previewId
+  }), deps);
+  const rejectedPeerOverride = await handleLifecycleRequest(request(
+    "task.memory.authorization.set",
+    {
+      taskId: item.sourceTaskId,
+      childAgentId: "codex",
+      scope: "peer",
+      enabled: true,
+      peerTetiId: "teti_attacker"
+    }
+  ), deps);
+  const rejectedOversize = await handleLifecycleRequest(request("task.memory.item.update", {
+    taskId: item.sourceTaskId,
+    memoryId: item.memoryId,
+    expectedVersion: 1,
+    scope: "task",
+    kind: "decision",
+    title: item.title,
+    content: "x".repeat(4 * 1_024 + 1),
+    pinned: false,
+    confirmed: true
+  }), deps);
+
+  assert.equal(created.ok, true);
+  assert.equal(previewed.ok, true);
+  assert.equal(approved.ok, true);
+  assert.deepEqual(calls, ["create", "preview", "approve"]);
+  assert.equal(rejectedPeerOverride.ok, false);
+  assert.equal(rejectedOversize.ok, false);
+});
+
 test("sidecar exposes durable execution query and explicit resume only through local lifecycle methods", async () => {
   const deps = fakeDependencies({ account: createAccount("Milo") });
   const service = await deps.getPeerConnectionService();

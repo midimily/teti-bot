@@ -86,6 +86,12 @@ jobs:
           . .\apps\desktop\scripts\enter-windows-build-machine.ps1
           npm test
 
+      - name: Run Structured Memory recovery and quality RC gate
+        shell: powershell
+        run: |
+          . .\apps\desktop\scripts\enter-windows-build-machine.ps1
+          npm run test:memory-recovery-rc
+
       - name: Build renderer
         shell: powershell
         run: |

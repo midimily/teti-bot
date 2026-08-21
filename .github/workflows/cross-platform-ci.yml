@@ -70,6 +70,9 @@ jobs:
       - name: Run full repository tests
         run: npm test
 
+      - name: Run Structured Memory recovery and quality RC gate
+        run: npm run test:memory-recovery-rc
+
       - name: Build renderer
         run: npm --prefix apps/desktop run build:renderer
 

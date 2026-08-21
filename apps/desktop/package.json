@@ -1,6 +1,6 @@
 {
   "name": "@teti/desktop",
-  "version": "0.5.1-beta.1",
+  "version": "0.5.3-rc.1",
   "private": true,
   "type": "module",
   "scripts": {
@@ -49,7 +49,8 @@
     "rpc:path": "node --experimental-strip-types scripts/rpc.ts path",
     "rpc:install": "node --experimental-strip-types scripts/rpc.ts install",
     "rpc:verify": "node --experimental-strip-types scripts/rpc.ts verify",
-    "bootstrap:mac": "node --experimental-strip-types scripts/bootstrap-mac.ts"
+    "bootstrap:mac": "node --experimental-strip-types scripts/bootstrap-mac.ts",
+    "memory:recovery": "node --experimental-strip-types scripts/memory-recovery-cli.ts"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",

@@ -33,7 +33,7 @@ import { DEFAULT_TETI_NETWORK_BASE_URL } from "../../../../services/network/conf
 
 export type ResourceTone = "free" | "plus" | "pro" | "unknown" | "unavailable";
 export type ResourceIcon = "codex" | "generic";
-export type PeerReachability = "reachable" | "checking" | "unreachable";
+export type PeerReachability = "reachable" | "checking" | "unreachable" | "unavailable";
 
 export interface ResourceQuotaViewModel {
   periodLabel: string;
@@ -609,8 +609,10 @@ export function toConnectionCardViewModel(
       ? "reachable"
       : connection.networkPresence?.state === "offline"
         ? "unreachable"
-        : connection.networkPresence
+        : connection.networkPresence?.state === "checking"
           ? "checking"
+          : connection.networkPresence?.state === "unavailable"
+            ? "unavailable"
           : Number.isFinite(heartbeatAge) && heartbeatAge < REMOTE_TETI_HEARTBEAT_FRESH_MS
             ? "reachable"
             : (Number.isFinite(heartbeatAge) && heartbeatAge < REMOTE_TETI_HEARTBEAT_OFFLINE_MS)
@@ -643,7 +645,9 @@ export function toConnectionCardViewModel(
       ? messages.list.reachability.reachable
       : reachability === "checking"
         ? messages.list.reachability.checking
-        : messages.list.reachability.unreachable,
+        : reachability === "unavailable"
+          ? messages.list.reachability.unavailable
+          : messages.list.reachability.unreachable,
     passport: toRemotePassportViewModel(connection.passport, i18n)
   };
 }

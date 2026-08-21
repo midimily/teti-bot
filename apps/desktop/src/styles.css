@@ -958,6 +958,125 @@ textarea {
   color: var(--teti-text-muted);
 }
 
+.teti-task-memory-sources li,
+.teti-task-memory-candidates li {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.teti-task-memory-sources li > span:first-child,
+.teti-task-memory-candidates label > span,
+.teti-task-memory-scope-control > span,
+.teti-task-memory-injection-toggle > span {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.teti-task-memory-inline-actions {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.teti-task-memory-inline-actions .teti-task-secondary,
+.teti-task-memory-inline-actions .teti-task-primary,
+.teti-task-structured-memory > .teti-task-secondary {
+  min-height: 24px;
+  padding: 4px 7px;
+  font-size: 8px;
+}
+
+.teti-task-memory-scopes {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(112px, 1fr));
+  gap: 5px;
+}
+
+.teti-task-memory-scope-control,
+.teti-task-memory-injection-toggle,
+.teti-task-memory-candidates label {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.teti-task-memory-scope-control {
+  padding: 6px;
+  border: 1px solid color-mix(in srgb, var(--teti-accent) 18%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--teti-surface) 82%, transparent);
+}
+
+.teti-task-memory-scope-control small,
+.teti-task-memory-injection-toggle small,
+.teti-task-memory-candidates small {
+  color: var(--teti-text-muted);
+  font-size: 8px;
+}
+
+.teti-task-memory-candidates {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.teti-task-memory-candidates li {
+  padding: 7px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--teti-surface) 84%, transparent);
+}
+
+.teti-task-memory-injection-toggle {
+  padding: 8px;
+  border: 1px solid color-mix(in srgb, var(--teti-accent) 32%, transparent);
+  border-radius: 8px;
+}
+
+.teti-task-memory-editor,
+.teti-task-memory-editor label {
+  display: grid;
+  gap: 5px;
+}
+
+.teti-task-memory-editor {
+  padding: 9px;
+  border: 1px solid color-mix(in srgb, var(--teti-accent) 30%, transparent);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--teti-surface) 90%, transparent);
+}
+
+.teti-task-memory-editor input[type="text"],
+.teti-task-memory-editor input:not([type]),
+.teti-task-memory-editor textarea,
+.teti-task-memory-editor select {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.teti-task-memory-editor textarea {
+  min-height: 96px;
+  resize: vertical;
+}
+
+.teti-task-memory-delete-confirmation {
+  padding: 8px;
+  border: 1px solid rgba(196, 55, 55, 0.35);
+  border-radius: 8px;
+  background: rgba(196, 55, 55, 0.06);
+}
+
+.teti-task-memory-delete-confirmation p {
+  margin: 0 0 6px;
+  color: var(--teti-text-secondary);
+  font-size: 9px;
+}
+
 .teti-task-delegation-approval {
   display: grid;
   gap: 8px;
@@ -2923,10 +3042,11 @@ textarea {
 }
 
 .teti-remote-avatar.is-checking {
-  color: var(--teti-remote-reachable);
+  color: var(--teti-remote-unreachable);
 }
 
-.teti-remote-avatar.is-unreachable {
+.teti-remote-avatar.is-unreachable,
+.teti-remote-avatar.is-unavailable {
   color: var(--teti-remote-unreachable);
 }
 

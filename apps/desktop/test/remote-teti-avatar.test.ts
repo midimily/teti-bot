@@ -69,7 +69,47 @@ test("different peer cards derive reachability independently", () => {
   );
 });
 
-test("remote avatar uses an accessible blue silhouette with a static yellow checking dot", async () => {
+test("Network Presence alone controls online, checking, offline, and unavailable presentation", () => {
+  const base = confirmedPeer(new Date(now - 1_000).toISOString());
+  const online = {
+    ...base,
+    networkPresence: {
+      state: "online" as const,
+      mode: "online" as const,
+      reportedAt: new Date(now - 1_000).toISOString(),
+      observedAt: new Date(now).toISOString(),
+      expiresAt: new Date(now + 45_000).toISOString()
+    }
+  };
+  const checking = { ...base, networkPresence: { state: "checking" as const } };
+  const offline = {
+    ...base,
+    networkPresence: { state: "offline" as const, observedAt: new Date(now).toISOString() }
+  };
+  const unavailable = {
+    ...base,
+    networkPresence: {
+      state: "unavailable" as const,
+      checkedAt: new Date(now).toISOString(),
+      errorCode: "NETWORK_TIMEOUT"
+    }
+  };
+
+  assert.deepEqual(
+    [online, checking, offline, unavailable].map((peer) => {
+      const card = toConnectionCardViewModel(peer, new Date(now));
+      return [card.reachability, card.reachabilityLabel];
+    }),
+    [
+      ["reachable", "在线"],
+      ["checking", "状态检测中"],
+      ["unreachable", "离线"],
+      ["unavailable", "状态暂不可用"]
+    ]
+  );
+});
+
+test("remote avatar reserves blue for online and uses gray with a static yellow checking dot", async () => {
   const [component, app, styles, asset] = await Promise.all([
     readFile(new URL("../src/connections/remote-teti-avatar.ts", import.meta.url), "utf8"),
     readFile(new URL("../src/app.ts", import.meta.url), "utf8"),
@@ -78,6 +118,7 @@ test("remote avatar uses an accessible blue silhouette with a static yellow chec
   ]);
   const avatarStyles = cssBlock(styles, ".teti-remote-avatar");
   const silhouetteStyles = cssBlock(styles, ".teti-remote-avatar-silhouette");
+  const reachableStyles = cssBlock(styles, ".teti-remote-avatar.is-reachable");
   const checkingStyles = cssBlock(styles, ".teti-remote-avatar.is-checking");
   const indicatorStyles = cssBlock(styles, ".teti-remote-avatar-indicator");
 
@@ -91,7 +132,9 @@ test("remote avatar uses an accessible blue silhouette with a static yellow chec
   assert.match(component, /teti-remote-avatar-indicator/);
   assert.doesNotMatch(avatarStyles, /mask-image/);
   assert.match(silhouetteStyles, /mask-image/);
-  assert.match(checkingStyles, /var\(--teti-remote-reachable\)/);
+  assert.match(reachableStyles, /var\(--teti-remote-reachable\)/);
+  assert.match(checkingStyles, /var\(--teti-remote-unreachable\)/);
+  assert.match(styles, /\.teti-remote-avatar\.is-unavailable\s*\{[\s\S]*?var\(--teti-remote-unreachable\)/);
   assert.match(indicatorStyles, /position:\s*absolute/);
   assert.match(indicatorStyles, /background:\s*var\(--teti-remote-checking\)/);
   assert.doesNotMatch(indicatorStyles, /animation/);

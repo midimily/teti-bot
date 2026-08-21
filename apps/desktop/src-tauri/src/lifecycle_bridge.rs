@@ -793,9 +793,17 @@ pub fn timeout_for_method(method: &str) -> Duration {
         | "task.summary"
         | "task.get"
         | "task.memory.get"
+        | "task.memory.source.get"
+        | "task.memory.item.get"
         | "task.attachment.resolve"
         | "task.delegation.targets"
         | "task.execution.get" => 2_000,
+        "task.memory.item.create"
+        | "task.memory.item.update"
+        | "task.memory.item.delete"
+        | "task.memory.authorization.set"
+        | "task.memory.preview"
+        | "task.memory.preview.approve" => 5_000,
         "task.attachment.stage"
         | "task.approve"
         | "task.delegation.approve"
@@ -837,6 +845,14 @@ fn is_allowed_method(method: &str) -> bool {
             | "task.summary"
             | "task.get"
             | "task.memory.get"
+            | "task.memory.source.get"
+            | "task.memory.item.get"
+            | "task.memory.item.create"
+            | "task.memory.item.update"
+            | "task.memory.item.delete"
+            | "task.memory.authorization.set"
+            | "task.memory.preview"
+            | "task.memory.preview.approve"
             | "task.attachment.stage"
             | "task.attachment.resolve"
             | "task.approve"
@@ -966,6 +982,14 @@ mod tests {
             "task.send",
             "task.list",
             "task.memory.get",
+            "task.memory.source.get",
+            "task.memory.item.get",
+            "task.memory.item.create",
+            "task.memory.item.update",
+            "task.memory.item.delete",
+            "task.memory.authorization.set",
+            "task.memory.preview",
+            "task.memory.preview.approve",
             "task.approve",
             "task.attachment.stage",
             "task.delegation.targets",
