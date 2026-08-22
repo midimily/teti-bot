@@ -1037,6 +1037,232 @@ test("two peers execute an abstract receiver-local Compute Offer without sharing
   assert.match(JSON.stringify(result?.artifacts), /receiver-local answer/);
 });
 
+test("single-stage Task attention is durable, peer-evidenced, and independently viewed", async () => {
+  const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
+  const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
+  const directory = new StaticDirectory([toIdentity(accountA), toIdentity(accountB)]);
+  const relay = new MemoryChatmailRelay();
+  const connectionsA = new MemoryTetiConnectionStorage();
+  const connectionsB = new MemoryTetiConnectionStorage();
+  const peerProtocolCapabilitiesA = new MemoryPeerProtocolCapabilityStore();
+  const tasksA = new MemoryTaskTransportStore();
+  const tasksB = new MemoryTaskTransportStore();
+  const executor = new DeferredSingleStageTaskExecutor();
+  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), directory, connectionsA, {
+    taskTransportStore: tasksA,
+    peerProtocolCapabilities: peerProtocolCapabilitiesA
+  });
+  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), directory, connectionsB, {
+    taskTransportStore: tasksB,
+    taskExecutor: executor
+  });
+  const connection = await confirmPeers(runtimeA, runtimeB, "beta00002");
+  const sent = await runtimeA.sendTask({
+    connectionRequestId: connection.requestId,
+    capabilityId: "code-analysis",
+    text: "Return one durable result."
+  });
+
+  assert.equal((await runtimeA.listTaskSummaries()).unreadTaskUpdateCount, 0);
+  await runtimeB.poll();
+  const receiverPending = await runtimeB.listTaskSummaries();
+  assert.equal(receiverPending.pendingIncomingCount, 1);
+  assert.equal(receiverPending.unreadTaskUpdateCount, 0);
+
+  await runtimeA.poll();
+  let requesterSummary = await runtimeA.listTaskSummaries();
+  assert.equal(requesterSummary.tasks[0]?.delivery, "acknowledged");
+  assert.equal(requesterSummary.unreadTaskUpdateCount, 1, "a remote receipt makes delivery attention credible");
+  await runtimeA.markTaskAttentionViewed(sent.request.taskId);
+  assert.equal((await runtimeA.listTaskSummaries()).unreadTaskUpdateCount, 0);
+
+  await runtimeB.approveTask(sent.request.taskId);
+  const receiverWorking = await runtimeB.listTaskSummaries();
+  assert.equal(receiverWorking.pendingIncomingCount, 0);
+  assert.equal(receiverWorking.unreadTaskUpdateCount, 0, "the local approval action does not notify its actor");
+  await runtimeA.poll();
+  requesterSummary = await runtimeA.listTaskSummaries();
+  assert.equal(requesterSummary.tasks[0]?.state, "working");
+  assert.equal(requesterSummary.unreadTaskUpdateCount, 1);
+  await runtimeA.markTaskAttentionViewed(sent.request.taskId);
+
+  executor.finish("single-stage durable result");
+  await waitUntil(async () => (await runtimeB.getTask(sent.request.taskId)).state === "completed");
+  await flushBackgroundWork();
+  assert.equal(
+    (await runtimeB.listTaskSummaries()).unreadTaskUpdateCount,
+    1,
+    "the receiver is notified when its background execution completes"
+  );
+  await runtimeA.poll();
+  requesterSummary = await runtimeA.listTaskSummaries();
+  assert.equal(requesterSummary.tasks[0]?.state, "completed");
+  assert.equal(requesterSummary.unreadTaskUpdateCount, 1);
+  const attentionRevision = (await runtimeA.getTask(sent.request.taskId)).attentionRevision;
+  await runtimeA.poll();
+  assert.equal(
+    (await runtimeA.getTask(sent.request.taskId)).attentionRevision,
+    attentionRevision,
+    "duplicate or reordered delivery cannot create another unread revision"
+  );
+
+  const restartedA = await makeRuntime(
+    accountA,
+    relay.adapter(accountA.address),
+    directory,
+    connectionsA,
+    {
+      taskTransportStore: tasksA,
+      peerProtocolCapabilities: peerProtocolCapabilitiesA
+    }
+  );
+  assert.equal(
+    (await restartedA.listTaskSummaries()).unreadTaskUpdateCount,
+    1,
+    "unread attention survives Runtime restart"
+  );
+  await restartedA.markTaskAttentionViewed(sent.request.taskId);
+  await runtimeB.markTaskAttentionViewed(sent.request.taskId);
+  assert.equal((await restartedA.listTaskSummaries()).unreadTaskUpdateCount, 0);
+  assert.equal((await runtimeB.listTaskSummaries()).unreadTaskUpdateCount, 0);
+
+  const failed = await restartedA.sendTask({
+    connectionRequestId: connection.requestId,
+    capabilityId: "code-analysis",
+    text: "Return one durable failure."
+  });
+  await runtimeB.poll();
+  await restartedA.poll();
+  await restartedA.markTaskAttentionViewed(failed.request.taskId);
+  await runtimeB.approveTask(failed.request.taskId);
+  await restartedA.poll();
+  await restartedA.markTaskAttentionViewed(failed.request.taskId);
+  executor.fail("ADAPTER_INTERNAL_ERROR");
+  await waitUntil(async () => (await runtimeB.getTask(failed.request.taskId)).state === "failed");
+  await flushBackgroundWork();
+  assert.equal((await runtimeB.listTaskSummaries()).unreadTaskUpdateCount, 1);
+  await restartedA.poll();
+  assert.equal((await restartedA.getTask(failed.request.taskId)).state, "failed");
+  assert.equal((await restartedA.listTaskSummaries()).unreadTaskUpdateCount, 1);
+});
+
+test("Status application receipt survives loss and reports delivery recovery after retry", async () => {
+  const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
+  const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
+  const directory = new StaticDirectory([toIdentity(accountA), toIdentity(accountB)]);
+  const relay = new MemoryChatmailRelay();
+  const connectionsA = new MemoryTetiConnectionStorage();
+  const connectionsB = new MemoryTetiConnectionStorage();
+  const tasksB = new MemoryTaskTransportStore();
+  const executor = new DeferredSingleStageTaskExecutor();
+  let nowMs = Date.now();
+  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), directory, connectionsA, {
+    now: () => new Date(nowMs)
+  });
+  let runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), directory, connectionsB, {
+    now: () => new Date(nowMs),
+    taskTransportStore: tasksB,
+    taskExecutor: executor
+  });
+  const connection = await confirmPeers(runtimeA, runtimeB, "beta00002");
+  const sent = await runtimeA.sendTask({
+    connectionRequestId: connection.requestId,
+    taskId: "status-application-receipt-retry-001",
+    capabilityId: "code-analysis",
+    text: "Keep retrying the working status until the peer stores it."
+  });
+  await runtimeB.poll();
+  relay.failNextApplicationSendsFrom(accountB.address, "teti.task.status");
+  await runtimeB.approveTask(sent.request.taskId);
+
+  let host = await runtimeB.getTask(sent.request.taskId);
+  assert.equal(host.statusPending, true);
+  assert.equal(host.applicationDeliveryFailures?.[0]?.kind, "status");
+  assert.equal(host.latestAttentionChange?.kind, "delivery_failed");
+
+  nowMs += 31_000;
+  await runtimeB.poll();
+  await runtimeA.poll();
+  assert.equal(
+    relay.dropFirstApplicationMessage(accountB.address, "teti.task.application.receipt"),
+    true,
+    "the first durable Status receipt is intentionally lost"
+  );
+  const requesterRevision = (await runtimeA.getTask(sent.request.taskId)).attentionRevision;
+
+  runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), directory, connectionsB, {
+    now: () => new Date(nowMs),
+    taskTransportStore: tasksB,
+    taskExecutor: executor
+  });
+  nowMs += 31_000;
+  await runtimeB.poll();
+  await runtimeA.poll();
+  assert.equal(
+    (await runtimeA.getTask(sent.request.taskId)).attentionRevision,
+    requesterRevision,
+    "retrying an already applied Status does not create another peer reminder"
+  );
+  await runtimeB.poll();
+
+  host = await runtimeB.getTask(sent.request.taskId);
+  assert.equal(host.statusPending, false);
+  assert.equal(host.statusAcknowledgedRevision, host.statusRevision);
+  assert.equal(host.applicationDeliveryAttempts, undefined);
+  assert.equal(host.applicationDeliveryFailures, undefined);
+  assert.equal(host.latestAttentionChange?.kind, "delivery_recovered");
+});
+
+test("rejection and cancellation create durable attention for both collaboration roles", async () => {
+  const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
+  const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
+  const directory = new StaticDirectory([toIdentity(accountA), toIdentity(accountB)]);
+  const relay = new MemoryChatmailRelay();
+  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), directory);
+  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), directory, undefined, {
+    taskExecutor: new HangingTaskExecutor()
+  });
+  const connection = await confirmPeers(runtimeA, runtimeB, "beta00002");
+
+  for (const executionMode of ["single_stage", "long_horizon"] as const) {
+    const rejected = await runtimeA.sendTask({
+      connectionRequestId: connection.requestId,
+      capabilityId: "code-analysis",
+      text: `Reject this ${executionMode} Task.`,
+      executionMode
+    });
+    await runtimeB.poll();
+    await runtimeA.poll();
+    await runtimeA.markTaskAttentionViewed(rejected.request.taskId);
+    await runtimeB.rejectTask(rejected.request.taskId);
+    assert.equal((await runtimeB.listTaskSummaries()).unreadTaskUpdateCount, 1);
+    await runtimeA.poll();
+    assert.equal((await runtimeA.getTask(rejected.request.taskId)).state, "rejected");
+    assert.equal((await runtimeA.listTaskSummaries()).unreadTaskUpdateCount, 1);
+    await runtimeA.markTaskAttentionViewed(rejected.request.taskId);
+    await runtimeB.markTaskAttentionViewed(rejected.request.taskId);
+
+    const canceled = await runtimeA.sendTask({
+      connectionRequestId: connection.requestId,
+      capabilityId: "code-analysis",
+      text: `Cancel this ${executionMode} Task remotely.`,
+      executionMode
+    });
+    await runtimeB.poll();
+    await runtimeA.poll();
+    await runtimeA.markTaskAttentionViewed(canceled.request.taskId);
+    await runtimeA.cancelTask(canceled.request.taskId);
+    assert.equal((await runtimeA.listTaskSummaries()).unreadTaskUpdateCount, 1);
+    await runtimeB.poll();
+    assert.equal((await runtimeB.getTask(canceled.request.taskId)).state, "canceled");
+    assert.equal((await runtimeB.listTaskSummaries()).unreadTaskUpdateCount, 1);
+    await runtimeA.poll();
+    assert.equal((await runtimeA.getTask(canceled.request.taskId)).state, "canceled");
+    await runtimeA.markTaskAttentionViewed(canceled.request.taskId);
+    await runtimeB.markTaskAttentionViewed(canceled.request.taskId);
+  }
+});
+
 test("Task v7 delivers an 11 KB result as a verified file and clears outbox only after peer ACK", async () => {
   const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
   const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
@@ -1135,9 +1361,9 @@ test("long-horizon collaboration survives Host restart, accepts input, and switc
   assert.equal(host.longHorizon?.stages.length, 1);
   assert.equal(host.longHorizon?.checkpoints.length, 1);
   assert.equal(host.longHorizon?.artifacts[0]?.role, "intermediate");
-  assert.equal((await runtimeB.listTaskSummaries()).unreadStageResultCount, 1);
-  await runtimeB.markTaskStageResultsViewed(sent.request.taskId);
-  assert.equal((await runtimeB.listTaskSummaries()).unreadStageResultCount, 0);
+  assert.equal((await runtimeB.listTaskSummaries()).unreadTaskUpdateCount, 1);
+  await runtimeB.markTaskAttentionViewed(sent.request.taskId);
+  assert.equal((await runtimeB.listTaskSummaries()).unreadTaskUpdateCount, 0);
   const originalExpiry = host.longHorizon!.continuationExpiresAt;
   host = await runtimeB.pauseTask(sent.request.taskId);
   assert.equal(host.longHorizon?.phase, "paused");
@@ -1149,32 +1375,51 @@ test("long-horizon collaboration survives Host restart, accepts input, and switc
   );
   assert.ok(host.longHorizon?.audit.some((event) => event.action === "paused"));
   assert.ok(host.longHorizon?.audit.some((event) => event.action === "renewed"));
+  assert.equal(host.latestAttentionChange?.kind, "renewed");
+  assert.equal(
+    (await runtimeB.listTaskSummaries()).unreadTaskUpdateCount,
+    0,
+    "local pause and renewal update details without notifying their actor"
+  );
 
   // Recreate the receiver Runtime at a stage boundary. The persisted Host
   // session, Workspace revision and audit are the recovery source of truth.
-  const restartedExecutor = new LongHorizonTaskExecutor();
+  const restartedExecutor = new DeferredLongHorizonTaskExecutor();
   runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), directory, connectionsB, {
     taskTransportStore: tasksB,
     taskExecutor: restartedExecutor
   });
   assert.equal(
-    (await runtimeB.listTaskSummaries()).unreadStageResultCount,
+    (await runtimeB.listTaskSummaries()).unreadTaskUpdateCount,
     0,
     "viewed stage-result state must survive Runtime restart"
   );
   await runtimeA.poll();
   const requester = await runtimeA.getTask(sent.request.taskId);
   assert.equal(requester.peerLongHorizon?.phase, "paused");
+  assert.equal(requester.latestAttentionChange?.kind, "renewed");
   assert.equal(requester.artifacts?.length, 1);
   assert.deepEqual(requester.peerArtifactMetadata?.map((entry) => entry.stageIndex), [1]);
-  assert.equal((await runtimeA.listTaskSummaries()).unreadStageResultCount, 1);
-  await runtimeA.markTaskStageResultsViewed(sent.request.taskId);
-  assert.equal((await runtimeA.listTaskSummaries()).unreadStageResultCount, 0);
+  assert.equal((await runtimeA.listTaskSummaries()).unreadTaskUpdateCount, 1);
+  await runtimeA.markTaskAttentionViewed(sent.request.taskId);
+  assert.equal((await runtimeA.listTaskSummaries()).unreadTaskUpdateCount, 0);
   await runtimeA.submitTaskInput(sent.request.taskId, "第二阶段改用备用 Child，综合第一阶段结果。 ");
+  const duplicatedInputs = relay.takeApplicationMessages(accountB.address, ["teti.task.input"]);
+  assert.equal(duplicatedInputs.length, 1);
+  relay.restore(accountB.address, [...duplicatedInputs, ...duplicatedInputs]);
   await runtimeB.poll();
   host = await runtimeB.getTask(sent.request.taskId);
   assert.equal(host.longHorizon?.pendingInput?.source, "remote_requester");
   assert.equal(restartedExecutor.requests.length, 0, "input delivery must not auto-run or auto-switch");
+  assert.equal((await runtimeB.listTaskSummaries()).unreadTaskUpdateCount, 1);
+  const inputAttentionRevision = host.attentionRevision;
+  await runtimeB.poll();
+  assert.equal(
+    (await runtimeB.getTask(sent.request.taskId)).attentionRevision,
+    inputAttentionRevision,
+    "a duplicate supplemental-input poll cannot add another attention revision"
+  );
+  await runtimeB.markTaskAttentionViewed(sent.request.taskId);
 
   restartedExecutor.availableSuffixes = ["b"];
   await assert.rejects(
@@ -1183,8 +1428,40 @@ test("long-horizon collaboration survives Host restart, accepts input, and switc
     "an unavailable previous Child must never fall through to the first ready alternative"
   );
   await runtimeB.continueTask(sent.request.taskId, "fake-agent-b");
+  assert.equal((await runtimeB.listTaskSummaries()).unreadTaskUpdateCount, 1, "next-stage start notifies the Host");
+  await runtimeB.markTaskAttentionViewed(sent.request.taskId);
+  const duplicatedStageStart = relay.takeApplicationMessages(accountA.address, ["teti.task.status"]);
+  assert.equal(duplicatedStageStart.length, 1);
+  relay.restore(accountA.address, [...duplicatedStageStart, ...duplicatedStageStart]);
+  const requesterBeforeStageStart = await runtimeA.getTask(sent.request.taskId);
+  await runtimeA.poll();
+  assert.equal((await runtimeA.listTaskSummaries()).unreadTaskUpdateCount, 1, "next-stage start notifies the requester");
+  const requesterAfterStageStart = await runtimeA.getTask(sent.request.taskId);
+  assert.equal(requesterAfterStageStart.latestAttentionChange?.kind, "resumed");
+  assert.equal(
+    requesterAfterStageStart.attentionRevision,
+    (requesterBeforeStageStart.attentionRevision ?? 0) + 1,
+    "duplicate status envelopes create one attention revision"
+  );
+  await runtimeA.markTaskAttentionViewed(sent.request.taskId);
+
+  restartedExecutor.finish("safe:fake-agent-b:stage-2");
   await waitUntil(async () => (await runtimeB.getTask(sent.request.taskId)).artifacts?.length === 2);
+  assert.equal((await runtimeB.listTaskSummaries()).unreadTaskUpdateCount, 1, "stage success notifies the Host");
   await runtimeB.poll();
+  const duplicatedStageArtifacts = relay.takeApplicationMessages(accountA.address, ["teti.task.artifact.file"]);
+  assert.equal(duplicatedStageArtifacts.length, 1);
+  relay.restore(accountA.address, [...duplicatedStageArtifacts, ...duplicatedStageArtifacts]);
+  const requesterBeforeStageArtifact = await runtimeA.getTask(sent.request.taskId);
+  await runtimeA.poll();
+  assert.equal((await runtimeA.listTaskSummaries()).unreadTaskUpdateCount, 1, "stage success notifies the requester");
+  const requesterAfterStageArtifact = await runtimeA.getTask(sent.request.taskId);
+  assert.equal(requesterAfterStageArtifact.artifacts?.length, 2);
+  assert.equal(
+    requesterAfterStageArtifact.attentionRevision,
+    (requesterBeforeStageArtifact.attentionRevision ?? 0) + 1,
+    "duplicate Artifact envelopes create one attention revision"
+  );
   host = await runtimeB.getTask(sent.request.taskId);
   assert.equal(host.longHorizon?.stages.length, 2);
   assert.equal(host.longHorizon?.stages[1]?.childAgentId, "fake-agent-b");
@@ -1193,7 +1470,10 @@ test("long-horizon collaboration survives Host restart, accepts input, and switc
   assert.ok(host.longHorizon?.audit.some((event) =>
     event.action === "child_selected" && event.childAgentId === "fake-agent-b"
   ));
+  await runtimeA.markTaskAttentionViewed(sent.request.taskId);
+  await runtimeB.markTaskAttentionViewed(sent.request.taskId);
   await runtimeB.completeTask(sent.request.taskId);
+  assert.equal((await runtimeB.listTaskSummaries()).unreadTaskUpdateCount, 1, "final completion notifies the Host");
   await runtimeA.poll();
   const completed = await runtimeA.getTask(sent.request.taskId);
   assert.equal(completed.state, "completed");
@@ -1201,10 +1481,16 @@ test("long-horizon collaboration survives Host restart, accepts input, and switc
   assert.deepEqual(completed.peerArtifactMetadata?.map((entry) => entry.stageIndex), [1, 2]);
   assert.equal(completed.peerLongHorizon?.finalArtifactId, completed.artifacts?.[1]?.artifactId);
   assert.equal(
-    (await runtimeA.listTaskSummaries()).unreadStageResultCount,
+    (await runtimeA.listTaskSummaries()).unreadTaskUpdateCount,
     1,
-    "each newly completed stage must restore the unread indicator"
+    "final completion must restore the requester unread indicator"
   );
+  const finalAttentionRevision = completed.attentionRevision;
+  relay.restore(accountA.address, duplicatedStageStart);
+  await runtimeA.poll();
+  const afterStaleStatus = await runtimeA.getTask(sent.request.taskId);
+  assert.equal(afterStaleStatus.state, "completed");
+  assert.equal(afterStaleStatus.attentionRevision, finalAttentionRevision);
 });
 
 test("ongoing collaboration permits exactly fifteen supplemental instructions for sixteen stages", async () => {
@@ -1577,6 +1863,9 @@ test("long-horizon stage rejects a changed Workspace revision and publishes no s
     });
     await runtimeB.poll();
     await runtimeB.approveTask(sent.request.taskId);
+    await runtimeA.poll();
+    await runtimeA.markTaskAttentionViewed(sent.request.taskId);
+    await runtimeB.markTaskAttentionViewed(sent.request.taskId);
     const working = await runtimeB.getTask(sent.request.taskId);
     const binding = working.workspaceBinding!;
     const foreignSnapshot = await workspaceStore.createSnapshot({
@@ -1594,6 +1883,9 @@ test("long-horizon stage rejects a changed Workspace revision and publishes no s
     assert.equal(conflicted.safeErrorCode, "TASK_WORKSPACE_REVISION_CONFLICT");
     assert.equal(conflicted.artifacts?.length ?? 0, 0);
     assert.equal(conflicted.longHorizon?.checkpoints.length, 0);
+    assert.equal((await runtimeB.listTaskSummaries()).unreadTaskUpdateCount, 1);
+    await runtimeA.poll();
+    assert.equal((await runtimeA.listTaskSummaries()).unreadTaskUpdateCount, 1);
     assert.ok(conflicted.longHorizon?.audit.some((event) =>
       event.safeErrorCode === "TASK_WORKSPACE_REVISION_CONFLICT"
     ));
@@ -1626,6 +1918,9 @@ test("an expired long-horizon stage cannot publish an Artifact after its lease",
   });
   await runtimeB.poll();
   await runtimeB.approveTask(sent.request.taskId);
+  await runtimeA.poll();
+  await runtimeA.markTaskAttentionViewed(sent.request.taskId);
+  await runtimeB.markTaskAttentionViewed(sent.request.taskId);
   nowMs += 61_000;
   executor.finish("late result");
   await waitUntil(async () =>
@@ -1635,6 +1930,9 @@ test("an expired long-horizon stage cannot publish an Artifact after its lease",
   assert.equal(expired.longHorizon?.phase, "expired");
   assert.equal(expired.artifacts?.length ?? 0, 0);
   assert.equal(expired.safeErrorCode, "TASK_EXPIRED");
+  assert.equal((await runtimeB.listTaskSummaries()).unreadTaskUpdateCount, 1);
+  await runtimeA.poll();
+  assert.equal((await runtimeA.listTaskSummaries()).unreadTaskUpdateCount, 1);
 });
 
 test("two peers deliver a verified image Task, approve once, execute, and return an Artifact", async () => {
@@ -2105,6 +2403,73 @@ test("rejection and requester cancellation converge on both peers without execut
   const canceledAtA = await runtimeA.getTask(canceledTask.request.taskId);
   assert.equal(canceledAtA.state, "canceled");
   assert.equal(canceledAtA.cancelPending, false);
+});
+
+test("Input and Control application receipts stop retries only after durable peer handling", async () => {
+  const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
+  const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
+  const directory = new StaticDirectory([toIdentity(accountA), toIdentity(accountB)]);
+  const relay = new MemoryChatmailRelay();
+  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), directory);
+  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), directory, undefined, {
+    taskExecutor: new LongHorizonTaskExecutor()
+  });
+  const connection = await confirmPeers(runtimeA, runtimeB, "beta00002");
+  const ongoing = await runtimeA.sendTask({
+    connectionRequestId: connection.requestId,
+    taskId: "input-application-receipt-001",
+    capabilityId: "code-analysis",
+    text: "Finish one stage, then wait for a durable supplemental instruction.",
+    executionMode: "long_horizon"
+  });
+  await runtimeB.poll();
+  await runtimeB.approveTask(ongoing.request.taskId);
+  await waitUntil(async () => (await runtimeB.getTask(ongoing.request.taskId)).state === "input_required");
+  await runtimeB.poll();
+  await runtimeA.poll();
+  await runtimeB.poll();
+
+  await runtimeA.submitTaskInput(ongoing.request.taskId, "Use this instruction exactly once.");
+  let requester = await runtimeA.getTask(ongoing.request.taskId);
+  assert.equal(requester.inputAcknowledgedAt, undefined);
+  assert.equal(requester.applicationDeliveryAttempts?.some((item) => item.kind === "input"), true);
+  await runtimeB.poll();
+  await runtimeA.poll();
+  requester = await runtimeA.getTask(ongoing.request.taskId);
+  assert.ok(requester.inputAcknowledgedAt);
+  assert.ok(requester.inputPending, "delivery ACK does not unlock another instruction before stage start");
+  assert.equal(
+    requester.applicationDeliveryAttempts?.some((item) => item.kind === "input") ?? false,
+    false
+  );
+
+  const cancellable = await runtimeA.sendTask({
+    connectionRequestId: connection.requestId,
+    taskId: "control-application-receipt-001",
+    capabilityId: "code-analysis",
+    text: "Cancel before approval and acknowledge the control message."
+  });
+  await runtimeB.poll();
+  await runtimeA.poll();
+  await runtimeB.poll();
+  await runtimeA.cancelTask(cancellable.request.taskId);
+  await runtimeB.poll();
+  const heldStatuses = relay.takeApplicationMessages(accountA.address, ["teti.task.status"]);
+  assert.ok(heldStatuses.length > 0);
+  await runtimeA.poll();
+  requester = await runtimeA.getTask(cancellable.request.taskId);
+  assert.equal(requester.cancelPending, true);
+  assert.ok(requester.cancelAcknowledgedAt);
+  assert.equal(
+    requester.applicationDeliveryAttempts?.some((item) => item.kind === "control") ?? false,
+    false
+  );
+
+  relay.restore(accountA.address, heldStatuses);
+  await runtimeA.poll();
+  requester = await runtimeA.getTask(cancellable.request.taskId);
+  assert.equal(requester.state, "canceled");
+  assert.equal(requester.cancelPending, false);
 });
 
 test("a verified Task v7 result completes the requester even when every status update is lost", async () => {
@@ -2789,6 +3154,7 @@ class MemoryChatmailRelay {
   private readonly applicationTypes = new Map<number, string | undefined>();
   private readonly messageSenders = new Map<number, string>();
   private readonly passportDeliveryFailures = new Map<string, number>();
+  private readonly applicationSendFailures = new Map<string, number>();
   private readonly deferredAttachments: boolean;
   private readonly hideAttachmentTextUntilDone: boolean;
   private readonly initialAttachmentDownloadState: "Available" | "Failure";
@@ -2819,6 +3185,10 @@ class MemoryChatmailRelay {
     this.passportDeliveryFailures.set(fromAddress, count);
   }
 
+  failNextApplicationSendsFrom(fromAddress: string, type: string, count = 1): void {
+    this.applicationSendFailures.set(`${fromAddress}:${type}`, count);
+  }
+
   async waitForDelivery(messageId: number): Promise<ChatmailMessageStatus> {
     this.deliveryWaitCalls += 1;
     if (this.deliveryBlocked) {
@@ -2837,13 +3207,18 @@ class MemoryChatmailRelay {
 
   send(fromAddress: string, input: SendChatmailMessageInput): ChatmailSentMessage {
     this.recordEvent(fromAddress, "send");
+    const type = applicationType({ messageId: 0, chatId: 0, text: input.text });
+    const failureKey = `${fromAddress}:${type ?? "unknown"}`;
+    const failures = this.applicationSendFailures.get(failureKey) ?? 0;
+    if (failures > 0) {
+      this.applicationSendFailures.set(failureKey, failures - 1);
+      const error = new Error("simulated application send failure") as Error & { code: string };
+      error.code = "CHATMAIL_SEND_FAILED";
+      throw error;
+    }
     const messageId = this.nextMessageId++;
     this.messageSenders.set(messageId, fromAddress);
-    this.applicationTypes.set(messageId, applicationType({
-      messageId,
-      chatId: messageId,
-      text: input.text
-    }));
+    this.applicationTypes.set(messageId, type);
     const queue = this.queues.get(input.peerAddress) ?? [];
     if (input.attachment) {
       this.attachmentSources.set(messageId, input.attachment.path);
@@ -3417,6 +3792,22 @@ class DeferredSingleStageTaskExecutor implements TaskExecutionBridge {
     const resolve = this.resolveExecution;
     this.resolveExecution = undefined;
     resolve(structuredClone(completed));
+  }
+
+  fail(safeErrorCode: string): void {
+    if (!this.task || !this.resolveExecution) throw new Error("No deferred Task is active.");
+    const completedAt = new Date().toISOString();
+    const failed: CallableAdapterTaskSnapshot = {
+      ...this.task,
+      state: "failed",
+      safeErrorCode,
+      updatedAt: completedAt,
+      completedAt
+    };
+    this.task = failed;
+    const resolve = this.resolveExecution;
+    this.resolveExecution = undefined;
+    resolve(structuredClone(failed));
   }
 }
 

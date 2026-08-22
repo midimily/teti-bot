@@ -18,6 +18,7 @@ import {
   validateTaskAttachmentPayload,
   validateTaskAttachmentReceiptPayload,
   validateTaskCancelPayload,
+  validateTaskApplicationReceiptPayload,
   validateTaskInputPayload,
   validateTaskReceiptPayload,
   validateTaskStatusPayload
@@ -200,6 +201,7 @@ function validatePayload(type: TetiApplicationMessageType, payload: Record<strin
     else if (type === "teti.task.status") validateTaskStatusPayload(payload);
     else if (type === "teti.task.cancel") validateTaskCancelPayload(payload);
     else if (type === "teti.task.input") validateTaskInputPayload(payload);
+    else if (type === "teti.task.application.receipt") validateTaskApplicationReceiptPayload(payload);
     else if (type === "teti.task.artifact") validateTaskArtifactPayload(payload);
     else if (type === "teti.task.artifact.file") validateTaskArtifactFilePayload(payload);
     else if (type === "teti.task.artifact.receipt") validateTaskArtifactReceiptPayload(payload);
@@ -272,6 +274,7 @@ function isSupportedApplicationType(value: string): value is TetiApplicationMess
     "teti.task.status",
     "teti.task.cancel",
     "teti.task.input",
+    "teti.task.application.receipt",
     "teti.task.artifact",
     "teti.task.artifact.file",
     "teti.task.artifact.receipt"

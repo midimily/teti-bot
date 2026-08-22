@@ -7,6 +7,7 @@ import type {
   TetiTaskAttachmentReceiptPayload,
   TetiTaskAttachmentPayload,
   TetiTaskCancelPayload,
+  TetiTaskApplicationReceiptPayload,
   TetiTaskInputPayload,
   TetiTaskReceiptPayload,
   TetiTaskStatusPayload
@@ -30,6 +31,7 @@ export type TetiApplicationMessageType =
   | "teti.task.status"
   | "teti.task.cancel"
   | "teti.task.input"
+  | "teti.task.application.receipt"
   | "teti.task.artifact"
   | "teti.task.artifact.file"
   | "teti.task.artifact.receipt";
@@ -86,6 +88,7 @@ export type TetiKnownApplicationEnvelope =
   | TetiApplicationEnvelope<TetiTaskStatusPayload>
   | TetiApplicationEnvelope<TetiTaskCancelPayload>
   | TetiApplicationEnvelope<TetiTaskInputPayload>
+  | TetiApplicationEnvelope<TetiTaskApplicationReceiptPayload>
   | TetiApplicationEnvelope<TetiTaskArtifactPayload>
   | TetiApplicationEnvelope<TetiTaskArtifactFilePayload>
   | TetiApplicationEnvelope<TetiTaskArtifactReceiptPayload>;

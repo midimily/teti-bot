@@ -48,6 +48,7 @@ import {
   type TetiTaskArtifactPayload,
   type TetiTaskArtifactFilePayload,
   type TetiTaskArtifactReceiptPayload,
+  type TetiTaskApplicationReceiptPayload,
   type TetiTaskAttachmentPayload,
   type TetiTaskAttachmentReceiptPayload,
   type TetiTaskCancelPayload,
@@ -191,7 +192,7 @@ export interface PeerConnectionService {
   listTasks?(): Promise<CollaborationTaskTransportSnapshot>;
   listTaskSummaries?(): Promise<CollaborationTaskSummarySnapshot>;
   getTask?(taskId: string): Promise<CollaborationTaskTransportRecord>;
-  markTaskStageResultsViewed?(taskId: string): Promise<CollaborationTaskTransportRecord>;
+  markTaskAttentionViewed?(taskId: string): Promise<CollaborationTaskTransportRecord>;
   getLongHorizonTaskMemory?(taskId: string): Promise<LongHorizonTaskMemorySnapshot>;
   getStructuredMemorySourceDraft?(taskId: string, sourceMemoryId: string): Promise<StructuredMemorySourceDraft | null>;
   getStructuredMemoryItem?(taskId: string, memoryId: string): Promise<StructuredMemoryItemDetail | null>;
@@ -804,8 +805,8 @@ export class PeerConnectionRuntime implements PeerConnectionService {
     return this.taskInitialization.then(() => this.taskTransport.get(taskId));
   }
 
-  markTaskStageResultsViewed(taskId: string): Promise<CollaborationTaskTransportRecord> {
-    return this.serial(() => this.taskTransport.markStageResultsViewed(taskId));
+  markTaskAttentionViewed(taskId: string): Promise<CollaborationTaskTransportRecord> {
+    return this.serial(() => this.taskTransport.markAttentionViewed(taskId));
   }
 
   getLongHorizonTaskMemory(taskId: string): Promise<LongHorizonTaskMemorySnapshot> {
@@ -1508,26 +1509,53 @@ export class PeerConnectionRuntime implements PeerConnectionService {
     }
 
     if (envelope.type === "teti.task.status") {
-      await this.taskTransport.receiveStatus({
+      const receipt = await this.taskTransport.receiveStatus({
         envelope: envelope as TetiApplicationEnvelope<TetiTaskStatusPayload>,
         connection,
         receivedAt
       });
+      try {
+        await this.applicationManager.sendTaskApplicationReceipt(connection.requestId, receipt);
+        await this.taskTransport.markApplicationReceiptSent(receipt);
+      } catch {
+        // Durable application receipt remains queued for Runtime polling.
+      }
       return true;
     }
 
     if (envelope.type === "teti.task.input") {
-      await this.taskTransport.receiveLongHorizonInput({
+      const receipt = await this.taskTransport.receiveLongHorizonInput({
         envelope: envelope as TetiApplicationEnvelope<TetiTaskInputPayload>,
         connection,
         receivedAt
       });
+      try {
+        await this.applicationManager.sendTaskApplicationReceipt(connection.requestId, receipt);
+        await this.taskTransport.markApplicationReceiptSent(receipt);
+      } catch {
+        // Durable application receipt remains queued for Runtime polling.
+      }
       return true;
     }
 
     if (envelope.type === "teti.task.cancel") {
-      await this.taskTransport.receiveCancel({
+      const receipt = await this.taskTransport.receiveCancel({
         envelope: envelope as TetiApplicationEnvelope<TetiTaskCancelPayload>,
+        connection,
+        receivedAt
+      });
+      try {
+        await this.applicationManager.sendTaskApplicationReceipt(connection.requestId, receipt);
+        await this.taskTransport.markApplicationReceiptSent(receipt);
+      } catch {
+        // Durable application receipt remains queued for Runtime polling.
+      }
+      return true;
+    }
+
+    if (envelope.type === "teti.task.application.receipt") {
+      await this.taskTransport.receiveApplicationReceipt({
+        envelope: envelope as TetiApplicationEnvelope<TetiTaskApplicationReceiptPayload>,
         connection,
         receivedAt
       });

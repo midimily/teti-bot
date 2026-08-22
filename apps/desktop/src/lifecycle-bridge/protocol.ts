@@ -47,7 +47,7 @@ export type LifecycleMethod =
   | "task.list"
   | "task.summary"
   | "task.get"
-  | "task.stage-results.viewed"
+  | "task.attention.viewed"
   | "task.memory.get"
   | "task.memory.source.get"
   | "task.memory.item.get"
@@ -105,7 +105,7 @@ export const LIFECYCLE_METHODS: readonly LifecycleMethod[] = [
   "task.list",
   "task.summary",
   "task.get",
-  "task.stage-results.viewed",
+  "task.attention.viewed",
   "task.memory.get",
   "task.memory.source.get",
   "task.memory.item.get",
@@ -377,7 +377,7 @@ export const LIFECYCLE_TIMEOUT_MS: Record<LifecycleMethod, number> = {
   "task.list": 2_000,
   "task.summary": 2_000,
   "task.get": 2_000,
-  "task.stage-results.viewed": 5_000,
+  "task.attention.viewed": 5_000,
   "task.memory.get": 2_000,
   "task.memory.source.get": 2_000,
   "task.memory.item.get": 2_000,

@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import {
-  latestAvailableLongHorizonStageResultIndex,
   type CollaborationTaskSummarySnapshot,
   type CollaborationTaskTransportRecord,
   type SendCollaborationTaskInput
@@ -13,6 +12,7 @@ import {
   TASK_REFRESH_DELAYS_MS,
   TaskController,
   resolveTaskRefreshDecision,
+  taskAttentionCount,
   type TaskClient
 } from "../src/tasks/controller.ts";
 import {
@@ -294,6 +294,10 @@ test("Task UI keeps send state live, catalog-driven, and parents native image di
   assert.match(view, /record\.request\.executionMode === "long_horizon"/);
   assert.match(view, /messages\.actions\.allowOngoing/);
   assert.match(chineseCatalog, /新的截止时间/);
+  assert.match(view, /record\.latestAttentionChange/);
+  assert.match(chineseCatalog, /最新变化/);
+  assert.match(chineseCatalog, /先前未送达的消息现已送达/);
+  assert.match(englishCatalog, /Latest change/);
   assert.match(chineseCatalog, /Teti Host 委派计划/);
   assert.match(chineseCatalog, /Planner 关闭/);
   assert.match(chineseCatalog, /按计划委派/);
@@ -691,6 +695,35 @@ test("Task controller reschedules one timer when visible activity changes", asyn
   controller.dispose();
 });
 
+test("Task attention badges count distinct Tasks instead of overlapping reasons", () => {
+  const pendingAndUnread = {
+    ...taskSummary("submitted"),
+    taskId: "pending-and-unread",
+    direction: "incoming" as const,
+    approval: "pending" as const,
+    hasUnreadTaskUpdate: true
+  };
+  const anotherUnread = {
+    ...taskSummary("completed"),
+    taskId: "another-unread",
+    hasUnreadTaskUpdate: true
+  };
+  assert.equal(taskAttentionCount({
+    schemaVersion: 1,
+    generatedAt: new Date().toISOString(),
+    pendingIncomingCount: 1,
+    unreadTaskUpdateCount: 1,
+    tasks: [pendingAndUnread]
+  }), 1);
+  assert.equal(taskAttentionCount({
+    schemaVersion: 1,
+    generatedAt: new Date().toISOString(),
+    pendingIncomingCount: 1,
+    unreadTaskUpdateCount: 2,
+    tasks: [pendingAndUnread, anotherUnread]
+  }), 2);
+});
+
 test("delayed stage-two completion refreshes the visible requester state", async () => {
   const client = new RecordingTaskClient();
   client.summary.tasks = [{
@@ -738,7 +771,7 @@ test("delayed stage-two completion refreshes the visible requester state", async
   controller.dispose();
 });
 
-test("background refresh preserves each completed-stage eye indicator for requester and receiver", async () => {
+test("foreground detail refresh automatically reads ongoing-collaboration attention for both roles", async () => {
   for (const direction of ["outgoing", "incoming"] as const) {
     const taskId = `stage-attention-${direction}`;
     const client = new StageResultAttentionTaskClient();
@@ -772,19 +805,73 @@ test("background refresh preserves each completed-stage eye indicator for reques
 
     assert.equal(
       client.viewedCalls,
-      0,
-      `${direction} background polling must not acknowledge a newly completed stage`
+      1,
+      `${direction} foreground detail must acknowledge a newly rendered update`
     );
-    assert.equal(controller.snapshot.summary.unreadStageResultCount, 1);
-    assert.equal(controller.snapshot.summary.tasks[0]?.hasUnreadStageResult, true);
-    assert.equal(controller.snapshot.selectedTask?.viewedStageResultIndex, 1);
-
-    controller.back();
-    await controller.select(taskId);
-    assert.equal(client.viewedCalls, 1, `${direction} explicit detail entry acknowledges the stage`);
-    assert.equal(controller.snapshot.summary.unreadStageResultCount, 0);
+    assert.equal(controller.snapshot.summary.unreadTaskUpdateCount, 0);
+    assert.equal(controller.snapshot.summary.tasks[0]?.hasUnreadTaskUpdate, false);
+    assert.equal(controller.snapshot.selectedTask?.viewedAttentionRevision, 2);
     controller.dispose();
   }
+});
+
+test("hidden detail retains attention until the window returns to the foreground", async () => {
+  const taskId = "stage-attention-hidden";
+  const client = new StageResultAttentionTaskClient();
+  client.seed(stageResultRecord(taskId, "outgoing", 1, 1));
+  client.setUnreadSummary(taskId, "outgoing", 1, false);
+  let foreground = false;
+  let scheduled: (() => void) | undefined;
+  const controller = new TaskController({
+    client,
+    tauri: new RecordingTauriInvoker(),
+    notchWindow: { setMode: async () => undefined } as never,
+    onChange: () => undefined,
+    isForeground: () => foreground,
+    schedule(callback) {
+      scheduled = callback;
+      return callback;
+    },
+    cancel(handle) {
+      if (scheduled === handle) scheduled = undefined;
+    }
+  });
+
+  controller.openInbox();
+  await controller.select(taskId);
+  controller.start();
+  await flushMicrotasks();
+  client.seed(stageResultRecord(taskId, "outgoing", 2, 1));
+  client.setUnreadSummary(taskId, "outgoing", 2, true);
+  scheduled?.();
+  await flushMicrotasks();
+
+  assert.equal(client.viewedCalls, 0);
+  assert.equal(controller.snapshot.summary.unreadTaskUpdateCount, 1);
+  foreground = true;
+  controller.noteForegroundChanged(true);
+  await flushMicrotasks();
+  assert.equal(client.viewedCalls, 1);
+  assert.equal(controller.snapshot.summary.unreadTaskUpdateCount, 0);
+  controller.dispose();
+});
+
+test("opening a single-stage Task detail clears its durable update attention", async () => {
+  const client = new SingleTaskAttentionTaskClient();
+  const controller = new TaskController({
+    client,
+    tauri: new RecordingTauriInvoker(),
+    notchWindow: { setMode: async () => undefined } as never,
+    onChange: () => undefined
+  });
+
+  controller.openInbox();
+  await controller.select("single-stage-attention");
+
+  assert.equal(client.viewedCalls, 1);
+  assert.equal(controller.snapshot.summary.unreadTaskUpdateCount, 0);
+  assert.equal(controller.snapshot.selectedTask?.viewedAttentionRevision, 1);
+  controller.dispose();
 });
 
 test("Task controller backs off repeated read failures and resets after recovery", async () => {
@@ -1118,7 +1205,7 @@ class StageResultAttentionTaskClient extends RecordingTaskClient {
     stageIndex: number,
     unread: boolean
   ): void {
-    this.summary.unreadStageResultCount = unread ? 1 : 0;
+    this.summary.unreadTaskUpdateCount = unread ? 1 : 0;
     this.summary.tasks = [{
       ...taskSummary("input_required"),
       taskId,
@@ -1127,17 +1214,50 @@ class StageResultAttentionTaskClient extends RecordingTaskClient {
       currentStageIndex: stageIndex,
       artifactCount: stageIndex,
       approval: "consumed",
-      hasUnreadStageResult: unread
+      hasUnreadTaskUpdate: unread
     }];
   }
 
-  async markStageResultsViewed(): Promise<CollaborationTaskTransportRecord> {
+  async markAttentionViewed(): Promise<CollaborationTaskTransportRecord> {
     this.viewedCalls += 1;
     const record = await this.get();
-    record.viewedStageResultIndex = latestAvailableLongHorizonStageResultIndex(record);
+    record.viewedAttentionRevision = record.attentionRevision;
     this.seed(record);
-    this.summary.unreadStageResultCount = 0;
-    if (this.summary.tasks[0]) this.summary.tasks[0].hasUnreadStageResult = false;
+    this.summary.unreadTaskUpdateCount = 0;
+    if (this.summary.tasks[0]) this.summary.tasks[0].hasUnreadTaskUpdate = false;
+    return structuredClone(record);
+  }
+}
+
+class SingleTaskAttentionTaskClient extends RecordingTaskClient {
+  viewedCalls = 0;
+
+  constructor() {
+    super();
+    const record = imageDetailRecord("single-stage-attention", 0);
+    record.state = "completed";
+    record.approval = "consumed";
+    record.attentionRevision = 1;
+    record.viewedAttentionRevision = 0;
+    this.seed(record);
+    this.summary.unreadTaskUpdateCount = 1;
+    this.summary.tasks = [{
+      ...taskSummary("completed"),
+      taskId: record.request.taskId,
+      direction: record.direction,
+      peerTetiId: record.peerTetiId,
+      approval: record.approval,
+      hasUnreadTaskUpdate: true
+    }];
+  }
+
+  async markAttentionViewed(): Promise<CollaborationTaskTransportRecord> {
+    this.viewedCalls += 1;
+    const record = await this.get();
+    record.viewedAttentionRevision = record.attentionRevision;
+    this.seed(record);
+    this.summary.unreadTaskUpdateCount = 0;
+    if (this.summary.tasks[0]) this.summary.tasks[0].hasUnreadTaskUpdate = false;
     return structuredClone(record);
   }
 }
@@ -1414,6 +1534,8 @@ function stageResultRecord(
   record.approval = "consumed";
   record.artifacts = artifacts;
   record.viewedStageResultIndex = viewedStageResultIndex;
+  record.attentionRevision = stageCount;
+  record.viewedAttentionRevision = viewedStageResultIndex;
   if (direction === "incoming") {
     record.longHorizon!.currentStageIndex = stageCount;
     record.longHorizon!.artifacts = metadata;

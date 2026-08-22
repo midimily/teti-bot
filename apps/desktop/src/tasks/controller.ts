@@ -3,7 +3,6 @@ import type {
   CollaborationTaskTransportRecord,
   SendCollaborationTaskInput
 } from "../../../../core/task/transport.ts";
-import { latestAvailableLongHorizonStageResultIndex } from "../../../../core/task/transport.ts";
 import { taskArtifactImages, taskInputImages, type TaskImagePart } from "../../../../core/task/types.ts";
 import type { LifecycleBridgeClient } from "../provisioning/bridge-lifecycle.ts";
 import type { TauriInvoker } from "../platform/tauri-api.ts";
@@ -40,6 +39,7 @@ const EMPTY_SUMMARY: CollaborationTaskSummarySnapshot = {
   generatedAt: new Date(0).toISOString(),
   pendingIncomingCount: 0,
   unreadStageResultCount: 0,
+  unreadTaskUpdateCount: 0,
   tasks: []
 };
 
@@ -117,7 +117,7 @@ export interface TaskCloseOptions {
 export interface TaskClient {
   summaries(): Promise<CollaborationTaskSummarySnapshot>;
   get(taskId: string): Promise<CollaborationTaskTransportRecord>;
-  markStageResultsViewed?(taskId: string): Promise<CollaborationTaskTransportRecord>;
+  markAttentionViewed?(taskId: string): Promise<CollaborationTaskTransportRecord>;
   getStructuredMemory(taskId: string): Promise<LongHorizonTaskMemorySnapshot>;
   getStructuredMemorySourceDraft(taskId: string, sourceMemoryId: string): Promise<StructuredMemorySourceDraft | null>;
   getStructuredMemoryItem(taskId: string, memoryId: string): Promise<StructuredMemoryItemDetail | null>;
@@ -214,6 +214,14 @@ export function resolveTaskRefreshDecision(
     : { mode: "hidden_idle", delayMs: TASK_REFRESH_DELAYS_MS.hiddenIdle };
 }
 
+/** One badge unit per Task, even when a pending decision and an unread update overlap. */
+export function taskAttentionCount(summary: CollaborationTaskSummarySnapshot): number {
+  return summary.tasks.filter((task) =>
+    (task.direction === "incoming" && task.approval === "pending")
+    || task.hasUnreadTaskUpdate
+  ).length;
+}
+
 export class TaskController {
   private readonly client: TaskClient;
   private readonly tauri: TauriInvoker;
@@ -223,6 +231,7 @@ export class TaskController {
   private readonly schedule: (callback: () => void, delayMs: number) => unknown;
   private readonly cancelTimer: (handle: unknown) => void;
   private readonly diagnostic: PanelDiagnosticSink;
+  private readonly isForeground: () => boolean;
   private snapshotValue: TaskControllerSnapshot = {
     open: false,
     screen: "inbox",
@@ -270,6 +279,7 @@ export class TaskController {
     schedule?: (callback: () => void, delayMs: number) => unknown;
     cancel?: (handle: unknown) => void;
     diagnostic?: PanelDiagnosticSink;
+    isForeground?: () => boolean;
   }) {
     this.client = options.client;
     this.tauri = options.tauri;
@@ -279,6 +289,7 @@ export class TaskController {
     this.schedule = options.schedule ?? ((callback, delayMs) => setTimeout(callback, delayMs));
     this.cancelTimer = options.cancel ?? ((handle) => clearTimeout(handle as ReturnType<typeof setTimeout>));
     this.diagnostic = options.diagnostic ?? (() => undefined);
+    this.isForeground = options.isForeground ?? (() => true);
   }
 
   get snapshot(): TaskControllerSnapshot {
@@ -289,6 +300,12 @@ export class TaskController {
     if (this.active || this.disposed) return;
     this.active = true;
     void this.refresh();
+  }
+
+  noteForegroundChanged(focused: boolean): void {
+    if (focused && this.snapshotValue.open && this.snapshotValue.screen === "detail") {
+      void this.refresh();
+    }
   }
 
   openInbox(): void {
@@ -508,7 +525,9 @@ export class TaskController {
       this.snapshotValue.selectedImagePaths = imagePaths;
       this.snapshotValue.delegationTargets = delegation.targets;
       this.snapshotValue.delegationSelections = delegation.selections;
-      const viewedRecord = await this.markStageResultsViewedIfNeeded(record);
+      const viewedRecord = this.isForegroundDetail(taskId)
+        ? await this.markAttentionViewedIfNeeded(record)
+        : record;
       if (this.isSelected(taskId)) {
         this.snapshotValue.selectedTask = viewedRecord;
         if (viewedRecord !== record) this.snapshotValue.summary = await this.client.summaries();
@@ -813,7 +832,10 @@ export class TaskController {
     const taskId = this.snapshotValue.selectedTask?.request.taskId;
     if (!taskId) return;
     await this.run(async () => {
-      const record = await operation(taskId);
+      const mutatedRecord = await operation(taskId);
+      const record = this.isForegroundDetail(taskId)
+        ? await this.markAttentionViewedIfNeeded(mutatedRecord)
+        : mutatedRecord;
       this.snapshotValue.selectedTask = record;
       if (!structuredMemoryActionKey(record, this.snapshotValue.structuredMemoryPreview?.childAgentId)) {
         this.snapshotValue.structuredMemoryPreview = null;
@@ -884,11 +906,11 @@ export class TaskController {
       ]);
       if (summaryResult.ok) this.snapshotValue.summary = summaryResult.summary;
       if (taskId && detailResult?.ok && this.isVisibleDetail(taskId)) {
-        // A periodic refresh may reveal a newly completed collaboration stage,
-        // but it is not a user acknowledgement. Keep the stage unread so both
-        // requester and receiver retain the yellow eye indicator until they
-        // deliberately enter the Task again.
-        const refreshedRecord = detailResult.record;
+        const hadUnreadAttention = (detailResult.record.attentionRevision ?? 0)
+          > (detailResult.record.viewedAttentionRevision ?? 0);
+        const refreshedRecord = this.isForegroundDetail(taskId)
+          ? await this.markAttentionViewedIfNeeded(detailResult.record)
+          : detailResult.record;
         this.snapshotValue.selectedTask = refreshedRecord;
         this.snapshotValue.selectedExecution = detailResult.execution;
         this.snapshotValue.selectedStructuredMemory = detailResult.structuredMemory;
@@ -913,6 +935,13 @@ export class TaskController {
           this.snapshotValue.structuredMemoryPreview = null;
           this.snapshotValue.structuredMemoryUseNextExecution = false;
           this.structuredMemoryPreviewKey = null;
+        }
+        if (hadUnreadAttention
+          && (refreshedRecord.viewedAttentionRevision ?? 0)
+            >= (refreshedRecord.attentionRevision ?? 0)) {
+          this.snapshotValue.summary = await this.client.summaries().catch(
+            () => this.snapshotValue.summary
+          );
         }
       }
       if (summaryResult.ok && (!taskId || detailResult?.ok)) {
@@ -983,16 +1012,15 @@ export class TaskController {
     }
   }
 
-  private async markStageResultsViewedIfNeeded(
+  private async markAttentionViewedIfNeeded(
     record: CollaborationTaskTransportRecord
   ): Promise<CollaborationTaskTransportRecord> {
-    const latestStageResultIndex = latestAvailableLongHorizonStageResultIndex(record);
-    if (!this.client.markStageResultsViewed
-      || latestStageResultIndex <= (record.viewedStageResultIndex ?? 0)) return record;
+    const hasUnreadTaskUpdate = (record.attentionRevision ?? 0) > (record.viewedAttentionRevision ?? 0);
+    if (!this.client.markAttentionViewed || !hasUnreadTaskUpdate) return record;
     try {
-      return await this.client.markStageResultsViewed(record.request.taskId);
+      return await this.client.markAttentionViewed(record.request.taskId);
     } catch {
-      // Read-state persistence is best effort; never hide a stage result on failure.
+      // Read-state persistence is best effort; never hide a Task update on failure.
       return record;
     }
   }
@@ -1153,6 +1181,10 @@ export class TaskController {
       && this.isSelected(taskId);
   }
 
+  private isForegroundDetail(taskId: string): boolean {
+    return this.isVisibleDetail(taskId) && this.isForeground();
+  }
+
   private scheduleNextRefresh(): void {
     if (!this.active || this.disposed || this.refreshInFlight) return;
     if (this.timer !== undefined) this.cancelTimer(this.timer);
@@ -1171,6 +1203,7 @@ export class TaskController {
     const summary = {
       ...summaryState,
       unreadStageResultCount: summaryState.unreadStageResultCount ?? 0,
+      unreadTaskUpdateCount: summaryState.unreadTaskUpdateCount ?? 0,
       tasks: tasks.map((task) => {
         const { updatedAt: _updatedAt, expiresAt: _expiresAt, ...visibleTask } = task;
         return visibleTask;
@@ -1270,9 +1303,9 @@ export class BridgeTaskClient implements TaskClient {
     return this.bridge.request("task.get", { taskId }) as Promise<CollaborationTaskTransportRecord>;
   }
 
-  markStageResultsViewed(taskId: string): Promise<CollaborationTaskTransportRecord> {
+  markAttentionViewed(taskId: string): Promise<CollaborationTaskTransportRecord> {
     return this.bridge.request(
-      "task.stage-results.viewed",
+      "task.attention.viewed",
       { taskId }
     ) as Promise<CollaborationTaskTransportRecord>;
   }

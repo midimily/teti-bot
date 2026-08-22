@@ -486,6 +486,16 @@ export interface AppMessages {
       readonly imageReceiving: string;
       readonly imageUnavailable: string;
       readonly localExecution: string;
+      readonly latestChangeTitle: string;
+      readonly latestChangeStage: string;
+      readonly latestChangeAt: string;
+      readonly latestChanges: Record<
+        "status_updated" | "delivery_failed" | "delivery_recovered" | "input_received"
+          | "stage_started" | "stage_completed" | "stage_failed" | "pause_requested"
+          | "cancel_requested" | "paused" | "resumed" | "renewed" | "completed"
+          | "failed" | "rejected" | "canceled" | "expired",
+        string
+      >;
       readonly authorization: {
         readonly loginTitle: string;
         readonly agentTitle: string;

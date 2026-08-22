@@ -58,7 +58,8 @@ import {
 import {
   BridgeTaskClient,
   MockTaskClient,
-  TaskController
+  TaskController,
+  taskAttentionCount
 } from "./tasks/controller.ts";
 import { createTaskWorkspace, taskComposeRenderKey } from "./tasks/view.ts";
 import {
@@ -253,7 +254,8 @@ export async function createDesktopApp(options: DesktopAppOptions): Promise<Desk
       connections.open("task-back-to-island");
     },
     schedule: baseSchedule,
-    diagnostic: panelDiagnostic
+    diagnostic: panelDiagnostic,
+    isForeground: () => lastWindowFocused
   });
   const memory = new MemoryController({
     client: bridge ? new BridgeChildMemoryClient(bridge) : new MockChildMemoryClient(),
@@ -309,6 +311,7 @@ export async function createDesktopApp(options: DesktopAppOptions): Promise<Desk
         }
       });
       setPresenceSignal("foreground", focused);
+      tasks.noteForegroundChanged(focused);
       if (focused) {
         dockFocusRecoveryRevision += 1;
         if (dockActivationGuard.cancelPendingFocusLoss()) {
@@ -664,17 +667,15 @@ function createIsland(
     const pendingCount = connections?.snapshot.connections.filter(
       (connection) => connection.connectionState === "PendingApproval"
     ).length ?? 0;
-    const pendingTaskCount = tasks?.snapshot.summary.pendingIncomingCount ?? 0;
-    const unreadStageResultCount = tasks?.snapshot.summary.unreadStageResultCount ?? 0;
-    const taskAttentionCount = pendingTaskCount + unreadStageResultCount;
-    const openLabel = taskAttentionCount > 0
-      ? i18n.formatPlural(taskAttentionCount, i18n.messages.shell.openPendingTasks)
+    const attentionTaskCount = tasks ? taskAttentionCount(tasks.snapshot.summary) : 0;
+    const openLabel = attentionTaskCount > 0
+      ? i18n.formatPlural(attentionTaskCount, i18n.messages.shell.openPendingTasks)
       : pendingCount > 0
         ? i18n.formatPlural(pendingCount, i18n.messages.shell.openPendingConnections)
         : i18n.messages.shell.openTeti;
     face.setAttribute("aria-label", openLabel);
     face.setAttribute("title", openLabel);
-    if (pendingCount > 0 || taskAttentionCount > 0) {
+    if (pendingCount > 0 || attentionTaskCount > 0) {
       face.classList.add("teti-face--attention");
       const indicator = document.createElement("span");
       indicator.className = "teti-pending-indicator";
@@ -683,7 +684,7 @@ function createIsland(
     }
     face.addEventListener("click", () => {
       passport?.closePanel();
-      if (taskAttentionCount > 0) tasks?.openInbox();
+      if (attentionTaskCount > 0) tasks?.openInbox();
       else connections?.open();
     });
   } else {
@@ -1524,8 +1525,7 @@ function createIslandHeader(
     tasks?.openInbox();
   });
   taskButton.classList.add("teti-task-header-button");
-  const pendingTasks = (tasks?.snapshot.summary.pendingIncomingCount ?? 0)
-    + (tasks?.snapshot.summary.unreadStageResultCount ?? 0);
+  const pendingTasks = tasks ? taskAttentionCount(tasks.snapshot.summary) : 0;
   if (pendingTasks > 0) {
     taskButton.classList.add("has-task-badge");
     taskButton.dataset.count = String(Math.min(pendingTasks, 9));

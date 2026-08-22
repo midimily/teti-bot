@@ -859,10 +859,10 @@ export class TetiRuntime {
     return clone(await service.getTask(taskId));
   }
 
-  async markTaskStageResultsViewed(taskId: string): Promise<CollaborationTaskTransportRecord> {
+  async markTaskAttentionViewed(taskId: string): Promise<CollaborationTaskTransportRecord> {
     const service = await this.rawPeerService();
-    if (!service.markTaskStageResultsViewed) throw new Error("Task read state is unavailable.");
-    return clone(await service.markTaskStageResultsViewed(taskId));
+    if (!service.markTaskAttentionViewed) throw new Error("Task read state is unavailable.");
+    return clone(await service.markTaskAttentionViewed(taskId));
   }
 
   async getLongHorizonTaskMemory(taskId: string): Promise<LongHorizonTaskMemorySnapshot> {
@@ -1129,8 +1129,8 @@ class RuntimePeerConnectionFacade implements PeerConnectionService {
     return this.runtime.getTask(taskId);
   }
 
-  markTaskStageResultsViewed(taskId: string): Promise<CollaborationTaskTransportRecord> {
-    return this.runtime.markTaskStageResultsViewed(taskId);
+  markTaskAttentionViewed(taskId: string): Promise<CollaborationTaskTransportRecord> {
+    return this.runtime.markTaskAttentionViewed(taskId);
   }
 
   getLongHorizonTaskMemory(taskId: string): Promise<LongHorizonTaskMemorySnapshot> {

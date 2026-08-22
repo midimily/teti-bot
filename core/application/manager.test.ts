@@ -406,6 +406,18 @@ test("Task request and receipt use the existing Application Envelope", async () 
   assert.equal(chatmailAdapter.sendCalls.length, 2);
   assert.equal(chatmailAdapter.sendCalls[1]?.attachment, undefined);
 
+  const applicationReceipt = await manager.sendTaskApplicationReceipt("request-1", {
+    schemaVersion: 1,
+    taskId: request.taskId,
+    requesterTetiId: request.requesterTetiId,
+    targetTetiId: request.targetTetiId,
+    kind: "status",
+    referenceId: "2",
+    receivedAt: fixedNow
+  });
+  assert.equal(applicationReceipt.envelope.type, "teti.task.application.receipt");
+  assert.equal(chatmailAdapter.sendCalls.length, 3);
+
   assert.throws(() => createApplicationEnvelope({
     type: "teti.task.request",
     fromTetiId: "teti_local0001",

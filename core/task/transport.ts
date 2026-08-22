@@ -291,7 +291,68 @@ export interface TetiTaskCancelPayload {
   taskId: string;
   requesterTetiId: string;
   targetTetiId: string;
+  controlId: string;
   requestedAt: string;
+}
+
+export type TetiTaskApplicationReceiptKind = "status" | "input" | "control";
+
+/**
+ * Application-level proof that a mutable Task message was validated and
+ * durably applied (or idempotently recognized) by the peer. Local Chatmail
+ * queueing is deliberately not sufficient evidence.
+ */
+export interface TetiTaskApplicationReceiptPayload {
+  schemaVersion: 1;
+  taskId: string;
+  requesterTetiId: string;
+  targetTetiId: string;
+  kind: TetiTaskApplicationReceiptKind;
+  referenceId: string;
+  receivedAt: string;
+}
+
+export interface TaskApplicationDeliveryAttempt {
+  kind: TetiTaskApplicationReceiptKind;
+  referenceId: string;
+  attempts: number;
+  lastSentAt: string;
+  nextRetryAt: string;
+}
+
+export interface TaskApplicationDeliveryFailure {
+  kind: "request" | TetiTaskApplicationReceiptKind;
+  referenceId: string;
+  failedAt: string;
+  safeErrorCode: string;
+}
+
+export type TaskAttentionChangeKind =
+  | "status_updated"
+  | "delivery_failed"
+  | "delivery_recovered"
+  | "input_received"
+  | "stage_started"
+  | "stage_completed"
+  | "stage_failed"
+  | "pause_requested"
+  | "cancel_requested"
+  | "paused"
+  | "resumed"
+  | "renewed"
+  | "completed"
+  | "failed"
+  | "rejected"
+  | "canceled"
+  | "expired";
+
+/** Local-only, user-facing explanation for the newest meaningful Task change. */
+export interface TaskAttentionChange {
+  revision: number;
+  kind: TaskAttentionChangeKind;
+  occurredAt: string;
+  stageIndex?: number;
+  safeErrorCode?: string;
 }
 
 export interface TetiTaskArtifactPayload {
@@ -396,8 +457,15 @@ export interface CollaborationTaskTransportRecord {
   receiptPending?: boolean;
   statusRevision?: number;
   statusPending?: boolean;
+  statusAcknowledgedRevision?: number;
   cancelPending?: boolean;
+  cancelControlId?: string;
+  cancelRequestedAt?: string;
   cancelSentAt?: string;
+  cancelAcknowledgedAt?: string;
+  applicationDeliveryAttempts?: TaskApplicationDeliveryAttempt[];
+  applicationDeliveryFailures?: TaskApplicationDeliveryFailure[];
+  applicationReceiptOutbox?: TetiTaskApplicationReceiptPayload[];
   artifactPending?: boolean;
   sentArtifactIds?: string[];
   acknowledgedArtifactIds?: string[];
@@ -414,8 +482,15 @@ export interface CollaborationTaskTransportRecord {
   peerArtifactMetadata?: LongHorizonArtifactEntry[];
   inputPending?: TetiTaskInputPayload;
   inputSentAt?: string;
-  /** Local-only read marker; never enters Task, Passport, Chatmail, or Connector input. */
+  inputAcknowledgedAt?: string;
+  /** @deprecated Beta 0.5 migration marker; attentionRevision is the sole unread source. */
   viewedStageResultIndex?: number;
+  /** Local-only revision for every meaningful single-stage or ongoing Task update. */
+  attentionRevision?: number;
+  /** Local-only read marker for attentionRevision; never crosses the network boundary. */
+  viewedAttentionRevision?: number;
+  /** Local-only detail text; local actions may update it without creating unread attention. */
+  latestAttentionChange?: TaskAttentionChange;
   safeErrorCode?: string;
 }
 
@@ -439,7 +514,9 @@ export interface CollaborationTaskSummary {
   createdAt: string;
   updatedAt: string;
   expiresAt: string;
+  /** @deprecated Beta 0.5 compatibility projection; use hasUnreadTaskUpdate. */
   hasUnreadStageResult?: boolean;
+  hasUnreadTaskUpdate?: boolean;
   safeErrorCode?: string;
 }
 
@@ -447,7 +524,9 @@ export interface CollaborationTaskSummarySnapshot {
   schemaVersion: 1;
   generatedAt: string;
   pendingIncomingCount: number;
+  /** @deprecated Beta 0.5 compatibility projection; use unreadTaskUpdateCount. */
   unreadStageResultCount?: number;
+  unreadTaskUpdateCount?: number;
   tasks: CollaborationTaskSummary[];
 }
 

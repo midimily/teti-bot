@@ -16,6 +16,7 @@ import type {
 } from "../../../../core/passport/types.ts";
 import {
   delegationTargetKey,
+  taskAttentionCount,
   type TaskController,
   type TaskControllerSnapshot,
   type TaskUiErrorCode
@@ -85,8 +86,7 @@ function createTaskHeader(
   heading.setAttribute("aria-level", "1");
   heading.textContent = messages[snapshot.screen];
   const count = document.createElement("span");
-  const attentionCount = snapshot.summary.pendingIncomingCount
-    + (snapshot.summary.unreadStageResultCount ?? 0);
+  const attentionCount = taskAttentionCount(snapshot.summary);
   count.textContent = attentionCount > 0
     ? i18n.formatPlural(attentionCount, messages.pending)
     : messages.semanticCaption;
@@ -128,7 +128,7 @@ function createInbox(
   for (const task of snapshot.summary.tasks) {
     const row = document.createElement("button");
     row.type = "button";
-    row.className = `teti-task-row is-${task.state}${task.direction === "incoming" && task.approval === "pending" ? " is-awaiting-decision" : ""}${task.hasUnreadStageResult ? " is-unread-stage-result" : ""}`;
+    row.className = `teti-task-row is-${task.state}${task.direction === "incoming" && task.approval === "pending" ? " is-awaiting-decision" : ""}${task.hasUnreadTaskUpdate ? " is-unread-update" : ""}`;
     const copy = document.createElement("span");
     copy.className = "teti-task-row-copy";
     const peer = document.createElement("strong");
@@ -381,7 +381,28 @@ function createTaskDetail(
     }
     prompt.append(gallery);
   }
-  content.append(identity, prompt);
+  content.append(identity);
+  if (record.latestAttentionChange) {
+    const latest = document.createElement("section");
+    latest.className = "teti-task-scope teti-task-latest-change";
+    const latestTitle = document.createElement("strong");
+    latestTitle.textContent = messages.latestChangeTitle;
+    const latestDetail = document.createElement("span");
+    const changeLabel = messages.latestChanges[record.latestAttentionChange.kind];
+    const stagedLabel = record.latestAttentionChange.stageIndex
+      ? formatMessage(messages.latestChangeStage, {
+          change: changeLabel,
+          stage: i18n.formatNumber(record.latestAttentionChange.stageIndex)
+        })
+      : changeLabel;
+    latestDetail.textContent = formatMessage(messages.latestChangeAt, {
+      change: stagedLabel,
+      date: formatShortTimestamp(record.latestAttentionChange.occurredAt, i18n)
+    });
+    latest.append(latestTitle, latestDetail);
+    content.append(latest);
+  }
+  content.append(prompt);
 
   if (snapshot.selectedExecution) {
     const execution = document.createElement("section");

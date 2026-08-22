@@ -800,7 +800,7 @@ pub fn timeout_for_method(method: &str) -> Duration {
         | "task.delegation.targets"
         | "task.execution.get" => 2_000,
         "task.memory.item.create"
-        | "task.stage-results.viewed"
+        | "task.attention.viewed"
         | "task.memory.item.update"
         | "task.memory.item.delete"
         | "task.memory.authorization.set"
@@ -847,7 +847,7 @@ fn is_allowed_method(method: &str) -> bool {
             | "task.list"
             | "task.summary"
             | "task.get"
-            | "task.stage-results.viewed"
+            | "task.attention.viewed"
             | "task.memory.get"
             | "task.memory.source.get"
             | "task.memory.item.get"

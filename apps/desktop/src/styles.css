@@ -579,12 +579,12 @@ textarea {
   box-shadow: 0 0 0 3px rgba(26, 136, 255, 0.07);
 }
 
-.teti-task-row.is-unread-stage-result {
+.teti-task-row.is-unread-update {
   border-color: rgba(255, 189, 63, 0.62);
   box-shadow: 0 0 0 3px rgba(255, 189, 63, 0.1);
 }
 
-.teti-task-row.is-unread-stage-result .teti-task-row-meta::before {
+.teti-task-row.is-unread-update .teti-task-row-meta::before {
   display: inline-block;
   width: 6px;
   height: 6px;
@@ -934,6 +934,11 @@ textarea {
   color: var(--teti-text-secondary);
   font-size: 9px;
   overflow-wrap: anywhere;
+}
+
+.teti-task-latest-change {
+  border-color: rgba(255, 189, 63, 0.48);
+  background: rgba(255, 189, 63, 0.1);
 }
 
 .teti-task-artifact pre {

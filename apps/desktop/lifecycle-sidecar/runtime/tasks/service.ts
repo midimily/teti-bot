@@ -21,7 +21,10 @@ import {
   type LongHorizonAuditEvent,
   type LongHorizonTaskState,
   type SendCollaborationTaskInput,
+  type TaskAttentionChange,
   type TetiTaskArtifactPayload,
+  type TetiTaskApplicationReceiptKind,
+  type TetiTaskApplicationReceiptPayload,
   type TetiTaskArtifactFilePayload,
   type TetiTaskArtifactReceiptPayload,
   type TetiTaskAttachmentPayload,
@@ -126,6 +129,7 @@ import { TetiNetworkClientError } from "../../../../../services/network/errors.t
 const SAFE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const SAFE_SLUG_PATTERN = /^[a-z0-9]+(?:[._-][a-z0-9]+)*$/;
 const ATTACHMENT_RETRY_DELAYS_MS = [15_000, 30_000, 60_000, 120_000, 300_000] as const;
+const APPLICATION_RETRY_DELAYS_MS = [15_000, 30_000, 60_000, 120_000, 300_000] as const;
 
 export class TaskTransportRuntimeError extends Error {
   readonly code: string;
@@ -232,7 +236,8 @@ export class TaskTransportRuntime {
         for (const record of state.records) await this.synchronizeStructuredTaskMemory(record);
       }).catch(() => undefined);
     }
-    let changed = await this.reconcileInterruptedExecutions(state, false);
+    let changed = migrateLegacyLongHorizonAttention(state);
+    changed = await this.reconcileInterruptedExecutions(state, false) || changed;
     changed = this.refreshLongHorizonTargets(state) || changed;
     changed = await this.refreshAttachmentReadiness(state) || changed;
     changed = expireDueRecords(state, this.now()) || changed;
@@ -258,7 +263,7 @@ export class TaskTransportRuntime {
     return record;
   }
 
-  async markStageResultsViewed(taskId: string): Promise<CollaborationTaskTransportRecord> {
+  async markAttentionViewed(taskId: string): Promise<CollaborationTaskTransportRecord> {
     if (!SAFE_ID_PATTERN.test(taskId)) {
       throw new TaskTransportRuntimeError("TASK_INPUT_INVALID", "Task ID is invalid.");
     }
@@ -266,10 +271,16 @@ export class TaskTransportRuntime {
     const record = state.records.find((candidate) => candidate.request.taskId === taskId);
     if (!record) throw new TaskTransportRuntimeError("TASK_NOT_FOUND", "Task was not found.");
     const latestStageResultIndex = latestAvailableLongHorizonStageResultIndex(record);
+    let changed = false;
     if (latestStageResultIndex > (record.viewedStageResultIndex ?? 0)) {
       record.viewedStageResultIndex = latestStageResultIndex;
-      await this.store.save(state);
+      changed = true;
     }
+    if ((record.attentionRevision ?? 0) > (record.viewedAttentionRevision ?? 0)) {
+      record.viewedAttentionRevision = record.attentionRevision;
+      changed = true;
+    }
+    if (changed) await this.store.save(state);
     return structuredClone(record);
   }
 
@@ -709,7 +720,13 @@ export class TaskTransportRuntime {
         && candidate.request.taskId === receipt.taskId
         && candidate.request.targetTetiId === receipt.targetTetiId
     );
-    if (record && shouldApplyReceipt(record, receipt)) applyReceipt(record, receipt, observedAt);
+    if (record && shouldApplyReceipt(record, receipt)) {
+      const previous = taskAttentionSnapshot(record);
+      applyReceipt(record, receipt, observedAt);
+      if (!recoverApplicationDeliveryFailure(record, "request", record.request.taskId, observedAt)) {
+        markTaskAttentionIfChanged(record, previous);
+      }
+    }
     await this.store.save(state);
   }
 
@@ -862,30 +879,43 @@ export class TaskTransportRuntime {
     envelope: TetiApplicationEnvelope<TetiTaskStatusPayload>;
     connection: TetiConnectionRecord;
     receivedAt?: string;
-  }): Promise<void> {
+  }): Promise<TetiTaskApplicationReceiptPayload> {
     const account = await this.accountStorage.load();
     if (!account) throw new TaskTransportRuntimeError("TASK_ACCOUNT_REQUIRED", "A local Teti account is required.");
     const payload = input.envelope.payload;
     requireOutboundTaskIdentity(input.envelope, input.connection, account.id, payload);
     const state = await this.store.load();
     const record = findTaskRecord(state, "outgoing", account.id, payload.taskId);
-    if (record && ((record.request.executionMode === "long_horizon" && payload.schemaVersion !== 2)
-      || (record.request.executionMode !== "long_horizon" && payload.schemaVersion !== 1))) {
+    if (!record) {
+      throw new TaskTransportRuntimeError(
+        "TASK_DEPENDENCY_PENDING",
+        "Task status is waiting for its local Task record."
+      );
+    }
+    if ((record.request.executionMode === "long_horizon" && payload.schemaVersion !== 2)
+      || (record.request.executionMode !== "long_horizon" && payload.schemaVersion !== 1)) {
       throw new TaskTransportRuntimeError("TASK_STATUS_MODE_CONFLICT", "Task status mode does not match its request.");
     }
-    if (!record
-      || payload.revision <= (record.statusRevision ?? 0)
-      || !isRemoteTransitionAllowed(record.state, payload.state)) return;
+    const receivedAt = validTimestampOrNow(input.receivedAt, this.now()).toISOString();
+    const receipt = createApplicationReceipt(payload, "status", String(payload.revision), receivedAt);
+    if (payload.revision <= (record.statusRevision ?? 0)
+      || !isRemoteTransitionAllowed(record.state, payload.state)) {
+      enqueueApplicationReceipt(record, receipt);
+      await this.store.save(state);
+      return receipt;
+    }
+    const previous = taskAttentionSnapshot(record);
     record.statusRevision = payload.revision;
     record.state = payload.state;
-    record.cancelPending = false;
-    delete record.cancelSentAt;
+    if (["completed", "failed", "canceled", "rejected"].includes(payload.state)) {
+      clearCancelDeliveryState(record);
+    }
     record.approval = payload.state === "rejected"
       ? "rejected"
       : ["working", "completed", "failed", "auth_required", "input_required"].includes(payload.state)
         ? "approved_once"
         : record.approval;
-    record.updatedAt = validTimestampOrNow(input.receivedAt, this.now()).toISOString();
+    record.updatedAt = receivedAt;
     if (payload.schemaVersion === 2
       && payload.longHorizon
       && record.request.executionMode === "long_horizon") {
@@ -895,10 +925,61 @@ export class TaskTransportRuntime {
           || ["completed", "failed", "canceled", "expired"].includes(payload.longHorizon.phase))) {
         delete record.inputPending;
         delete record.inputSentAt;
+        delete record.inputAcknowledgedAt;
+        removeApplicationDeliveryState(record, "input");
       }
     }
     if (payload.safeErrorCode) record.safeErrorCode = payload.safeErrorCode;
     else delete record.safeErrorCode;
+    markRemoteTaskAttentionIfChanged(record, previous);
+    enqueueApplicationReceipt(record, receipt);
+    await this.store.save(state);
+    return receipt;
+  }
+
+  async receiveApplicationReceipt(input: {
+    envelope: TetiApplicationEnvelope<TetiTaskApplicationReceiptPayload>;
+    connection: TetiConnectionRecord;
+    receivedAt?: string;
+  }): Promise<void> {
+    const account = await this.accountStorage.load();
+    if (!account) throw new TaskTransportRuntimeError("TASK_ACCOUNT_REQUIRED", "A local Teti account is required.");
+    const receipt = input.envelope.payload;
+    if (receipt.kind === "status") {
+      requireInboundTaskIdentity(input.envelope, input.connection, account.id, receipt);
+    } else {
+      requireOutboundTaskIdentity(input.envelope, input.connection, account.id, receipt);
+    }
+    const state = await this.store.load();
+    const record = receipt.kind === "status"
+      ? findTaskRecord(state, "incoming", receipt.requesterTetiId, receipt.taskId)
+      : findTaskRecord(state, "outgoing", receipt.requesterTetiId, receipt.taskId);
+    if (!record || !hasApplicationDeliveryReference(record, receipt.kind, receipt.referenceId)) return;
+    const observedAt = validTimestampOrNow(input.receivedAt, this.now()).toISOString();
+    removeApplicationDeliveryAttempt(record, receipt.kind, receipt.referenceId);
+    if (receipt.kind === "status") {
+      const revision = Number(receipt.referenceId);
+      record.statusAcknowledgedRevision = Math.max(record.statusAcknowledgedRevision ?? 0, revision);
+      record.statusPending = (record.statusAcknowledgedRevision ?? 0) < (record.statusRevision ?? 0);
+    } else if (receipt.kind === "input") {
+      record.inputAcknowledgedAt = observedAt;
+    } else {
+      record.cancelAcknowledgedAt = observedAt;
+    }
+    recoverApplicationDeliveryFailure(record, receipt.kind, receipt.referenceId, observedAt);
+    record.updatedAt = observedAt;
+    await this.store.save(state);
+  }
+
+  async markApplicationReceiptSent(receipt: TetiTaskApplicationReceiptPayload): Promise<void> {
+    const state = await this.store.load();
+    const direction = receipt.kind === "status" ? "outgoing" : "incoming";
+    const record = findTaskRecord(state, direction, receipt.requesterTetiId, receipt.taskId);
+    if (!record) return;
+    record.applicationReceiptOutbox = (record.applicationReceiptOutbox ?? []).filter(
+      (candidate) => applicationReceiptKey(candidate) !== applicationReceiptKey(receipt)
+    );
+    if (record.applicationReceiptOutbox.length === 0) delete record.applicationReceiptOutbox;
     await this.store.save(state);
   }
 
@@ -942,7 +1023,8 @@ export class TaskTransportRuntime {
         "A single-stage Task cannot publish more than one result Artifact."
       );
     }
-    if (!existing) record.artifacts = [...(record.artifacts ?? []), structuredClone(payload.artifact)];
+    const artifactAdded = !existing;
+    if (artifactAdded) record.artifacts = [...(record.artifacts ?? []), structuredClone(payload.artifact)];
     if (payload.schemaVersion === 2) {
       const metadata = {
         artifactId: payload.artifact.artifactId,
@@ -966,7 +1048,12 @@ export class TaskTransportRuntime {
     initializeAttachmentDiagnostics(record, "artifact", imageParts);
     record.artifactAttachmentsReady = await this.areArtifactAttachmentsReady(record);
     const receivedAt = validTimestampOrNow(input.receivedAt, this.now()).toISOString();
-    completeOutgoingSingleStageFromVerifiedArtifact(record, receivedAt);
+    const completedFromArtifact = completeOutgoingSingleStageFromVerifiedArtifact(record, receivedAt);
+    if (artifactAdded && !completedFromArtifact) markTaskAttention(record, {
+      kind: "stage_completed",
+      ...(payload.stageIndex ? { stageIndex: payload.stageIndex } : {}),
+      occurredAt: receivedAt
+    });
     record.updatedAt = receivedAt;
     await this.store.save(state);
   }
@@ -1011,7 +1098,8 @@ export class TaskTransportRuntime {
         "A single-stage Task cannot publish more than one result Artifact."
       );
     }
-    if (!existing) record.artifacts = [...(record.artifacts ?? []), artifact];
+    const artifactAdded = !existing;
+    if (artifactAdded) record.artifacts = [...(record.artifacts ?? []), artifact];
     if (payload.schemaVersion === 2) {
       const metadata = {
         artifactId: payload.artifactId,
@@ -1036,7 +1124,12 @@ export class TaskTransportRuntime {
     initializeAttachmentDiagnostics(record, "artifact", imageParts);
     record.artifactAttachmentsReady = await this.areArtifactAttachmentsReady(record);
     const receivedAt = validTimestampOrNow(input.receivedAt, this.now()).toISOString();
-    completeOutgoingSingleStageFromVerifiedArtifact(record, receivedAt);
+    const completedFromArtifact = completeOutgoingSingleStageFromVerifiedArtifact(record, receivedAt);
+    if (artifactAdded && !completedFromArtifact) markTaskAttention(record, {
+      kind: "stage_completed",
+      ...(payload.stageIndex ? { stageIndex: payload.stageIndex } : {}),
+      occurredAt: receivedAt
+    });
     record.updatedAt = receivedAt;
     await this.store.save(state);
     return {
@@ -1082,21 +1175,34 @@ export class TaskTransportRuntime {
     envelope: TetiApplicationEnvelope<TetiTaskCancelPayload>;
     connection: TetiConnectionRecord;
     receivedAt?: string;
-  }): Promise<void> {
+  }): Promise<TetiTaskApplicationReceiptPayload> {
     const account = await this.accountStorage.load();
     if (!account) throw new TaskTransportRuntimeError("TASK_ACCOUNT_REQUIRED", "A local Teti account is required.");
     const payload = input.envelope.payload;
     requireInboundTaskIdentity(input.envelope, input.connection, account.id, payload);
     const state = await this.store.load();
     const record = findTaskRecord(state, "incoming", payload.requesterTetiId, payload.taskId);
-    if (!record || isTerminalTaskState(record.state)) return;
+    if (!record) {
+      throw new TaskTransportRuntimeError(
+        "TASK_DEPENDENCY_PENDING",
+        "Task control is waiting for its local Task record."
+      );
+    }
+    const receivedAt = validTimestampOrNow(input.receivedAt, this.now()).toISOString();
+    const receipt = createApplicationReceipt(payload, "control", payload.controlId, receivedAt);
+    if (isTerminalTaskState(record.state)) {
+      enqueueApplicationReceipt(record, receipt);
+      await this.store.save(state);
+      return receipt;
+    }
     this.executor?.cancel(currentExecutionTaskId(record) ?? payload.taskId);
     record.state = "canceled";
     record.approval = record.approval === "pending" ? "rejected" : record.approval;
     record.statusPending = true;
     record.statusRevision = (record.statusRevision ?? 0) + 1;
-    record.updatedAt = validTimestampOrNow(input.receivedAt, this.now()).toISOString();
+    record.updatedAt = receivedAt;
     record.safeErrorCode = "TASK_CANCELED_BY_REQUESTER";
+    markTaskAttention(record, { kind: "canceled" });
     if (record.longHorizon) {
       record.longHorizon.phase = "canceled";
       record.longHorizon.progress = progress(
@@ -1112,7 +1218,9 @@ export class TaskTransportRuntime {
         stageIndex: record.longHorizon.currentStageIndex || null
       }, record.updatedAt);
     }
+    enqueueApplicationReceipt(record, receipt);
     await this.store.save(state);
+    return receipt;
   }
 
   async approve(taskId: string): Promise<CollaborationTaskTransportRecord> {
@@ -1179,6 +1287,7 @@ export class TaskTransportRuntime {
     record.statusPending = true;
     record.updatedAt = this.now().toISOString();
     delete record.safeErrorCode;
+    setLatestTaskChange(record, { kind: "stage_started" });
     await this.store.save(state);
     await this.trySendPendingForRecord(state, record);
     const execution: CallableAdapterTaskRequest = {
@@ -1464,6 +1573,10 @@ export class TaskTransportRuntime {
     record.statusPending = true;
     record.updatedAt = now;
     delete record.safeErrorCode;
+    markTaskAttention(record, {
+      kind: stageIndex > 1 ? "resumed" : "stage_started",
+      stageIndex
+    });
     await this.store.save(state);
     await this.trySendPendingForRecord(state, record);
     if (!memorySelection.manifest) {
@@ -1652,6 +1765,7 @@ export class TaskTransportRuntime {
         safeErrorCode: record.safeErrorCode
       }, record.updatedAt);
     }
+    markTaskAttention(record, { kind: "rejected", safeErrorCode: record.safeErrorCode });
     await this.store.save(state);
     await this.trySendPendingForRecord(state, record);
     return structuredClone(record);
@@ -1695,9 +1809,18 @@ export class TaskTransportRuntime {
         }, canceledAt, this.taskIdFactory);
       }
     } else {
+      if (!record.cancelPending) {
+        record.cancelControlId = randomUUID();
+        record.cancelRequestedAt = canceledAt;
+        delete record.cancelAcknowledgedAt;
+        removeApplicationDeliveryState(record, "control");
+      }
       record.cancelPending = true;
     }
     record.updatedAt = canceledAt;
+    markTaskAttention(record, record.direction === "incoming"
+      ? { kind: "canceled", safeErrorCode: record.safeErrorCode }
+      : { kind: "cancel_requested" });
     await this.store.save(state);
     await this.trySendPendingForRecord(state, record);
     return structuredClone(record);
@@ -1745,6 +1868,8 @@ export class TaskTransportRuntime {
     };
     record.inputPending = payload;
     delete record.inputSentAt;
+    delete record.inputAcknowledgedAt;
+    removeApplicationDeliveryState(record, "input");
     record.updatedAt = createdAt;
     await this.store.save(state);
     await this.trySendPendingForRecord(state, record);
@@ -1755,7 +1880,7 @@ export class TaskTransportRuntime {
     envelope: TetiApplicationEnvelope<TetiTaskInputPayload>;
     connection: TetiConnectionRecord;
     receivedAt?: string;
-  }): Promise<void> {
+  }): Promise<TetiTaskApplicationReceiptPayload> {
     const account = await this.accountStorage.load();
     if (!account) throw new TaskTransportRuntimeError("TASK_ACCOUNT_REQUIRED", "A local Teti account is required.");
     const payload = input.envelope.payload;
@@ -1763,8 +1888,12 @@ export class TaskTransportRuntime {
     const state = await this.store.load();
     const record = findTaskRecord(state, "incoming", payload.requesterTetiId, payload.taskId);
     const session = record?.longHorizon;
+    const receivedAt = validTimestampOrNow(input.receivedAt, this.now()).toISOString();
+    const receipt = createApplicationReceipt(payload, "input", payload.inputId, receivedAt);
     if (session?.audit.some((event) => event.action === "input_received" && event.inputId === payload.inputId)) {
-      return;
+      enqueueApplicationReceipt(record!, receipt);
+      await this.store.save(state);
+      return receipt;
     }
     if (!record || !session || record.state !== "input_required"
       || !["input_required", "paused"].includes(session.phase)) {
@@ -1773,7 +1902,7 @@ export class TaskTransportRuntime {
     if (Date.parse(session.continuationExpiresAt) <= this.now().getTime()) {
       expireRecord(record, this.now().toISOString());
       await this.store.save(state);
-      return;
+      throw new TaskTransportRuntimeError("TASK_EXPIRED", "The collaboration continuation lease has expired.");
     }
     if (session.currentStageIndex - 1 >= LONG_HORIZON_LIMITS.maximumInputs) {
       throw new TaskTransportRuntimeError(
@@ -1784,11 +1913,14 @@ export class TaskTransportRuntime {
     if (payload.expectedStageIndex !== session.currentStageIndex) {
       throw new TaskTransportRuntimeError("TASK_INPUT_STAGE_CONFLICT", "Supplemental input targets a stale stage.");
     }
-    if (session.pendingInput?.inputId === payload.inputId) return;
+    if (session.pendingInput?.inputId === payload.inputId) {
+      enqueueApplicationReceipt(record, receipt);
+      await this.store.save(state);
+      return receipt;
+    }
     if (session.pendingInput) {
       throw new TaskTransportRuntimeError("TASK_INPUT_CONFLICT", "Another supplemental input is already pending.");
     }
-    const receivedAt = validTimestampOrNow(input.receivedAt, this.now()).toISOString();
     session.pendingInput = {
       inputId: payload.inputId,
       instruction: payload.instruction,
@@ -1804,7 +1936,10 @@ export class TaskTransportRuntime {
     }, receivedAt);
     session.updatedAt = receivedAt;
     record.updatedAt = receivedAt;
+    markTaskAttention(record, { kind: "input_received", stageIndex: session.currentStageIndex });
+    enqueueApplicationReceipt(record, receipt);
     await this.store.save(state);
+    return receipt;
   }
 
   async pauseLongHorizon(taskId: string): Promise<CollaborationTaskTransportRecord> {
@@ -1833,6 +1968,10 @@ export class TaskTransportRuntime {
     record.statusRevision = (record.statusRevision ?? 0) + 1;
     record.statusPending = true;
     record.updatedAt = now;
+    setLatestTaskChange(record, {
+      kind: session.phase === "paused" ? "paused" : "pause_requested",
+      ...(session.currentStageIndex > 0 ? { stageIndex: session.currentStageIndex } : {})
+    });
     await this.store.save(state);
     await this.trySendPendingForRecord(state, record);
     return structuredClone(record);
@@ -1936,6 +2075,7 @@ export class TaskTransportRuntime {
     record.statusPending = true;
     record.updatedAt = now;
     delete record.safeErrorCode;
+    markTaskAttention(record, { kind: "completed", stageIndex: session.currentStageIndex });
     await this.store.save(state);
     await this.trySendPendingForRecord(state, record);
     return structuredClone(record);
@@ -1975,6 +2115,10 @@ export class TaskTransportRuntime {
     record.statusRevision = (record.statusRevision ?? 0) + 1;
     record.statusPending = true;
     record.updatedAt = now;
+    setLatestTaskChange(record, {
+      kind: "renewed",
+      ...(session.currentStageIndex > 0 ? { stageIndex: session.currentStageIndex } : {})
+    });
     await this.store.save(state);
     await this.trySendPendingForRecord(state, record);
     return structuredClone(record);
@@ -2051,6 +2195,7 @@ export class TaskTransportRuntime {
     record.statusPending = true;
     record.updatedAt = this.now().toISOString();
     delete record.safeErrorCode;
+    markTaskAttention(record, { kind: "resumed" });
     await this.store.save(state);
     await this.trySendPendingForRecord(state, record);
     void this.executor.execute(execution, authority).then(
@@ -2090,6 +2235,23 @@ export class TaskTransportRuntime {
           await this.store.save(state);
         } catch {
           // Durable receipt remains pending for the next Runtime poll.
+        }
+      }
+      if (record.applicationReceiptOutbox?.length) {
+        const connection = await this.findConfirmedConnectionForPeer(record.peerTetiId);
+        if (connection) {
+          for (const receipt of [...record.applicationReceiptOutbox]) {
+            try {
+              await this.applicationManager.sendTaskApplicationReceipt(connection.requestId, receipt);
+              record.applicationReceiptOutbox = record.applicationReceiptOutbox?.filter(
+                (candidate) => applicationReceiptKey(candidate) !== applicationReceiptKey(receipt)
+              );
+              if (record.applicationReceiptOutbox?.length === 0) delete record.applicationReceiptOutbox;
+              await this.store.save(state);
+            } catch {
+              break;
+            }
+          }
         }
       }
       await this.trySendPendingForRecord(state, record);
@@ -2149,6 +2311,7 @@ export class TaskTransportRuntime {
     for (const record of state.records) {
       if (!(TETI_SUPPORTED_TASK_PROTOCOL_VERSIONS as readonly number[]).includes(record.protocolVersion)
         && !isTerminalTaskState(record.state)) {
+        const previous = taskAttentionSnapshot(record);
         record.state = "rejected";
         record.approval = "rejected";
         record.delivery = "rejected";
@@ -2158,6 +2321,7 @@ export class TaskTransportRuntime {
         record.cancelPending = false;
         record.artifactPending = false;
         record.updatedAt = this.now().toISOString();
+        markTaskAttentionIfChanged(record, previous);
         changed = true;
         continue;
       }
@@ -2215,6 +2379,7 @@ export class TaskTransportRuntime {
       record.statusRevision = (record.statusRevision ?? 0) + 1;
       record.statusPending = true;
       record.updatedAt = this.now().toISOString();
+      markTaskAttention(record);
       changed = true;
     }
     return changed;
@@ -2259,7 +2424,40 @@ export class TaskTransportRuntime {
     record: CollaborationTaskTransportRecord
   ): Promise<void> {
     const connection = await this.findConfirmedConnectionForPeer(record.peerTetiId);
-    if (!connection) return;
+    if (!connection) {
+      const failedAt = this.now().toISOString();
+      let changed = false;
+      if (record.direction === "incoming" && record.statusPending && record.statusRevision) {
+        changed = recordApplicationDeliveryFailure(
+          record,
+          "status",
+          String(record.statusRevision),
+          "TASK_CONNECTION_UNAVAILABLE",
+          failedAt
+        ) || changed;
+      }
+      if (record.direction === "outgoing" && record.inputPending && !record.inputAcknowledgedAt) {
+        changed = recordApplicationDeliveryFailure(
+          record,
+          "input",
+          record.inputPending.inputId,
+          "TASK_CONNECTION_UNAVAILABLE",
+          failedAt
+        ) || changed;
+      }
+      if (record.direction === "outgoing" && record.cancelPending
+        && record.cancelControlId && !record.cancelAcknowledgedAt) {
+        changed = recordApplicationDeliveryFailure(
+          record,
+          "control",
+          record.cancelControlId,
+          "TASK_CONNECTION_UNAVAILABLE",
+          failedAt
+        ) || changed;
+      }
+      if (changed) await this.store.save(state);
+      return;
+    }
     if (record.direction === "incoming" && record.artifacts?.length
       && (record.artifactPending || record.protocolVersion >= 4)) {
       const pendingArtifacts = record.artifacts.filter(
@@ -2394,7 +2592,8 @@ export class TaskTransportRuntime {
         }
       }
     }
-    if (record.direction === "incoming" && record.statusPending && record.statusRevision) {
+    if (record.direction === "incoming" && record.statusPending && record.statusRevision
+      && shouldSendApplicationMessage(record, "status", String(record.statusRevision), this.now())) {
       const payload: TetiTaskStatusPayload = record.longHorizon ? {
         schemaVersion: 2,
         taskId: record.request.taskId,
@@ -2417,37 +2616,67 @@ export class TaskTransportRuntime {
       };
       try {
         await this.applicationManager.sendTaskStatus(connection.requestId, payload);
-        record.statusPending = false;
+        recordApplicationDeliveryAttempt(record, "status", String(record.statusRevision), this.now());
         await this.store.save(state);
-      } catch {
+      } catch (error) {
+        recordApplicationDeliveryAttempt(record, "status", String(record.statusRevision), this.now());
+        recordApplicationDeliveryFailure(
+          record,
+          "status",
+          String(record.statusRevision),
+          applicationSendErrorCode(error),
+          this.now().toISOString()
+        );
+        await this.store.save(state);
         return;
       }
     }
-    if (record.direction === "outgoing" && record.inputPending && !record.inputSentAt) {
+    if (record.direction === "outgoing" && record.inputPending && !record.inputAcknowledgedAt
+      && shouldSendApplicationMessage(record, "input", record.inputPending.inputId, this.now())) {
       try {
         await this.applicationManager.sendTaskInput(connection.requestId, record.inputPending);
         record.inputSentAt = this.now().toISOString();
-        record.updatedAt = record.inputSentAt;
+        recordApplicationDeliveryAttempt(record, "input", record.inputPending.inputId, this.now());
         await this.store.save(state);
-      } catch {
+      } catch (error) {
+        recordApplicationDeliveryAttempt(record, "input", record.inputPending.inputId, this.now());
+        recordApplicationDeliveryFailure(
+          record,
+          "input",
+          record.inputPending.inputId,
+          applicationSendErrorCode(error),
+          this.now().toISOString()
+        );
+        await this.store.save(state);
         return;
       }
     }
-    if (record.direction === "outgoing" && record.cancelPending && !record.cancelSentAt) {
+    if (record.direction === "outgoing" && record.cancelPending
+      && record.cancelControlId && record.cancelRequestedAt && !record.cancelAcknowledgedAt
+      && shouldSendApplicationMessage(record, "control", record.cancelControlId, this.now())) {
       const payload: TetiTaskCancelPayload = {
         schemaVersion: 1,
         taskId: record.request.taskId,
         requesterTetiId: record.request.requesterTetiId,
         targetTetiId: record.request.targetTetiId,
-        requestedAt: record.updatedAt
+        controlId: record.cancelControlId,
+        requestedAt: record.cancelRequestedAt
       };
       try {
         await this.applicationManager.sendTaskCancel(connection.requestId, payload);
         record.cancelSentAt = this.now().toISOString();
-        record.updatedAt = this.now().toISOString();
+        recordApplicationDeliveryAttempt(record, "control", record.cancelControlId, this.now());
         await this.store.save(state);
-      } catch {
-        // Durable cancel stays pending until the next Runtime poll.
+      } catch (error) {
+        recordApplicationDeliveryAttempt(record, "control", record.cancelControlId, this.now());
+        recordApplicationDeliveryFailure(
+          record,
+          "control",
+          record.cancelControlId,
+          applicationSendErrorCode(error),
+          this.now().toISOString()
+        );
+        await this.store.save(state);
       }
     }
   }
@@ -2489,6 +2718,7 @@ export class TaskTransportRuntime {
         record.statusRevision = (record.statusRevision ?? 0) + 1;
         record.statusPending = true;
         record.updatedAt = completedAt;
+        markTaskAttention(record);
         await this.store.save(state);
         if (deliverPending) await this.trySendPendingForRecord(state, record);
         return;
@@ -2499,6 +2729,7 @@ export class TaskTransportRuntime {
         record.statusRevision = (record.statusRevision ?? 0) + 1;
         record.statusPending = true;
         record.updatedAt = completedAt;
+        markTaskAttention(record);
         await this.store.save(state);
         if (deliverPending) await this.trySendPendingForRecord(state, record);
         return;
@@ -2545,6 +2776,7 @@ export class TaskTransportRuntime {
     record.statusRevision = (record.statusRevision ?? 0) + 1;
     record.statusPending = true;
     record.updatedAt = completedAt;
+    markTaskAttention(record);
     await this.store.save(state);
     if (deliverPending) await this.trySendPendingForRecord(state, record);
   }
@@ -2656,6 +2888,11 @@ export class TaskTransportRuntime {
           record.statusRevision = (record.statusRevision ?? 0) + 1;
           record.statusPending = true;
           record.updatedAt = completedAt;
+          markTaskAttention(record, {
+            kind: "stage_failed",
+            stageIndex: stage.stageIndex,
+            safeErrorCode: stage.safeErrorCode
+          });
           await this.store.save(state);
           if (deliverPending) await this.trySendPendingForRecord(state, record);
           return;
@@ -2738,6 +2975,7 @@ export class TaskTransportRuntime {
         record.artifactAttachmentsReady = true;
         record.updatedAt = completedAt;
         session.updatedAt = completedAt;
+        markTaskAttention(record, { kind: "stage_completed", stageIndex: stage.stageIndex });
         const nextStep = record.delegationPlan.steps.find((candidate) =>
           candidate.kind === "child_execution" && candidate.state === "pending"
         );
@@ -2775,6 +3013,11 @@ export class TaskTransportRuntime {
             record.statusRevision = (record.statusRevision ?? 0) + 1;
             record.statusPending = true;
             record.updatedAt = completedAt;
+            markTaskAttention(record, {
+              kind: "stage_failed",
+              stageIndex: stage.stageIndex,
+              safeErrorCode
+            });
             validateDelegationPlanState(record.delegationPlan);
             await this.store.save(state);
             if (deliverPending) await this.trySendPendingForRecord(state, record);
@@ -2889,6 +3132,13 @@ export class TaskTransportRuntime {
     record.statusRevision = (record.statusRevision ?? 0) + 1;
     record.statusPending = true;
     record.updatedAt = completedAt;
+    markTaskAttention(record, stage.state === "completed"
+      ? { kind: "stage_completed", stageIndex: stage.stageIndex }
+      : {
+          kind: record.state === "failed" ? "failed" : "stage_failed",
+          stageIndex: stage.stageIndex,
+          ...(stage.safeErrorCode ? { safeErrorCode: stage.safeErrorCode } : {})
+        });
     await this.store.save(state);
     if (completedStageMemory) await this.persistStructuredTaskMemory(completedStageMemory);
     if (deliverPending) await this.trySendPendingForRecord(state, record);
@@ -3151,6 +3401,7 @@ export class TaskTransportRuntime {
     record.statusPending = true;
     record.updatedAt = completedAt;
     delete record.safeErrorCode;
+    markTaskAttention(record, { kind: "completed", stageIndex: session.currentStageIndex });
     validateDelegationPlanState(plan);
     await this.store.save(state);
     if (deliverPending) await this.trySendPendingForRecord(state, record);
@@ -3187,6 +3438,13 @@ export class TaskTransportRuntime {
       record.delivery = "send_failed";
       record.safeErrorCode = "TASK_CONNECTION_UNAVAILABLE";
       record.updatedAt = this.now().toISOString();
+      recordApplicationDeliveryFailure(
+        record,
+        "request",
+        record.request.taskId,
+        record.safeErrorCode,
+        record.updatedAt
+      );
       await this.store.save(state);
       return;
     }
@@ -3202,6 +3460,13 @@ export class TaskTransportRuntime {
       record.safeErrorCode = isNetworkAuthorizationFailure(error)
         ? "TASK_NETWORK_AUTHORIZATION_FAILED"
         : "TASK_CHATMAIL_SEND_FAILED";
+      recordApplicationDeliveryFailure(
+        record,
+        "request",
+        record.request.taskId,
+        record.safeErrorCode,
+        this.now().toISOString()
+      );
     }
     record.updatedAt = this.now().toISOString();
     await this.store.save(state);
@@ -3405,6 +3670,194 @@ function createAttachmentReceipt(
     attachmentId: payload.part.attachmentId,
     receivedAt
   };
+}
+
+function createApplicationReceipt(
+  payload: { taskId: string; requesterTetiId: string; targetTetiId: string },
+  kind: TetiTaskApplicationReceiptKind,
+  referenceId: string,
+  receivedAt: string
+): TetiTaskApplicationReceiptPayload {
+  return {
+    schemaVersion: 1,
+    taskId: payload.taskId,
+    requesterTetiId: payload.requesterTetiId,
+    targetTetiId: payload.targetTetiId,
+    kind,
+    referenceId,
+    receivedAt
+  };
+}
+
+function applicationReceiptKey(
+  receipt: Pick<TetiTaskApplicationReceiptPayload, "kind" | "referenceId">
+): string {
+  return `${receipt.kind}:${receipt.referenceId}`;
+}
+
+function enqueueApplicationReceipt(
+  record: CollaborationTaskTransportRecord,
+  receipt: TetiTaskApplicationReceiptPayload
+): void {
+  const key = applicationReceiptKey(receipt);
+  const existing = record.applicationReceiptOutbox?.find(
+    (candidate) => applicationReceiptKey(candidate) === key
+  );
+  record.applicationReceiptOutbox = [
+    ...(record.applicationReceiptOutbox ?? []).filter(
+      (candidate) => applicationReceiptKey(candidate) !== key
+    ),
+    existing ?? receipt
+  ].slice(-16);
+}
+
+function shouldSendApplicationMessage(
+  record: CollaborationTaskTransportRecord,
+  kind: TetiTaskApplicationReceiptKind,
+  referenceId: string,
+  now: Date
+): boolean {
+  const attempt = record.applicationDeliveryAttempts?.find(
+    (candidate) => candidate.kind === kind && candidate.referenceId === referenceId
+  );
+  return !attempt || Date.parse(attempt.nextRetryAt) <= now.getTime();
+}
+
+function recordApplicationDeliveryAttempt(
+  record: CollaborationTaskTransportRecord,
+  kind: TetiTaskApplicationReceiptKind,
+  referenceId: string,
+  now: Date
+): void {
+  const current = record.applicationDeliveryAttempts?.find(
+    (candidate) => candidate.kind === kind && candidate.referenceId === referenceId
+  );
+  const attempts = (current?.attempts ?? 0) + 1;
+  const delay = APPLICATION_RETRY_DELAYS_MS[
+    Math.min(attempts - 1, APPLICATION_RETRY_DELAYS_MS.length - 1)
+  ];
+  record.applicationDeliveryAttempts = [
+    ...(record.applicationDeliveryAttempts ?? []).filter((candidate) => candidate.kind !== kind),
+    {
+      kind,
+      referenceId,
+      attempts,
+      lastSentAt: now.toISOString(),
+      nextRetryAt: new Date(now.getTime() + delay).toISOString()
+    }
+  ];
+}
+
+function removeApplicationDeliveryAttempt(
+  record: CollaborationTaskTransportRecord,
+  kind: TetiTaskApplicationReceiptKind,
+  referenceId: string
+): void {
+  const remaining = record.applicationDeliveryAttempts?.filter(
+    (candidate) => candidate.kind !== kind || candidate.referenceId !== referenceId
+  ) ?? [];
+  if (remaining.length > 0) record.applicationDeliveryAttempts = remaining;
+  else delete record.applicationDeliveryAttempts;
+}
+
+function removeApplicationDeliveryState(
+  record: CollaborationTaskTransportRecord,
+  kind: TetiTaskApplicationReceiptKind
+): void {
+  const attempts = record.applicationDeliveryAttempts?.filter((candidate) => candidate.kind !== kind) ?? [];
+  const failures = record.applicationDeliveryFailures?.filter((candidate) => candidate.kind !== kind) ?? [];
+  if (attempts.length > 0) record.applicationDeliveryAttempts = attempts;
+  else delete record.applicationDeliveryAttempts;
+  if (failures.length > 0) record.applicationDeliveryFailures = failures;
+  else delete record.applicationDeliveryFailures;
+}
+
+function hasApplicationDeliveryReference(
+  record: CollaborationTaskTransportRecord,
+  kind: TetiTaskApplicationReceiptKind,
+  referenceId: string
+): boolean {
+  if (kind === "status") {
+    const revision = Number(referenceId);
+    if (!Number.isSafeInteger(revision) || revision < 1 || revision > (record.statusRevision ?? 0)) return false;
+    if (revision > (record.statusAcknowledgedRevision ?? 0)
+      && !record.applicationDeliveryAttempts?.some((item) => item.kind === kind && item.referenceId === referenceId)
+      && !record.applicationDeliveryFailures?.some((item) => item.kind === kind && item.referenceId === referenceId)) {
+      return false;
+    }
+  } else if (kind === "input") {
+    if (record.inputPending?.inputId !== referenceId
+      || (!record.inputAcknowledgedAt
+      && !record.applicationDeliveryAttempts?.some((item) => item.kind === kind && item.referenceId === referenceId)
+      && !record.applicationDeliveryFailures?.some((item) => item.kind === kind && item.referenceId === referenceId))) {
+      return false;
+    }
+  } else {
+    if (record.cancelControlId !== referenceId
+      || (!record.cancelAcknowledgedAt
+        && !record.applicationDeliveryAttempts?.some((item) => item.kind === kind && item.referenceId === referenceId)
+        && !record.applicationDeliveryFailures?.some((item) => item.kind === kind && item.referenceId === referenceId))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function recordApplicationDeliveryFailure(
+  record: CollaborationTaskTransportRecord,
+  kind: "request" | TetiTaskApplicationReceiptKind,
+  referenceId: string,
+  safeErrorCode: string,
+  failedAt: string
+): boolean {
+  const existing = record.applicationDeliveryFailures?.find(
+    (candidate) => candidate.kind === kind && candidate.referenceId === referenceId
+  );
+  if (existing?.safeErrorCode === safeErrorCode) return false;
+  record.applicationDeliveryFailures = [
+    ...(record.applicationDeliveryFailures ?? []).filter((candidate) => candidate.kind !== kind),
+    { kind, referenceId, failedAt, safeErrorCode }
+  ];
+  markTaskAttention(record, { kind: "delivery_failed", safeErrorCode, occurredAt: failedAt });
+  return true;
+}
+
+function recoverApplicationDeliveryFailure(
+  record: CollaborationTaskTransportRecord,
+  kind: "request" | TetiTaskApplicationReceiptKind,
+  referenceId: string,
+  recoveredAt: string
+): boolean {
+  const existing = record.applicationDeliveryFailures?.find(
+    (candidate) => candidate.kind === kind
+      && (candidate.referenceId === referenceId
+        || (kind === "status" && Number(candidate.referenceId) <= Number(referenceId)))
+  );
+  if (!existing) return false;
+  const remaining = record.applicationDeliveryFailures?.filter(
+    (candidate) => candidate.kind !== kind
+      || (candidate.referenceId !== referenceId
+        && !(kind === "status" && Number(candidate.referenceId) <= Number(referenceId)))
+  ) ?? [];
+  if (remaining.length > 0) record.applicationDeliveryFailures = remaining;
+  else delete record.applicationDeliveryFailures;
+  markTaskAttention(record, { kind: "delivery_recovered", occurredAt: recoveredAt });
+  return true;
+}
+
+function clearCancelDeliveryState(record: CollaborationTaskTransportRecord): void {
+  record.cancelPending = false;
+  delete record.cancelControlId;
+  delete record.cancelRequestedAt;
+  delete record.cancelSentAt;
+  delete record.cancelAcknowledgedAt;
+  removeApplicationDeliveryState(record, "control");
+}
+
+function applicationSendErrorCode(error: unknown): string {
+  return isNetworkAuthorizationFailure(error)
+    ? "TASK_NETWORK_AUTHORIZATION_FAILED"
+    : "TASK_CHATMAIL_SEND_FAILED";
 }
 
 function appendUnique(values: string[] | undefined, value: string): string[] {
@@ -3660,6 +4113,25 @@ function reconcileVerifiedSingleStageCompletions(
   return changed;
 }
 
+/**
+ * Beta 0.5 originally persisted completed-stage unread state separately. Fold
+ * that state into the unified attention clock exactly once so an upgrade or
+ * restart cannot lose a yellow-dot notification or recreate it repeatedly.
+ */
+function migrateLegacyLongHorizonAttention(state: TetiTaskTransportStoreState): boolean {
+  let changed = false;
+  for (const record of state.records) {
+    if (record.request.executionMode !== "long_horizon"
+      || record.attentionRevision !== undefined) continue;
+    const legacyUnread = latestAvailableLongHorizonStageResultIndex(record)
+      > (record.viewedStageResultIndex ?? 0);
+    record.attentionRevision = legacyUnread ? 1 : 0;
+    record.viewedAttentionRevision = 0;
+    changed = true;
+  }
+  return changed;
+}
+
 function completeOutgoingSingleStageFromVerifiedArtifact(
   record: CollaborationTaskTransportRecord,
   observedAt: string
@@ -3688,14 +4160,15 @@ function completeOutgoingSingleStageFromVerifiedArtifact(
   record.state = "completed";
   record.approval = "approved_once";
   record.delivery = "acknowledged";
-  record.cancelPending = false;
-  delete record.cancelSentAt;
+  clearCancelDeliveryState(record);
   delete record.safeErrorCode;
   record.updatedAt = observedAt;
+  markTaskAttention(record, { kind: "completed", occurredAt: observedAt });
   return true;
 }
 
 function expireRecord(record: CollaborationTaskTransportRecord, timestamp: string): void {
+  const previous = taskAttentionSnapshot(record);
   record.delivery = "expired";
   record.state = "rejected";
   record.approval = "expired";
@@ -3731,6 +4204,11 @@ function expireRecord(record: CollaborationTaskTransportRecord, timestamp: strin
     }, timestamp, randomUUID);
   }
   record.receiptPending = false;
+  delete record.inputPending;
+  delete record.inputSentAt;
+  delete record.inputAcknowledgedAt;
+  removeApplicationDeliveryState(record, "input");
+  clearCancelDeliveryState(record);
   for (const diagnostic of record.attachmentDiagnostics ?? []) {
     if (diagnostic.state === "acknowledged" || diagnostic.state === "stored") continue;
     diagnostic.state = "expired";
@@ -3741,6 +4219,162 @@ function expireRecord(record: CollaborationTaskTransportRecord, timestamp: strin
     record.statusPending = true;
   }
   record.updatedAt = timestamp;
+  if (previous.state !== record.state
+    || previous.delivery !== record.delivery
+    || previous.safeErrorCode !== record.safeErrorCode) {
+    markTaskAttention(record, { kind: "expired", safeErrorCode: "TASK_EXPIRED", occurredAt: timestamp });
+  }
+}
+
+interface TaskAttentionSnapshot {
+  state: CollaborationTaskTransportRecord["state"];
+  delivery: CollaborationTaskTransportRecord["delivery"];
+  safeErrorCode?: string;
+  peerLongHorizonStageIndex: number;
+  peerLongHorizonPhase?: TetiTaskLongHorizonStatus["phase"];
+  peerLongHorizonExpiresAt?: string;
+}
+
+function taskAttentionSnapshot(record: CollaborationTaskTransportRecord): TaskAttentionSnapshot {
+  return {
+    state: record.state,
+    delivery: record.delivery,
+    peerLongHorizonStageIndex: record.peerLongHorizon?.currentStageIndex ?? 0,
+    ...(record.peerLongHorizon?.phase ? { peerLongHorizonPhase: record.peerLongHorizon.phase } : {}),
+    ...(record.peerLongHorizon?.continuationExpiresAt
+      ? { peerLongHorizonExpiresAt: record.peerLongHorizon.continuationExpiresAt }
+      : {}),
+    ...(record.safeErrorCode ? { safeErrorCode: record.safeErrorCode } : {})
+  };
+}
+
+function markRemoteTaskAttentionIfChanged(
+  record: CollaborationTaskTransportRecord,
+  previous: TaskAttentionSnapshot
+): boolean {
+  if (record.request.executionMode !== "long_horizon") {
+    return markTaskAttentionIfChanged(record, previous);
+  }
+  const reachedAttentionTerminalState = previous.state !== record.state
+    && ["completed", "failed", "rejected", "canceled"].includes(record.state);
+  const startedNextStage = (record.peerLongHorizon?.currentStageIndex ?? 0)
+    > previous.peerLongHorizonStageIndex;
+  const currentPhase = record.peerLongHorizon?.phase;
+  const paused = currentPhase === "paused" && previous.peerLongHorizonPhase !== "paused";
+  const resumed = currentPhase === "working"
+    && previous.peerLongHorizonPhase === "paused";
+  const renewed = Boolean(record.peerLongHorizon?.continuationExpiresAt)
+    && Date.parse(record.peerLongHorizon!.continuationExpiresAt)
+      > Date.parse(previous.peerLongHorizonExpiresAt ?? "");
+  const reportedStageFailure = Boolean(record.safeErrorCode)
+    && record.safeErrorCode !== previous.safeErrorCode
+    && ["input_required", "failed"].includes(record.state);
+  if (reachedAttentionTerminalState) return markTaskAttention(record, terminalAttentionChange(record));
+  let changed = false;
+  if (reportedStageFailure) changed = markTaskAttention(record, {
+    kind: "stage_failed",
+    ...(record.peerLongHorizon?.currentStageIndex
+      ? { stageIndex: record.peerLongHorizon.currentStageIndex }
+      : {}),
+    ...(record.safeErrorCode ? { safeErrorCode: record.safeErrorCode } : {})
+  }) || changed;
+  if (startedNextStage || resumed) changed = markTaskAttention(record, {
+    kind: (record.peerLongHorizon?.currentStageIndex ?? 0) > 1 ? "resumed" : "stage_started",
+    ...(record.peerLongHorizon?.currentStageIndex
+      ? { stageIndex: record.peerLongHorizon.currentStageIndex }
+      : {})
+  }) || changed;
+  if (paused) changed = markTaskAttention(record, {
+    kind: "paused",
+    ...(record.peerLongHorizon?.currentStageIndex
+      ? { stageIndex: record.peerLongHorizon.currentStageIndex }
+      : {})
+  }) || changed;
+  if (renewed) changed = markTaskAttention(record, {
+    kind: "renewed",
+    ...(record.peerLongHorizon?.currentStageIndex
+      ? { stageIndex: record.peerLongHorizon.currentStageIndex }
+      : {})
+  }) || changed;
+  return changed;
+}
+
+function markTaskAttentionIfChanged(
+  record: CollaborationTaskTransportRecord,
+  previous: TaskAttentionSnapshot
+): boolean {
+  if (previous.state === record.state
+    && previous.delivery === record.delivery
+    && previous.safeErrorCode === record.safeErrorCode) return false;
+  return markTaskAttention(record, inferTaskAttentionChange(record));
+}
+
+type TaskAttentionChangeInput = Omit<TaskAttentionChange, "revision" | "occurredAt"> & {
+  occurredAt?: string;
+};
+
+function markTaskAttention(
+  record: CollaborationTaskTransportRecord,
+  change: TaskAttentionChangeInput = inferTaskAttentionChange(record)
+): boolean {
+  record.attentionRevision = Math.min(
+    Number.MAX_SAFE_INTEGER,
+    (record.attentionRevision ?? 0) + 1
+  );
+  setLatestTaskChange(record, change);
+  return true;
+}
+
+function setLatestTaskChange(
+  record: CollaborationTaskTransportRecord,
+  change: TaskAttentionChangeInput
+): void {
+  record.latestAttentionChange = {
+    revision: record.attentionRevision ?? 0,
+    kind: change.kind,
+    occurredAt: change.occurredAt ?? record.updatedAt,
+    ...(change.stageIndex ? { stageIndex: change.stageIndex } : {}),
+    ...(change.safeErrorCode ? { safeErrorCode: change.safeErrorCode } : {})
+  };
+}
+
+function inferTaskAttentionChange(record: CollaborationTaskTransportRecord): TaskAttentionChangeInput {
+  if (["completed", "failed", "rejected", "canceled"].includes(record.state)
+    || record.safeErrorCode === "TASK_EXPIRED") {
+    return terminalAttentionChange(record);
+  }
+  if (record.delivery === "send_failed") {
+    return {
+      kind: "delivery_failed",
+      ...(record.safeErrorCode ? { safeErrorCode: record.safeErrorCode } : {})
+    };
+  }
+  return {
+    kind: "status_updated",
+    ...(record.safeErrorCode ? { safeErrorCode: record.safeErrorCode } : {})
+  };
+}
+
+function terminalAttentionChange(record: CollaborationTaskTransportRecord): TaskAttentionChangeInput {
+  const stageIndex = record.longHorizon?.currentStageIndex
+    ?? record.peerLongHorizon?.currentStageIndex
+    ?? 0;
+  const kind = record.safeErrorCode === "TASK_EXPIRED"
+    || record.longHorizon?.phase === "expired"
+    || record.peerLongHorizon?.phase === "expired"
+    ? "expired"
+    : record.state === "completed"
+      ? "completed"
+      : record.state === "canceled"
+        ? "canceled"
+        : record.state === "rejected"
+          ? "rejected"
+          : "failed";
+  return {
+    kind,
+    ...(stageIndex > 0 ? { stageIndex } : {}),
+    ...(record.safeErrorCode ? { safeErrorCode: record.safeErrorCode } : {})
+  };
 }
 
 function createAttachmentDiagnostics(

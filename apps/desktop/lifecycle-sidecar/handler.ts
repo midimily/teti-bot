@@ -288,10 +288,10 @@ async function dispatchLifecycleRequest(
       return service.getTask(validateTaskId(request.params?.taskId));
     }
 
-    case "task.stage-results.viewed": {
+    case "task.attention.viewed": {
       const service = await dependencies.getPeerConnectionService();
-      if (!service.markTaskStageResultsViewed) throw new Error("Task read state is unavailable.");
-      return service.markTaskStageResultsViewed(validateTaskId(request.params?.taskId));
+      if (!service.markTaskAttentionViewed) throw new Error("Task read state is unavailable.");
+      return service.markTaskAttentionViewed(validateTaskId(request.params?.taskId));
     }
 
     case "task.memory.get": {
@@ -1037,7 +1037,7 @@ function fallbackCodeForMethod(method: LifecycleRequest["method"]) {
     case "task.list":
     case "task.summary":
     case "task.get":
-    case "task.stage-results.viewed":
+    case "task.attention.viewed":
     case "task.memory.get":
     case "task.memory.source.get":
     case "task.memory.item.get":

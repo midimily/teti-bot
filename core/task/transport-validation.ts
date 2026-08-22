@@ -10,6 +10,7 @@ import {
   type TetiTaskAttachmentReceiptPayload,
   type TetiTaskAttachmentPayload,
   type TetiTaskCancelPayload,
+  type TetiTaskApplicationReceiptPayload,
   type TetiTaskReceiptPayload,
   type TetiTaskStatusPayload,
   type TetiTaskInputPayload,
@@ -198,11 +199,40 @@ export function validateTaskCancelPayload(
     "taskId",
     "requesterTetiId",
     "targetTetiId",
+    "controlId",
     "requestedAt"
   ], "Task cancel");
   if (payload.schemaVersion !== 1) throw new TaskTransportContractError("Unsupported Task cancel version.");
   taskIdentity(payload);
+  safeId(payload.controlId, "controlId");
   timestamp(payload.requestedAt, "requestedAt");
+}
+
+export function validateTaskApplicationReceiptPayload(
+  value: unknown
+): asserts value is TetiTaskApplicationReceiptPayload {
+  const payload = exactRecord(value, [
+    "schemaVersion",
+    "taskId",
+    "requesterTetiId",
+    "targetTetiId",
+    "kind",
+    "referenceId",
+    "receivedAt"
+  ], "Task application receipt");
+  if (payload.schemaVersion !== 1) {
+    throw new TaskTransportContractError("Unsupported Task application receipt version.");
+  }
+  taskIdentity(payload);
+  if (payload.kind !== "status" && payload.kind !== "input" && payload.kind !== "control") {
+    throw new TaskTransportContractError("Task application receipt kind is invalid.");
+  }
+  safeId(payload.referenceId, "referenceId");
+  if (payload.kind === "status"
+    && (!/^\d+$/.test(String(payload.referenceId)) || Number(payload.referenceId) < 1)) {
+    throw new TaskTransportContractError("Task status receipt reference is invalid.");
+  }
+  timestamp(payload.receivedAt, "receivedAt");
 }
 
 export function validateTaskArtifactPayload(

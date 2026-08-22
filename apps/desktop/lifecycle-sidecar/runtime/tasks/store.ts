@@ -11,6 +11,7 @@ import {
 } from "../../../../../core/task/transport.ts";
 import {
   validateTaskInputPayload,
+  validateTaskApplicationReceiptPayload,
   validateTaskProtocolVersions,
   validateTaskReceiptPayload,
   validateTaskStatusPayload
@@ -152,8 +153,15 @@ function validateRecord(value: unknown): asserts value is CollaborationTaskTrans
     "receiptPending",
     "statusRevision",
     "statusPending",
+    "statusAcknowledgedRevision",
     "cancelPending",
+    "cancelControlId",
+    "cancelRequestedAt",
     "cancelSentAt",
+    "cancelAcknowledgedAt",
+    "applicationDeliveryAttempts",
+    "applicationDeliveryFailures",
+    "applicationReceiptOutbox",
     "artifactPending",
     "sentArtifactIds",
     "acknowledgedArtifactIds",
@@ -167,7 +175,11 @@ function validateRecord(value: unknown): asserts value is CollaborationTaskTrans
     "peerArtifactMetadata",
     "inputPending",
     "inputSentAt",
+    "inputAcknowledgedAt",
     "viewedStageResultIndex",
+    "attentionRevision",
+    "viewedAttentionRevision",
+    "latestAttentionChange",
     "safeErrorCode"
   ], "Task transport record");
   if (value.direction !== "incoming" && value.direction !== "outgoing") {
@@ -238,10 +250,32 @@ function validateRecord(value: unknown): asserts value is CollaborationTaskTrans
     && (!Number.isSafeInteger(value.statusRevision) || Number(value.statusRevision) < 0)) {
     throw new Error("Teti Task status revision is invalid.");
   }
+  if (value.statusAcknowledgedRevision !== undefined
+    && (!Number.isSafeInteger(value.statusAcknowledgedRevision)
+      || Number(value.statusAcknowledgedRevision) < 0
+      || Number(value.statusAcknowledgedRevision) > Number(value.statusRevision ?? 0))) {
+    throw new Error("Teti Task acknowledged status revision is invalid.");
+  }
   if (value.cancelPending !== undefined && typeof value.cancelPending !== "boolean") {
     throw new Error("Teti Task cancel state is invalid.");
   }
+  if (value.cancelControlId !== undefined
+    && (typeof value.cancelControlId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value.cancelControlId))) {
+    throw new Error("Teti Task cancel control ID is invalid.");
+  }
+  if (value.cancelRequestedAt !== undefined) requireTimestamp(value.cancelRequestedAt, "Teti Task cancel requestedAt");
   if (value.cancelSentAt !== undefined) requireTimestamp(value.cancelSentAt, "Teti Task cancel sentAt");
+  if (value.cancelAcknowledgedAt !== undefined) {
+    requireTimestamp(value.cancelAcknowledgedAt, "Teti Task cancel acknowledgedAt");
+  }
+  validateApplicationDeliveryAttempts(value.applicationDeliveryAttempts);
+  validateApplicationDeliveryFailures(value.applicationDeliveryFailures);
+  if (value.applicationReceiptOutbox !== undefined) {
+    if (!Array.isArray(value.applicationReceiptOutbox) || value.applicationReceiptOutbox.length > 16) {
+      throw new Error("Teti Task application receipt outbox is invalid.");
+    }
+    for (const receipt of value.applicationReceiptOutbox) validateTaskApplicationReceiptPayload(receipt);
+  }
   if (value.statusPending !== undefined && typeof value.statusPending !== "boolean") {
     throw new Error("Teti Task status outbox state is invalid.");
   }
@@ -313,12 +347,25 @@ function validateRecord(value: unknown): asserts value is CollaborationTaskTrans
   }
   if (value.inputPending !== undefined) validateTaskInputPayload(value.inputPending);
   if (value.inputSentAt !== undefined) requireTimestamp(value.inputSentAt, "Task input sentAt");
+  if (value.inputAcknowledgedAt !== undefined) {
+    requireTimestamp(value.inputAcknowledgedAt, "Task input acknowledgedAt");
+  }
   if (value.viewedStageResultIndex !== undefined
     && (!Number.isSafeInteger(value.viewedStageResultIndex)
       || Number(value.viewedStageResultIndex) < 0
       || Number(value.viewedStageResultIndex) > LONG_HORIZON_LIMITS.maximumStages)) {
     throw new Error("Teti Task viewed stage result index is invalid.");
   }
+  for (const field of ["attentionRevision", "viewedAttentionRevision"] as const) {
+    if (value[field] !== undefined
+      && (!Number.isSafeInteger(value[field]) || Number(value[field]) < 0)) {
+      throw new Error(`Teti Task ${field} is invalid.`);
+    }
+  }
+  if (Number(value.viewedAttentionRevision ?? 0) > Number(value.attentionRevision ?? 0)) {
+    throw new Error("Teti Task viewed attention revision exceeds the latest revision.");
+  }
+  validateLatestAttentionChange(value.latestAttentionChange, Number(value.attentionRevision ?? 0));
   if (value.safeErrorCode !== undefined
     && (typeof value.safeErrorCode !== "string" || !/^[A-Z0-9_]{1,64}$/.test(value.safeErrorCode))) {
     throw new Error("Teti Task transport safe error code is invalid.");
@@ -334,6 +381,7 @@ function validateRecord(value: unknown): asserts value is CollaborationTaskTrans
       && (value.direction !== "outgoing" || value.request.executionMode !== "long_horizon"))) {
     throw new Error("Teti Task long-horizon ownership boundary is invalid.");
   }
+  validateApplicationDeliveryOwnership(value as unknown as CollaborationTaskTransportRecord);
   if (Array.isArray(value.sentArtifactIds)
     && value.sentArtifactIds.some((artifactId) =>
       !(value.artifacts as CollaborationTaskTransportRecord["artifacts"] | undefined)
@@ -345,6 +393,34 @@ function validateRecord(value: unknown): asserts value is CollaborationTaskTrans
       !(value.artifacts as CollaborationTaskTransportRecord["artifacts"] | undefined)
         ?.some((artifact) => artifact.artifactId === artifactId))) {
     throw new Error("Teti Task acknowledged Artifact identity is invalid.");
+  }
+}
+
+function validateApplicationDeliveryOwnership(record: CollaborationTaskTransportRecord): void {
+  const attemptHasInvalidOwner = record.applicationDeliveryAttempts?.some((item) =>
+    item.kind === "status" ? record.direction !== "incoming" : record.direction !== "outgoing"
+  );
+  const failureHasInvalidOwner = record.applicationDeliveryFailures?.some((item) =>
+    item.kind === "request"
+      ? record.direction !== "outgoing"
+      : item.kind === "status"
+        ? record.direction !== "incoming"
+        : record.direction !== "outgoing"
+  );
+  const receiptHasInvalidOwner = record.applicationReceiptOutbox?.some((receipt) =>
+    receipt.taskId !== record.request.taskId
+    || receipt.requesterTetiId !== record.request.requesterTetiId
+    || receipt.targetTetiId !== record.request.targetTetiId
+    || (receipt.kind === "status" ? record.direction !== "outgoing" : record.direction !== "incoming")
+  );
+  if (attemptHasInvalidOwner || failureHasInvalidOwner || receiptHasInvalidOwner
+    || (record.statusAcknowledgedRevision !== undefined && record.direction !== "incoming")
+    || (record.inputAcknowledgedAt !== undefined && record.direction !== "outgoing")
+    || ((record.cancelControlId !== undefined
+        || record.cancelRequestedAt !== undefined
+        || record.cancelAcknowledgedAt !== undefined)
+      && record.direction !== "outgoing")) {
+    throw new Error("Teti Task application delivery ownership boundary is invalid.");
   }
 }
 
@@ -447,6 +523,96 @@ function validateArtifactDeliveryAttempts(value: unknown): void {
     requireTimestamp(item.lastSentAt, "Teti Task Artifact attempt lastSentAt");
     requireTimestamp(item.nextRetryAt, "Teti Task Artifact attempt nextRetryAt");
   }
+}
+
+function validateApplicationDeliveryAttempts(value: unknown): void {
+  if (value === undefined) return;
+  if (!Array.isArray(value) || value.length > 8) {
+    throw new Error("Teti Task application delivery attempts are invalid.");
+  }
+  const keys = new Set<string>();
+  for (const item of value) {
+    if (!isRecord(item)) throw new Error("Teti Task application delivery attempts are invalid.");
+    rejectUnknownKeys(
+      item,
+      ["kind", "referenceId", "attempts", "lastSentAt", "nextRetryAt"],
+      "Teti Task application delivery attempt"
+    );
+    const key = `${String(item.kind)}:${String(item.referenceId)}`;
+    if (!isApplicationDeliveryKind(item.kind)
+      || typeof item.referenceId !== "string"
+      || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(item.referenceId)
+      || keys.has(key)
+      || !Number.isSafeInteger(item.attempts)
+      || Number(item.attempts) < 1) {
+      throw new Error("Teti Task application delivery attempts are invalid.");
+    }
+    keys.add(key);
+    requireTimestamp(item.lastSentAt, "Teti Task application attempt lastSentAt");
+    requireTimestamp(item.nextRetryAt, "Teti Task application attempt nextRetryAt");
+  }
+}
+
+function validateApplicationDeliveryFailures(value: unknown): void {
+  if (value === undefined) return;
+  if (!Array.isArray(value) || value.length > 8) {
+    throw new Error("Teti Task application delivery failures are invalid.");
+  }
+  const keys = new Set<string>();
+  for (const item of value) {
+    if (!isRecord(item)) throw new Error("Teti Task application delivery failures are invalid.");
+    rejectUnknownKeys(
+      item,
+      ["kind", "referenceId", "failedAt", "safeErrorCode"],
+      "Teti Task application delivery failure"
+    );
+    const key = `${String(item.kind)}:${String(item.referenceId)}`;
+    if ((item.kind !== "request" && !isApplicationDeliveryKind(item.kind))
+      || typeof item.referenceId !== "string"
+      || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(item.referenceId)
+      || keys.has(key)
+      || typeof item.safeErrorCode !== "string"
+      || !/^[A-Z0-9_]{1,64}$/.test(item.safeErrorCode)) {
+      throw new Error("Teti Task application delivery failures are invalid.");
+    }
+    keys.add(key);
+    requireTimestamp(item.failedAt, "Teti Task application failure failedAt");
+  }
+}
+
+function validateLatestAttentionChange(value: unknown, attentionRevision: number): void {
+  if (value === undefined) return;
+  if (!isRecord(value)) throw new Error("Teti Task latest attention change is invalid.");
+  rejectUnknownKeys(
+    value,
+    ["revision", "kind", "occurredAt", "stageIndex", "safeErrorCode"],
+    "Teti Task latest attention change"
+  );
+  if (!Number.isSafeInteger(value.revision)
+    || Number(value.revision) < 0
+    || Number(value.revision) > attentionRevision
+    || ![
+      "status_updated", "delivery_failed", "delivery_recovered", "input_received",
+      "stage_started", "stage_completed", "stage_failed", "pause_requested", "cancel_requested",
+      "paused", "resumed",
+      "renewed", "completed", "failed", "rejected", "canceled", "expired"
+    ].includes(String(value.kind))) {
+    throw new Error("Teti Task latest attention change is invalid.");
+  }
+  requireTimestamp(value.occurredAt, "Teti Task latest attention occurredAt");
+  if (value.stageIndex !== undefined
+    && (!Number.isSafeInteger(value.stageIndex) || Number(value.stageIndex) < 1
+      || Number(value.stageIndex) > LONG_HORIZON_LIMITS.maximumStages)) {
+    throw new Error("Teti Task latest attention stage is invalid.");
+  }
+  if (value.safeErrorCode !== undefined
+    && (typeof value.safeErrorCode !== "string" || !/^[A-Z0-9_]{1,64}$/.test(value.safeErrorCode))) {
+    throw new Error("Teti Task latest attention error is invalid.");
+  }
+}
+
+function isApplicationDeliveryKind(value: unknown): boolean {
+  return value === "status" || value === "input" || value === "control";
 }
 
 function requireTimestamp(value: unknown, label: string): void {
