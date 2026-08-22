@@ -43,7 +43,7 @@ test("Passport settings show the local Teti name and nine-character ID", () => {
   assert.ok(viewModel.settings.buildTimestamp.length > 0);
 });
 
-test("Passport settings show the Runtime-observed Network protocol and service versions", () => {
+test("Passport settings hide local Network configuration while showing Runtime versions", () => {
   const passport = emptyPassportSnapshot();
   const viewModel = toPassportViewModel({
     passport,
@@ -58,7 +58,7 @@ test("Passport settings show the Runtime-observed Network protocol and service v
     }
   });
 
-  assert.equal(viewModel.settings.showLocalDevelopmentNetworkSwitch, true);
+  assert.equal(viewModel.settings.showLocalDevelopmentNetworkSwitch, false);
   assert.equal(viewModel.settings.networkVersionLabel, "Protocol 1 · Service 0.1.8");
 });
 
@@ -123,7 +123,7 @@ test("unknown, disabled, and stale remote Passport states use truthful product c
   assert.deepEqual(viewModel.connections.map((item) => item.passport.note), [
     "正在获取对方 AI Passport 状态",
     "对方未分享 AI Passport",
-    "AI Passport 已过期"
+    "正在等待对端刷新 AI Passport"
   ]);
 });
 

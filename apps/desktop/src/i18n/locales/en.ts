@@ -172,7 +172,7 @@ export const EN_MESSAGES = {
       localCompute: "Local compute",
       overflow: "{count} more {entity}",
       notes: {
-        stale: "AI Passport has expired",
+        stale: "Waiting for the peer to refresh AI Passport",
         disabled: "The other Teti isn’t sharing its AI Passport",
         unknown: "Getting the other Teti’s AI Passport status",
         empty: "No AI Passport"
@@ -198,7 +198,7 @@ export const EN_MESSAGES = {
       modes: { image: "Image", text: "Text" },
       availability: {
         available: "Available",
-        stale: "Data expired",
+        stale: "Waiting for peer refresh",
         unavailable: "Unavailable",
         unknown: "Unable to confirm"
       },
@@ -206,7 +206,7 @@ export const EN_MESSAGES = {
       resetAt: "Resets {date}",
       agent: {
         versionNotShared: "Version not shared",
-        informationStale: "Information expired",
+        informationStale: "Waiting for peer refresh",
         callable: "Callable",
         running: "Running",
         installedUnknown: "Installed · Status unknown",

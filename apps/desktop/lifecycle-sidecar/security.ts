@@ -33,7 +33,7 @@ export function sanitizeUnknownError(error: unknown, fallbackCode: LifecycleErro
   return result;
 }
 
-export function redactSecretLikeText(text: string): string {
+export function redactSecretLikeText(text: string, maximumLength = 300): string {
   return text
     .replace(/password=[^\s]+/gi, "password=[redacted]")
     .replace(/token=[^\s]+/gi, "token=[redacted]")
@@ -41,7 +41,7 @@ export function redactSecretLikeText(text: string): string {
     .replace(/credential[s]?=[^\s]+/gi, "credentials=[redacted]")
     .replace(/authorization:[^\n\r]+/gi, "authorization:[redacted]")
     .replace(/private[-_ ]?key[^\s]*/gi, "private-key[redacted]")
-    .slice(0, 300);
+    .slice(0, maximumLength);
 }
 
 function classifyError(message: string, fallbackCode: LifecycleErrorCode): LifecycleErrorCode {

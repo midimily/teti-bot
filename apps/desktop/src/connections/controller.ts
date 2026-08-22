@@ -32,6 +32,7 @@ export interface PeerConnectionClient {
   request(query: string): Promise<PeerConnectionCommandResult>;
   accept(requestId: string): Promise<PeerConnectionMutationResult>;
   reject(requestId: string): Promise<PeerConnectionMutationResult>;
+  requestPassportRefresh?(requestId: string): Promise<void>;
 }
 
 export interface PeerConnectionCommandResult {
@@ -286,6 +287,16 @@ export class PeerConnectionController {
     this.touch();
     if (options.notify !== false) this.onChange();
     void this.notchWindow.setMode("connection_detail", "peer-details-open").catch(() => undefined);
+    void this.client.requestPassportRefresh?.(requestId).catch((error) => {
+      this.diagnostic({
+        level: "warn",
+        event: "connection-passport-refresh-failed",
+        fields: {
+          state: "failed",
+          reason: readStableErrorCode(error) ?? "unknown"
+        }
+      });
+    });
   }
 
   async resizeDetails(height: number): Promise<void> {
@@ -581,6 +592,10 @@ export class BridgePeerConnectionClient implements PeerConnectionClient {
     const result = await this.bridge.request("connection.reject", { requestId }) as PeerConnectionResult;
     return mutationResult(result, requestId, "Rejected");
   }
+
+  async requestPassportRefresh(requestId: string): Promise<void> {
+    await this.bridge.request("connection.passport.refresh", { requestId });
+  }
 }
 
 export class MockPeerConnectionClient implements PeerConnectionClient {
@@ -602,6 +617,8 @@ export class MockPeerConnectionClient implements PeerConnectionClient {
       publicProfile: { platform: "macOS" }
     };
   }
+
+  async requestPassportRefresh(_requestId: string): Promise<void> {}
 
   async request(query: string): Promise<PeerConnectionCommandResult> {
     const identity = await this.resolve(query);

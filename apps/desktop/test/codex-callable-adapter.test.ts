@@ -146,6 +146,18 @@ test("Codex image Connector fixes the app-server runner and accepts only image m
     schemaVersion: 1,
     error: { code: "CODEX_IMAGE_PROTOCOL_LIMIT" }
   })), "ADAPTER_IMAGE_PROTOCOL_LIMIT");
+  assert.equal(connector.classifyFailure(JSON.stringify({
+    schemaVersion: 1,
+    error: { code: "CODEX_IMAGE_INITIALIZE_TIMEOUT" }
+  })), "ADAPTER_UPSTREAM_FAILED");
+  assert.equal(connector.classifyFailure(JSON.stringify({
+    schemaVersion: 1,
+    error: { code: "CODEX_IMAGE_THREAD_START_TIMEOUT" }
+  })), "ADAPTER_UPSTREAM_FAILED");
+  assert.equal(connector.classifyFailure(JSON.stringify({
+    schemaVersion: 1,
+    error: { code: "CODEX_IMAGE_TURN_START_TIMEOUT" }
+  })), "ADAPTER_UPSTREAM_FAILED");
   assert.equal(connector.classifyFailure("not-json"), "ADAPTER_EXIT_NONZERO");
   assert.equal(parseRunnerFailureCode(JSON.stringify({
     schemaVersion: 1,

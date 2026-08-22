@@ -172,7 +172,7 @@ export const ZH_HANS_MESSAGES = {
       localCompute: "本地算力",
       overflow: "另有 {count} 个 {entity}",
       notes: {
-        stale: "AI Passport 已过期",
+        stale: "正在等待对端刷新 AI Passport",
         disabled: "对方未分享 AI Passport",
         unknown: "正在获取对方 AI Passport 状态",
         empty: "暂无 AI Passport"
@@ -198,7 +198,7 @@ export const ZH_HANS_MESSAGES = {
       modes: { image: "图片", text: "文本" },
       availability: {
         available: "可用",
-        stale: "数据已过期",
+        stale: "等待对端刷新",
         unavailable: "暂不可用",
         unknown: "暂时无法确认"
       },
@@ -206,7 +206,7 @@ export const ZH_HANS_MESSAGES = {
       resetAt: "{date} 重置",
       agent: {
         versionNotShared: "版本未共享",
-        informationStale: "信息已过期",
+        informationStale: "等待对端刷新",
         callable: "可调用",
         running: "运行中",
         installedUnknown: "已安装 · 状态未知",

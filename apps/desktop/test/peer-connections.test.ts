@@ -73,13 +73,15 @@ test("controller starts with the connect panel idle and opens it only through th
   assert.equal(controller.snapshot.connectPanel.messageCode, undefined);
 });
 
-test("confirmed peer details persist in controller state and Escape returns to the list row", () => {
-  const { controller } = makeHarness();
+test("confirmed peer details persist, request Passport refresh, and Escape returns to the list row", async () => {
+  const { controller, client } = makeHarness();
   const connection = confirmedConnection("detail-peer");
   controller.syncPassportConnections([connection]);
   controller.open();
 
   controller.openDetails(connection.requestId);
+  await flushPromises();
+  assert.deepEqual(client.passportRefreshCalls, [connection.requestId]);
   assert.equal(controller.snapshot.expandedRequestId, connection.requestId);
   assert.equal(controller.snapshot.open, true);
   assert.equal(controller.handleEscape(), true);
@@ -531,7 +533,7 @@ function makeHarness(
   controller: PeerConnectionController;
   scheduler: ControlledScheduler;
   invoker: RecordingTauriInvoker;
-  client: PeerConnectionClient & { requestCalls: string[] };
+  client: PeerConnectionClient & { requestCalls: string[]; passportRefreshCalls?: string[] };
 } {
   const scheduler = new ControlledScheduler();
   const invoker = new RecordingTauriInvoker();
@@ -552,7 +554,7 @@ function makeHarness(
     controller,
     scheduler,
     invoker,
-    client: client as PeerConnectionClient & { requestCalls: string[] }
+    client: client as PeerConnectionClient & { requestCalls: string[]; passportRefreshCalls?: string[] }
   };
 }
 
@@ -672,6 +674,7 @@ interface TestPeerConnectionClient extends PeerConnectionClient {
 
 class StaticPeerConnectionClient implements TestPeerConnectionClient {
   readonly requestCalls: string[] = [];
+  readonly passportRefreshCalls: string[] = [];
   readonly connections: PassportConnectionSnapshot[];
   private readonly requestResult: TestCommandResult;
 
@@ -687,6 +690,10 @@ class StaticPeerConnectionClient implements TestPeerConnectionClient {
   async request(query: string): Promise<PeerConnectionCommandResult> {
     this.requestCalls.push(query);
     return this.requestResult;
+  }
+
+  async requestPassportRefresh(requestId: string): Promise<void> {
+    this.passportRefreshCalls.push(requestId);
   }
 
   async accept(requestId: string): Promise<PeerConnectionMutationResult> {

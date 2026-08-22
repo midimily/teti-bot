@@ -12,7 +12,7 @@ import type { LocalPathPlatform } from "../../../core/application/local-path.ts"
 export const CODEX_IMAGE_CONNECTOR = {
   connectorId: "openai.codex.imagegen",
   childAgentId: "codex",
-  connectorRevision: 2,
+  connectorRevision: 3,
   capabilityIds: ["image-editing"],
   timeoutMs: 10 * 60 * 1_000,
   cancelGraceMs: 1_000,
@@ -115,6 +115,10 @@ export class CodexImageConnector implements AgentConnector {
         return "ADAPTER_IMAGE_SERVER_EXITED";
       case "CODEX_IMAGE_COMPLETION_TIMEOUT":
         return "ADAPTER_IMAGE_GENERATION_TIMEOUT";
+      case "CODEX_IMAGE_INITIALIZE_TIMEOUT":
+      case "CODEX_IMAGE_THREAD_START_TIMEOUT":
+      case "CODEX_IMAGE_TURN_START_TIMEOUT":
+        return "ADAPTER_UPSTREAM_FAILED";
       case "CODEX_IMAGE_REQUEST_FAILED":
         return "ADAPTER_UPSTREAM_FAILED";
       case "CODEX_IMAGE_PROTOCOL_LIMIT":

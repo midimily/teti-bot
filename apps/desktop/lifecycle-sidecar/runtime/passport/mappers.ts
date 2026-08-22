@@ -119,23 +119,24 @@ export function mapRemoteAiStatus(
   now: Date
 ): RemotePassportSnapshot {
   if (!snapshot) return { state: "unknown", resources: [], agents: [], capabilities: [], bindings: [], computeOffers: [] };
+  const effectiveExpiresAt = snapshot.validUntil ?? snapshot.expiresAt;
+  const expired = now.getTime() >= Date.parse(effectiveExpiresAt);
   if (snapshot.sharing === "disabled") {
     return {
-      state: "disabled",
+      state: expired ? "stale" : "disabled",
       resources: [],
       agents: [],
       capabilities: [],
       bindings: [],
       computeOffers: [],
       generatedAt: snapshot.generatedAt,
-      expiresAt: snapshot.expiresAt,
+      expiresAt: effectiveExpiresAt,
       receivedAt: snapshot.receivedAt
     };
   }
-  const expired = now.getTime() >= Date.parse(snapshot.expiresAt);
   return {
     state: expired ? "stale" : "fresh",
-    resources: snapshot.tools.map((tool) => mapRemoteToolResource(tool, snapshot.expiresAt, expired)),
+    resources: snapshot.tools.map((tool) => mapRemoteToolResource(tool, effectiveExpiresAt, expired)),
     agents: snapshot.schemaVersion === 4 || snapshot.schemaVersion === 3
       ? snapshot.agents.map((agent) => mapRemoteCallableAgent(agent, expired))
       : snapshot.schemaVersion === 2
@@ -151,7 +152,7 @@ export function mapRemoteAiStatus(
       ? snapshot.computeOffers.map((offer) => structuredClone(offer))
       : [],
     generatedAt: snapshot.generatedAt,
-    expiresAt: snapshot.expiresAt,
+    expiresAt: effectiveExpiresAt,
     receivedAt: snapshot.receivedAt
   };
 }

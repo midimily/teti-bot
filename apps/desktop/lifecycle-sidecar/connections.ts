@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { createHash } from "node:crypto";
 import { normalizeTetiPublicIdCode } from "../../../core/identity/public-id.ts";
 import type { TetiAccountStorage } from "../../../core/account/storage.ts";
 import { FileTetiAccountStorage } from "../../../core/account/storage.ts";
@@ -100,6 +101,11 @@ import {
   type PeerProtocolCapabilityStore
 } from "./runtime/passport/peer-capabilities.ts";
 import {
+  FileRemotePassportStore,
+  MemoryRemotePassportStore,
+  type RemotePassportStore
+} from "./runtime/passport/remote-passports.ts";
+import {
   isArchivedNetworkRelationship,
   networkRelationshipDocumentFingerprint,
   projectNetworkRelationshipRecovery
@@ -147,8 +153,9 @@ export const CHATMAIL_HEARTBEAT_RETRY_DELAYS_MS = [
   60_000,
   5 * 60_000
 ] as const;
-const AI_STATUS_SYNC_INTERVAL_MS = 10 * 60 * 1_000;
-const AI_STATUS_TTL_MS = 30 * 60 * 1_000;
+export const AI_STATUS_SELF_CHECK_INTERVAL_MS = 60_000;
+export const AI_STATUS_TTL_MS = 5 * 60 * 1_000;
+export const AI_STATUS_DELIVERY_RETRY_DELAYS_MS = [5_000, 15_000, 30_000, 60_000] as const;
 const PEER_PROFILE_CACHE_TTL_MS = 15 * 60 * 1_000;
 const TETI_TASK_ATTACHMENT_FILENAME_PATTERN = /^(?:teti-task-)?[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}\.(?:png|jpe?g)$/i;
 const TETI_TASK_ARTIFACT_FILENAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\.teti-artifact\.json$/;
@@ -175,6 +182,7 @@ export interface PeerConnectionService {
   refreshPeerProfiles?(): Promise<PeerProfileRefreshResult>;
   accept(requestId: string): Promise<PeerConnectionResult>;
   reject(requestId: string): Promise<PeerConnectionResult>;
+  requestPassportRefresh?(requestId: string, reason?: PassportRefreshReason): Promise<void>;
   block?(requestId: string): Promise<PeerConnectionResult>;
   revoke?(requestId: string): Promise<PeerConnectionResult>;
   getPassportSharing(): Promise<PassportSharingPolicy>;
@@ -259,6 +267,7 @@ interface PeerConnectionRuntimeOptions {
   getLocalCallableAgents?: () => CallableAgent[];
   getLocalComputeOffers?: () => AgentComputeOffer[];
   peerProtocolCapabilities?: PeerProtocolCapabilityStore;
+  remotePassportStore?: RemotePassportStore;
   taskTransportStore?: TaskTransportStore;
   taskIdFactory?: () => string;
   taskAttachmentStore?: FileTaskAttachmentStore;
@@ -268,7 +277,17 @@ interface PeerConnectionRuntimeOptions {
   relationshipService?: TetiNetworkRelationshipService;
   allowLegacyRelationshipAuthorityForTests?: true;
   onHeartbeatDeliveryDiagnostic?: (diagnostic: ChatmailHeartbeatDeliveryDiagnostic) => void;
+  onPassportDiagnostic?: (event: string, diagnostic: Record<string, unknown>) => void;
 }
+
+export type PassportRefreshReason =
+  | "startup"
+  | "connection_confirmed"
+  | "peer_online"
+  | "details_opened"
+  | "snapshot_missing"
+  | "snapshot_mismatch"
+  | "manual";
 
 export interface ChatmailHeartbeatDeliveryDiagnostic {
   result: "failed" | "recovered";
@@ -282,6 +301,19 @@ export interface ChatmailHeartbeatDeliveryDiagnostic {
 interface ChatmailHeartbeatRetryState {
   attempt: number;
   nextAttemptAt: number;
+}
+
+interface AiStatusDeliveryRetryState {
+  signature: string;
+  attempt: number;
+  nextAttemptAt: number;
+}
+
+interface AiStatusDeliveryInFlight {
+  signature: string;
+  messageId: number;
+  queuedAt: number;
+  attempt: number;
 }
 
 export class PeerConnectionRuntime implements PeerConnectionService {
@@ -302,10 +334,12 @@ export class PeerConnectionRuntime implements PeerConnectionService {
   private readonly getLocalCallableAgents: () => CallableAgent[];
   private readonly getLocalComputeOffers: () => AgentComputeOffer[];
   private readonly peerProtocolCapabilities: PeerProtocolCapabilityStore;
+  private readonly remotePassportStore: RemotePassportStore;
   private readonly relationshipService?: TetiNetworkRelationshipService;
   private readonly onHeartbeatDeliveryDiagnostic: (
     diagnostic: ChatmailHeartbeatDeliveryDiagnostic
   ) => void;
+  private readonly onPassportDiagnostic: (event: string, diagnostic: Record<string, unknown>) => void;
   private readonly heartbeatSent = new Map<string, string>();
   private readonly heartbeatReceived = new Map<string, string>();
   private readonly heartbeatRetries = new Map<string, ChatmailHeartbeatRetryState>();
@@ -313,6 +347,13 @@ export class PeerConnectionRuntime implements PeerConnectionService {
   private readonly forcedHeartbeats = new Set<string>();
   private readonly protocolBootstrapResponses = new Set<string>();
   private readonly aiStatusSent = new Map<string, { at: string; signature: string }>();
+  private readonly aiStatusRetries = new Map<string, AiStatusDeliveryRetryState>();
+  private readonly aiStatusDeliveryInFlight = new Map<string, AiStatusDeliveryInFlight>();
+  private readonly forcedAiStatus = new Map<string, string>();
+  private readonly localPassportLeases = new Map<string, NonNullable<TetiPresencePayload["passportLease"]>>();
+  private readonly passportRefreshRequests = new Map<string, { requestedAt: string; reason: PassportRefreshReason }>();
+  private readonly deliveredPassportRefreshRequests = new Map<string, string>();
+  private readonly observedPassportRefreshRequests = new Map<string, string>();
   private readonly remoteAiStatus = new Map<string, RemoteAiStatusSnapshot>();
   private readonly identityCache = new Map<string, TetiIdentity>();
   private readonly identityRefreshedAt = new Map<string, number>();
@@ -323,6 +364,7 @@ export class PeerConnectionRuntime implements PeerConnectionService {
   private settingsQueue: Promise<void> = Promise.resolve();
   private pendingAiStatusBroadcast: PassportSharingPolicy | null = null;
   private aiStatusBroadcastQueued = false;
+  private lastAiStatusCheckAt = 0;
 
   constructor(options: PeerConnectionRuntimeOptions) {
     if (!options.relationshipService && options.allowLegacyRelationshipAuthorityForTests !== true) {
@@ -340,9 +382,15 @@ export class PeerConnectionRuntime implements PeerConnectionService {
     this.getLocalComputeOffers = options.getLocalComputeOffers ?? (() => []);
     this.peerProtocolCapabilities = options.peerProtocolCapabilities
       ?? new MemoryPeerProtocolCapabilityStore();
+    this.remotePassportStore = options.remotePassportStore ?? new MemoryRemotePassportStore();
     this.relationshipService = options.relationshipService;
     this.onHeartbeatDeliveryDiagnostic = options.onHeartbeatDeliveryDiagnostic
       ?? ((diagnostic) => writeRuntimeDiagnostic("chatmail.presence-delivery", { ...diagnostic }));
+    this.onPassportDiagnostic = options.onPassportDiagnostic
+      ?? ((event, diagnostic) => writeRuntimeDiagnostic(`passport.${event}`, {
+        platform: process.platform,
+        ...diagnostic
+      }));
     this.messagingAdapter = new ChatmailConnectionMessagingAdapter(this.chatmailAdapter);
     this.connectionManager = new TetiConnectionManager({
       accountStorage: this.accountStorage,
@@ -679,6 +727,22 @@ export class PeerConnectionRuntime implements PeerConnectionService {
     });
   }
 
+  requestPassportRefresh(
+    requestId: string,
+    reason: PassportRefreshReason = "manual"
+  ): Promise<void> {
+    return this.serial(async () => {
+      await this.ensureReady();
+      const id = requireRequestId(requestId);
+      const connection = (await this.connectionStorage.loadAll()).find(
+        (item) => item.requestId === id && this.isAuthorizedConnection(item)
+      );
+      if (!connection) throw new Error("A confirmed Teti connection is required to refresh Passport.");
+      this.queuePassportRefreshRequest(connection, reason);
+      await this.sendDueHeartbeats();
+    });
+  }
+
   block(requestId: string): Promise<PeerConnectionResult> {
     return this.mutateNetworkRelationship(requireRequestId(requestId), "block");
   }
@@ -873,9 +937,15 @@ export class PeerConnectionRuntime implements PeerConnectionService {
         const latest = this.pendingAiStatusBroadcast;
         this.pendingAiStatusBroadcast = null;
         if (!latest) return;
-        await this.broadcastAiStatus(latest);
+        await this.broadcastAiStatus(latest, true, "sharing_changed");
         if (!hasPassportSharingFields(latest)) this.aiStatusSent.clear();
-      }).catch(() => undefined).finally(() => {
+      }).catch((error) => {
+        this.reportPassportDiagnostic("broadcast_failed", {
+          result: "failed",
+          code: readErrorCode(error) ?? "PASSPORT_BROADCAST_FAILED",
+          message: redactSecretLikeText(error instanceof Error ? error.message : String(error))
+        });
+      }).finally(() => {
         this.aiStatusBroadcastQueued = false;
         const latest = this.pendingAiStatusBroadcast;
         if (latest) this.scheduleAiStatusBroadcast(latest);
@@ -978,6 +1048,10 @@ export class PeerConnectionRuntime implements PeerConnectionService {
     if (isNetworkRelationshipConfirmed(projected) && !wasConfirmed) {
       this.protocolBootstrapResponses.delete(projected.requestId);
       this.forceHeartbeat(projected.requestId);
+      this.forceAiStatus(projected.requestId, "connection_confirmed");
+      this.queuePassportRefreshRequest(projected, "connection_confirmed");
+    } else if (!isNetworkRelationshipConfirmed(projected)) {
+      await this.removeRemotePassport(projected.requestId, projected.remoteTetiId, document.state);
     }
     this.forceHeartbeatAfterTransportBootstrap(
       projected.requestId,
@@ -1029,8 +1103,33 @@ export class PeerConnectionRuntime implements PeerConnectionService {
 
   private forceHeartbeat(requestId: string): void {
     this.heartbeatRetries.delete(requestId);
-    this.heartbeatSent.delete(requestId);
     this.forcedHeartbeats.add(requestId);
+  }
+
+  private forceAiStatus(requestId: string, reason: string): void {
+    this.forcedAiStatus.set(requestId, reason);
+  }
+
+  private queuePassportRefreshRequest(
+    connection: TetiConnectionRecord,
+    reason: PassportRefreshReason
+  ): void {
+    const existing = this.passportRefreshRequests.get(connection.requestId);
+    const now = this.now();
+    if (!existing
+      || existing.reason !== reason
+      || now.getTime() - Date.parse(existing.requestedAt) >= AI_STATUS_SELF_CHECK_INTERVAL_MS) {
+      this.passportRefreshRequests.set(connection.requestId, {
+        requestedAt: now.toISOString(),
+        reason
+      });
+      this.reportPassportDiagnostic("refresh_requested", {
+        result: existing ? "requeued" : "queued",
+        peerTetiId: connection.remoteTetiId,
+        reason
+      });
+    }
+    this.forceHeartbeat(connection.requestId);
   }
 
   private mutateNetworkRelationship(
@@ -1069,6 +1168,38 @@ export class PeerConnectionRuntime implements PeerConnectionService {
     const account = await this.requireAccount();
     await this.startIo?.(account.chatmailAccountId);
     await this.removeLocalIdentityConnections();
+    const connections = await this.connectionStorage.loadAll();
+    const authorized = new Map(
+      connections
+        .filter((connection) => this.isAuthorizedConnection(connection))
+        .map((connection) => [connection.requestId, connection] as const)
+    );
+    try {
+      const persisted = await this.remotePassportStore.list();
+      let restored = 0;
+      let pruned = 0;
+      for (const entry of persisted) {
+        const connection = authorized.get(entry.requestId);
+        if (!connection || connection.remoteTetiId !== entry.remoteTetiId) {
+          await this.remotePassportStore.remove(entry.requestId);
+          pruned += 1;
+          continue;
+        }
+        this.remoteAiStatus.set(entry.requestId, structuredClone(entry.snapshot));
+        restored += 1;
+      }
+      this.reportPassportDiagnostic("cache_loaded", { result: "success", restored, pruned });
+    } catch (error) {
+      this.reportPassportDiagnostic("cache_load_failed", {
+        result: "failed",
+        code: readErrorCode(error) ?? "PASSPORT_CACHE_LOAD_FAILED",
+        message: redactSecretLikeText(error instanceof Error ? error.message : String(error))
+      });
+    }
+    for (const connection of authorized.values()) {
+      this.forceAiStatus(connection.requestId, "startup");
+      this.queuePassportRefreshRequest(connection, "startup");
+    }
     this.ready = true;
   }
 
@@ -1171,7 +1302,7 @@ export class PeerConnectionRuntime implements PeerConnectionService {
           passportSchemaVersions: payload.passportSchemaVersions,
           observedAt
         });
-        if (changed) this.aiStatusSent.delete(connection.requestId);
+        if (changed) this.forceAiStatus(connection.requestId, "protocol_changed");
         if (!this.protocolBootstrapResponses.has(connection.requestId)) {
           // The first valid peer hello proves the receiver is ready. Reply in
           // the same poll even when an earlier delivery observation is still
@@ -1179,6 +1310,23 @@ export class PeerConnectionRuntime implements PeerConnectionService {
           // version checking.
           this.protocolBootstrapResponses.add(connection.requestId);
           this.forceHeartbeat(connection.requestId);
+        }
+      }
+      if (payload.passportLease) {
+        await this.observeRemotePassportLease(connection, payload.passportLease, observedAt);
+      }
+      if (payload.passportRefreshRequestedAt) {
+        const previousRequest = this.observedPassportRefreshRequests.get(connection.requestId);
+        if (payload.passportRefreshRequestedAt !== previousRequest) {
+          this.observedPassportRefreshRequests.set(
+            connection.requestId,
+            payload.passportRefreshRequestedAt
+          );
+          this.forceAiStatus(connection.requestId, "peer_request");
+          this.reportPassportDiagnostic("refresh_request_received", {
+            result: "accepted",
+            peerTetiId: connection.remoteTetiId
+          });
         }
       }
       return true;
@@ -1189,9 +1337,57 @@ export class PeerConnectionRuntime implements PeerConnectionService {
       const payload = envelope.payload as AiStatusSyncPayload;
       const existing = this.remoteAiStatus.get(connection.requestId);
       if (!existing || shouldReplaceRemoteAiStatus(existing, payload)) {
-        this.remoteAiStatus.set(connection.requestId, {
+        const observedAt = validReceivedHeartbeatTimestamp(receivedAt, this.now());
+        const receivedMs = Date.parse(observedAt);
+        const priorValidUntil = existing?.validUntil
+          ? Date.parse(existing.validUntil)
+          : Number.NaN;
+        const snapshot: RemoteAiStatusSnapshot = {
           ...structuredClone(payload),
-          receivedAt: receivedAt ?? this.now().toISOString()
+          receivedAt: existing && Date.parse(existing.receivedAt) > receivedMs
+            ? existing.receivedAt
+            : observedAt,
+          validUntil: new Date(Math.max(
+            receivedMs + AI_STATUS_TTL_MS,
+            Number.isFinite(priorValidUntil) ? priorValidUntil : 0
+          )).toISOString(),
+          contentHash: aiStatusContentHash(payload),
+          leaseCheckedAt: payload.generatedAt,
+          leaseReceivedAt: observedAt
+        };
+        this.remoteAiStatus.set(connection.requestId, snapshot);
+        try {
+          await this.remotePassportStore.upsert({
+            requestId: connection.requestId,
+            remoteTetiId: connection.remoteTetiId,
+            snapshot
+          });
+          this.reportPassportDiagnostic("received", {
+            result: "persisted",
+            peerTetiId: connection.remoteTetiId,
+            schemaVersion: payload.schemaVersion,
+            validForSeconds: AI_STATUS_TTL_MS / 1_000
+          });
+        } catch (error) {
+          this.reportPassportDiagnostic("cache_save_failed", {
+            result: "failed",
+            peerTetiId: connection.remoteTetiId,
+            code: readErrorCode(error) ?? "PASSPORT_CACHE_SAVE_FAILED",
+            message: redactSecretLikeText(error instanceof Error ? error.message : String(error))
+          });
+        }
+        if (this.passportRefreshRequests.delete(connection.requestId)) {
+          this.deliveredPassportRefreshRequests.delete(connection.requestId);
+          this.reportPassportDiagnostic("refresh_completed", {
+            result: "success",
+            peerTetiId: connection.remoteTetiId
+          });
+        }
+      } else {
+        this.reportPassportDiagnostic("received", {
+          result: "ignored_older",
+          peerTetiId: connection.remoteTetiId,
+          schemaVersion: payload.schemaVersion
         });
       }
       return true;
@@ -1400,12 +1596,18 @@ export class PeerConnectionRuntime implements PeerConnectionService {
         && now.getTime() - Date.parse(previous) < HEARTBEAT_INTERVAL_MS) continue;
       const timestamp = now.toISOString();
       try {
+        const lease = this.localPassportLeases.get(connection.requestId);
+        const refreshRequest = this.passportRefreshRequests.get(connection.requestId);
         const delivery = await this.applicationManager.sendPresence(connection.requestId, {
           status: "alpha-heartbeat",
           timestamp,
           collaborationProtocolEpoch: TETI_COLLABORATION_PROTOCOL_EPOCH,
           taskProtocolVersions: [...TETI_SUPPORTED_TASK_PROTOCOL_VERSIONS],
-          passportSchemaVersions: [...TETI_SUPPORTED_PASSPORT_SCHEMA_VERSIONS]
+          passportSchemaVersions: [...TETI_SUPPORTED_PASSPORT_SCHEMA_VERSIONS],
+          ...(lease ? { passportLease: structuredClone(lease) } : {}),
+          ...(refreshRequest
+            ? { passportRefreshRequestedAt: refreshRequest.requestedAt }
+            : {})
         });
         this.heartbeatSent.set(connection.requestId, timestamp);
         sent += 1;
@@ -1442,6 +1644,16 @@ export class PeerConnectionRuntime implements PeerConnectionService {
   }
 
   private recordHeartbeatDeliverySuccess(connection: TetiConnectionRecord): void {
+    const refreshRequest = this.passportRefreshRequests.get(connection.requestId);
+    if (refreshRequest
+      && this.deliveredPassportRefreshRequests.get(connection.requestId) !== refreshRequest.requestedAt) {
+      this.deliveredPassportRefreshRequests.set(connection.requestId, refreshRequest.requestedAt);
+      this.reportPassportDiagnostic("refresh_request_delivery", {
+        result: "delivered",
+        peerTetiId: connection.remoteTetiId,
+        reason: refreshRequest.reason
+      });
+    }
     const recovered = this.heartbeatRetries.get(connection.requestId);
     this.heartbeatRetries.delete(connection.requestId);
     if (!recovered) return;
@@ -1475,19 +1687,109 @@ export class PeerConnectionRuntime implements PeerConnectionService {
       ...(code ? { code } : {}),
       message: redactSecretLikeText(error instanceof Error ? error.message : String(error))
     });
+    const refreshRequest = this.passportRefreshRequests.get(connection.requestId);
+    if (refreshRequest) {
+      this.reportPassportDiagnostic("refresh_request_delivery", {
+        result: "failed",
+        peerTetiId: connection.remoteTetiId,
+        reason: refreshRequest.reason,
+        attempt,
+        nextRetryMs,
+        ...(code ? { code } : {})
+      });
+    }
+  }
+
+  private async observeRemotePassportLease(
+    connection: TetiConnectionRecord,
+    lease: NonNullable<TetiPresencePayload["passportLease"]>,
+    observedAt: string
+  ): Promise<void> {
+    const snapshot = this.remoteAiStatus.get(connection.requestId);
+    const observedMs = Date.parse(observedAt);
+    const nowMs = this.now().getTime();
+    let ignoredReason: string | undefined;
+    if (!snapshot) ignoredReason = "snapshot_missing";
+    else if (snapshot.contentHash !== lease.contentHash) ignoredReason = "hash_mismatch";
+    else if (nowMs - observedMs > AI_STATUS_TTL_MS) ignoredReason = "delivery_stale";
+    else if (snapshot.leaseCheckedAt
+      && Date.parse(lease.checkedAt) <= Date.parse(snapshot.leaseCheckedAt)) {
+      ignoredReason = "replayed";
+    }
+    if (ignoredReason || !snapshot) {
+      if (ignoredReason === "snapshot_missing" || ignoredReason === "hash_mismatch") {
+        this.queuePassportRefreshRequest(
+          connection,
+          ignoredReason === "snapshot_missing" ? "snapshot_missing" : "snapshot_mismatch"
+        );
+      }
+      if (ignoredReason !== "replayed") {
+        this.reportPassportDiagnostic("lease_ignored", {
+          result: ignoredReason ?? "snapshot_missing",
+          peerTetiId: connection.remoteTetiId
+        });
+      }
+      return;
+    }
+    const proposedValidUntil = observedMs + AI_STATUS_TTL_MS;
+    const currentValidUntil = snapshot.validUntil ? Date.parse(snapshot.validUntil) : Number.NaN;
+    const renewed: RemoteAiStatusSnapshot = {
+      ...snapshot,
+      validUntil: new Date(Math.max(
+        proposedValidUntil,
+        Number.isFinite(currentValidUntil) ? currentValidUntil : 0
+      )).toISOString(),
+      leaseCheckedAt: lease.checkedAt,
+      leaseReceivedAt: observedAt
+    };
+    this.remoteAiStatus.set(connection.requestId, renewed);
+    try {
+      await this.remotePassportStore.upsert({
+        requestId: connection.requestId,
+        remoteTetiId: connection.remoteTetiId,
+        snapshot: renewed
+      });
+      this.reportPassportDiagnostic("lease_renewed", {
+        result: "persisted",
+        peerTetiId: connection.remoteTetiId,
+        validForSeconds: AI_STATUS_TTL_MS / 1_000
+      });
+    } catch (error) {
+      this.reportPassportDiagnostic("cache_save_failed", {
+        result: "failed",
+        peerTetiId: connection.remoteTetiId,
+        code: readErrorCode(error) ?? "PASSPORT_CACHE_SAVE_FAILED",
+        message: redactSecretLikeText(error instanceof Error ? error.message : String(error))
+      });
+    }
   }
 
   private async sendDueAiStatus(force = false): Promise<number> {
-    const policy = await this.passportSharing.load().catch(() => null);
+    const nowMs = this.now().getTime();
+    const retryDue = [...this.aiStatusRetries.values()].some((retry) => nowMs >= retry.nextAttemptAt);
+    if (!force
+      && this.forcedAiStatus.size === 0
+      && !retryDue
+      && nowMs - this.lastAiStatusCheckAt < AI_STATUS_SELF_CHECK_INTERVAL_MS) return 0;
+    const policy = await this.passportSharing.load().catch((error) => {
+      this.reportPassportDiagnostic("check_failed", {
+        result: "failed",
+        code: readErrorCode(error) ?? "PASSPORT_POLICY_LOAD_FAILED",
+        message: redactSecretLikeText(error instanceof Error ? error.message : String(error))
+      });
+      return null;
+    });
     if (!policy) return 0;
-    return this.broadcastAiStatus(policy, force);
+    return this.broadcastAiStatus(policy, force, force ? "forced" : "scheduled_check");
   }
 
   private async broadcastAiStatus(
     policy: PassportSharingPolicy,
-    force = true
+    forceAll = true,
+    trigger = "explicit"
   ): Promise<number> {
     const now = this.now();
+    this.lastAiStatusCheckAt = now.getTime();
     const sharing = hasPassportSharingFields(policy) ? "enabled" : "disabled";
     const tools = policy.resourceSummary
       ? this.getLocalAiTools().map((tool) => ({
@@ -1511,7 +1813,7 @@ export class PeerConnectionRuntime implements PeerConnectionService {
           capabilities.some((capability) => capability.id === offer.capability)
         )
       : [];
-    const snapshotSignature = JSON.stringify({ sharing, tools, agents, capabilities, bindings, computeOffers });
+    const snapshotContent = { sharing, tools, agents, capabilities, bindings, computeOffers };
     let sent = 0;
     for (const connection of await this.connectionStorage.loadAll()) {
       if (!this.isAuthorizedConnection(connection)) continue;
@@ -1523,13 +1825,35 @@ export class PeerConnectionRuntime implements PeerConnectionService {
       );
       if (peerCapability?.collaborationProtocolEpoch !== TETI_COLLABORATION_PROTOCOL_EPOCH
         || !supportsCurrentTaskProtocol(peerCapability.taskProtocolVersions)
-        || !schemaVersion) continue;
-      const signature = JSON.stringify({ schemaVersion, snapshot: snapshotSignature });
+        || !schemaVersion) {
+        this.forcedAiStatus.delete(connection.requestId);
+        continue;
+      }
+      const signature = aiStatusContentHash({ schemaVersion, ...snapshotContent });
       const previous = this.aiStatusSent.get(connection.requestId);
-      if (!force
-        && previous
-        && previous.signature === signature
-        && now.getTime() - Date.parse(previous.at) < AI_STATUS_SYNC_INTERVAL_MS) {
+      const forcedReason = forceAll ? trigger : this.forcedAiStatus.get(connection.requestId);
+      const retry = this.aiStatusRetries.get(connection.requestId);
+      const retryDue = Boolean(retry
+        && retry.signature === signature
+        && now.getTime() >= retry.nextAttemptAt);
+      const retryPending = Boolean(retry
+        && retry.signature === signature
+        && now.getTime() < retry.nextAttemptAt);
+      const changed = !previous || previous.signature !== signature;
+      this.localPassportLeases.set(connection.requestId, {
+        schemaVersion: 1,
+        contentHash: signature,
+        checkedAt: now.toISOString(),
+        validForSeconds: 300
+      });
+      this.forceHeartbeat(connection.requestId);
+      if (retryPending && !forcedReason) continue;
+      if (!forcedReason && !changed && !retryDue) {
+        continue;
+      }
+      const inFlight = this.aiStatusDeliveryInFlight.get(connection.requestId);
+      if (inFlight) {
+        if (inFlight.signature !== signature) this.forceAiStatus(connection.requestId, "content_changed");
         continue;
       }
       const callablePassportPayload: ComputePassportAiStatusSyncPayload = {
@@ -1544,20 +1868,176 @@ export class PeerConnectionRuntime implements PeerConnectionService {
         computeOffers: structuredClone(computeOffers)
       };
       try {
-        await this.applicationManager.sendAiStatusSync(
+        const delivery = await this.applicationManager.sendAiStatusSync(
           connection.requestId,
           callablePassportPayload
         );
-        this.aiStatusSent.set(connection.requestId, {
-          at: callablePassportPayload.generatedAt,
-          signature
+        const attempt = retry?.signature === signature ? retry.attempt + 1 : 1;
+        this.aiStatusDeliveryInFlight.set(connection.requestId, {
+          signature,
+          messageId: delivery.messageId,
+          queuedAt: now.getTime(),
+          attempt
         });
+        this.forcedAiStatus.delete(connection.requestId);
+        this.reportPassportDiagnostic("send_queued", {
+          result: "queued",
+          peerTetiId: connection.remoteTetiId,
+          schemaVersion,
+          payloadBytes: Buffer.byteLength(JSON.stringify(callablePassportPayload), "utf8"),
+          attempt,
+          trigger: forcedReason ?? (changed ? "content_changed" : "retry")
+        });
+        if (this.chatmailAdapter.waitForDelivery) {
+          const account = await this.requireAccount();
+          this.observeAiStatusDelivery(
+            connection,
+            account.chatmailAccountId,
+            callablePassportPayload.generatedAt,
+            signature
+          );
+        } else {
+          this.recordAiStatusDeliverySuccess(
+            connection,
+            callablePassportPayload.generatedAt,
+            signature,
+            "unavailable"
+          );
+        }
         sent += 1;
-      } catch {
-        // Optional status sharing must not break peer presence or polling.
+      } catch (error) {
+        this.recordAiStatusDeliveryFailure(connection, signature, error, now);
       }
     }
+    this.reportPassportDiagnostic("check", {
+      result: sent > 0 ? "changed_or_forced" : "unchanged",
+      trigger,
+      sent
+    });
     return sent;
+  }
+
+  private observeAiStatusDelivery(
+    connection: TetiConnectionRecord,
+    accountId: number,
+    generatedAt: string,
+    signature: string
+  ): void {
+    const inFlight = this.aiStatusDeliveryInFlight.get(connection.requestId);
+    if (!inFlight || inFlight.signature !== signature) return;
+    void this.chatmailAdapter.waitForDelivery!({ accountId, messageId: inFlight.messageId })
+      .then(() => this.recordAiStatusDeliverySuccess(
+        connection,
+        generatedAt,
+        signature,
+        "confirmed"
+      ))
+      .catch((error) => {
+        const current = this.aiStatusDeliveryInFlight.get(connection.requestId);
+        if (current?.signature === signature) {
+          this.recordAiStatusDeliveryFailure(connection, signature, error, this.now());
+        }
+      })
+      .finally(() => {
+        const current = this.aiStatusDeliveryInFlight.get(connection.requestId);
+        if (current?.signature === signature) {
+          this.aiStatusDeliveryInFlight.delete(connection.requestId);
+        }
+      });
+  }
+
+  private recordAiStatusDeliverySuccess(
+    connection: TetiConnectionRecord,
+    generatedAt: string,
+    signature: string,
+    observation: "confirmed" | "unavailable"
+  ): void {
+    const inFlight = this.aiStatusDeliveryInFlight.get(connection.requestId);
+    if (!inFlight || inFlight.signature !== signature) return;
+    const recovered = this.aiStatusRetries.get(connection.requestId);
+    this.aiStatusSent.set(connection.requestId, { at: generatedAt, signature });
+    this.aiStatusRetries.delete(connection.requestId);
+    this.forcedAiStatus.delete(connection.requestId);
+    if (observation === "unavailable") this.aiStatusDeliveryInFlight.delete(connection.requestId);
+    this.reportPassportDiagnostic("delivery", {
+      result: recovered ? "recovered" : "delivered",
+      peerTetiId: connection.remoteTetiId,
+      attempt: inFlight?.attempt ?? 1,
+      observation,
+      ...(inFlight ? { latencyMs: Math.max(0, this.now().getTime() - inFlight.queuedAt) } : {})
+    });
+  }
+
+  private recordAiStatusDeliveryFailure(
+    connection: TetiConnectionRecord,
+    signature: string,
+    error: unknown,
+    observedAt: Date
+  ): void {
+    const inFlight = this.aiStatusDeliveryInFlight.get(connection.requestId);
+    const previous = this.aiStatusRetries.get(connection.requestId);
+    const attempt = inFlight?.signature === signature
+      ? inFlight.attempt
+      : previous?.signature === signature
+        ? previous.attempt + 1
+        : 1;
+    const nextRetryMs = AI_STATUS_DELIVERY_RETRY_DELAYS_MS[
+      Math.min(attempt - 1, AI_STATUS_DELIVERY_RETRY_DELAYS_MS.length - 1)
+    ];
+    this.aiStatusRetries.set(connection.requestId, {
+      signature,
+      attempt,
+      nextAttemptAt: observedAt.getTime() + nextRetryMs
+    });
+    this.forcedAiStatus.delete(connection.requestId);
+    const code = readErrorCode(error);
+    this.reportPassportDiagnostic("delivery", {
+      result: "failed",
+      peerTetiId: connection.remoteTetiId,
+      attempt,
+      nextRetryMs,
+      ...(code ? { code } : {}),
+      message: redactSecretLikeText(error instanceof Error ? error.message : String(error))
+    });
+  }
+
+  private async removeRemotePassport(
+    requestId: string,
+    remoteTetiId: string,
+    reason: string
+  ): Promise<void> {
+    this.remoteAiStatus.delete(requestId);
+    this.localPassportLeases.delete(requestId);
+    this.passportRefreshRequests.delete(requestId);
+    this.deliveredPassportRefreshRequests.delete(requestId);
+    this.observedPassportRefreshRequests.delete(requestId);
+    this.aiStatusSent.delete(requestId);
+    this.aiStatusRetries.delete(requestId);
+    this.aiStatusDeliveryInFlight.delete(requestId);
+    this.forcedAiStatus.delete(requestId);
+    try {
+      await this.remotePassportStore.remove(requestId);
+      this.reportPassportDiagnostic("cache_removed", {
+        result: "success",
+        peerTetiId: remoteTetiId,
+        reason
+      });
+    } catch (error) {
+      this.reportPassportDiagnostic("cache_remove_failed", {
+        result: "failed",
+        peerTetiId: remoteTetiId,
+        reason,
+        code: readErrorCode(error) ?? "PASSPORT_CACHE_REMOVE_FAILED"
+      });
+    }
+  }
+
+  private reportPassportDiagnostic(event: string, diagnostic: Record<string, unknown>): void {
+    try {
+      this.onPassportDiagnostic(event, diagnostic);
+    } catch {
+      // Diagnostics must never own Passport transport state.
+    }
   }
 
   private async snapshot(
@@ -1784,6 +2264,15 @@ async function createDefaultPeerConnectionService(
     peerProtocolCapabilities: new FilePeerProtocolCapabilityStore(
       join(profile.storeDir, "peer-protocol-capabilities.json")
     ),
+    remotePassportStore: new FileRemotePassportStore(
+      join(profile.storeDir, "remote-passports.json"),
+      ({ backupPath, message }) => writeRuntimeDiagnostic("passport.cache_recovered", {
+        platform: process.platform,
+        result: "quarantined_corrupt_store",
+        backupCreated: Boolean(backupPath),
+        message: redactSecretLikeText(message)
+      })
+    ),
     taskAttachmentStore: options.taskAttachmentStore
       ?? new FileTaskAttachmentStore(join(profile.storeDir, "task-attachments")),
     workspaceStore: options.workspaceStore,
@@ -1863,6 +2352,33 @@ function shouldReplaceRemoteAiStatus(
     return incoming.schemaVersion > existing.schemaVersion;
   }
   return Date.parse(incoming.generatedAt) >= Date.parse(existing.generatedAt);
+}
+
+function aiStatusContentHash(value: unknown): string {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("Passport content must be an object.");
+  }
+  const {
+    generatedAt: _generatedAt,
+    expiresAt: _expiresAt,
+    receivedAt: _receivedAt,
+    validUntil: _validUntil,
+    contentHash: _contentHash,
+    leaseCheckedAt: _leaseCheckedAt,
+    leaseReceivedAt: _leaseReceivedAt,
+    tools,
+    ...content
+  } = value as Record<string, unknown>;
+  const normalizedTools = Array.isArray(tools)
+    ? tools.map((tool) => {
+        if (typeof tool !== "object" || tool === null || Array.isArray(tool)) return tool;
+        const { observedAt: _observedAt, ...stableTool } = tool as Record<string, unknown>;
+        return stableTool;
+      })
+    : tools;
+  return createHash("sha256")
+    .update(JSON.stringify({ ...content, tools: normalizedTools }), "utf8")
+    .digest("hex");
 }
 
 function isSameIdentity(

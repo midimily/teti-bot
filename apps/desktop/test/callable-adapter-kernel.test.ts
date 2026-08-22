@@ -23,6 +23,7 @@ import {
   DurableExecutionRegistry,
   MemoryExecutionHandleStore
 } from "../lifecycle-sidecar/runtime/callable/execution-store.ts";
+import type { DiagnosticValue } from "../lifecycle-sidecar/diagnostics.ts";
 
 const fixturePath = join(
   dirname(fileURLToPath(import.meta.url)),
@@ -255,14 +256,43 @@ test("a canceled execution removes an image Artifact that becomes stale during p
 });
 
 test("timeout escalates process termination and returns only a safe error", async () => {
-  const adapter = fakeConnector("hang", { timeoutMs: 50, cancelGraceMs: 10 });
-  const kernel = new TetiHostAgentKernel({ connectors: [adapter] });
+  const adapter = fakeConnector("hang", { timeoutMs: 500, cancelGraceMs: 10 });
+  const diagnostics: Array<{
+    event: string;
+    fields: Record<string, DiagnosticValue>;
+  }> = [];
+  const kernel = new TetiHostAgentKernel({
+    connectors: [adapter],
+    onDiagnostic: (event, fields) => diagnostics.push({
+      event,
+      fields: structuredClone(fields)
+    })
+  });
   const result = await authorizedExecute(kernel, task("timeout-task"));
 
   assert.equal(result.state, "failed");
   assert.equal(result.safeErrorCode, "ADAPTER_TIMEOUT");
   assert.equal(result.artifact, undefined);
   assert.equal(kernel.snapshot.activeTaskCount, 0);
+  const timeoutRequested = diagnostics.find((entry) =>
+    entry.event === "callable.adapter-execution"
+    && entry.fields.state === "timeout_requested"
+  );
+  const terminal = diagnostics.find((entry) =>
+    entry.event === "callable.adapter-execution"
+    && entry.fields.state === "failed"
+  );
+  assert.ok(timeoutRequested);
+  assert.ok(terminal);
+  assert.equal(terminal.fields.taskId, "timeout-task");
+  assert.equal(terminal.fields.connectorId, "test.fake-agent");
+  assert.equal(terminal.fields.timeoutMs, 500);
+  assert.equal(terminal.fields.executionStage, "process-execution");
+  assert.equal(Object.hasOwn(terminal.fields, "exitCode"), true);
+  assert.equal(String(terminal.fields.stderrTail).includes("must-not-log"), false);
+  assert.equal(String(terminal.fields.stderrTail).includes("jesse"), false);
+  assert.match(String(terminal.fields.stderrTail), /\[redacted\]/);
+  assert.match(String(terminal.fields.stderrTail), /\[user\]/);
   await kernel.shutdown();
 });
 

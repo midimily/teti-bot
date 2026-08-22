@@ -60,6 +60,18 @@ export interface TetiPresencePayload {
   taskProtocolVersions: [7];
   /** Explicit Passport capability; independent from the latest shared snapshot. */
   passportSchemaVersions: [4];
+  /**
+   * Lightweight proof that the sender re-checked an unchanged Passport.
+   * The receiver only renews a snapshot whose content hash matches.
+   */
+  passportLease?: {
+    schemaVersion: 1;
+    contentHash: string;
+    checkedAt: string;
+    validForSeconds: 300;
+  };
+  /** Requests a fresh full Passport without coupling connection state to sharing. */
+  passportRefreshRequestedAt?: string;
 }
 
 export type TetiKnownApplicationEnvelope =

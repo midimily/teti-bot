@@ -105,6 +105,14 @@ export type AiStatusSyncPayload =
 
 export type RemoteAiStatusSnapshot = AiStatusSyncPayload & {
   receivedAt: string;
+  /** Receiver-local expiry based on delivery time, resilient to peer clock skew. */
+  validUntil?: string;
+  /** Hash of the shareable content, excluding transport timestamps. */
+  contentHash?: string;
+  /** Latest sender-side content check accepted through a matching lease. */
+  leaseCheckedAt?: string;
+  /** Receiver-side timestamp for the accepted lease. */
+  leaseReceivedAt?: string;
 };
 
 export interface AiStatusSharingSettings {

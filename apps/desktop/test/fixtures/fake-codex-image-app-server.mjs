@@ -5,10 +5,19 @@ import { createInterface } from "node:readline";
 const imagePath = process.env.TETI_FAKE_CODEX_IMAGE_PATH;
 if (!imagePath?.startsWith("/")) process.exit(64);
 const resultBytes = boundedResultBytes(process.env.TETI_FAKE_CODEX_RESULT_BYTES);
+const hangStage = process.env.TETI_FAKE_CODEX_HANG_STAGE;
+const exitStage = process.env.TETI_FAKE_CODEX_EXIT_STAGE;
+if (process.env.TETI_FAKE_CODEX_STDERR) {
+  process.stderr.write(process.env.TETI_FAKE_CODEX_STDERR);
+}
 
 const lines = createInterface({ input: process.stdin, crlfDelay: Infinity, terminal: false });
 lines.on("line", (line) => {
   const message = JSON.parse(line);
+  if (message.method === hangStage) return;
+  if (message.method === exitStage) {
+    process.exit(0);
+  }
   if (message.method === "initialize") {
     respond(message.id, {
       userAgent: "fake-codex-image-app-server",

@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-import type {
-  CollaborationTaskSummarySnapshot,
-  CollaborationTaskTransportRecord,
-  SendCollaborationTaskInput
+import {
+  latestAvailableLongHorizonStageResultIndex,
+  type CollaborationTaskSummarySnapshot,
+  type CollaborationTaskTransportRecord,
+  type SendCollaborationTaskInput
 } from "../../../core/task/transport.ts";
 import { RecordingTauriInvoker } from "../src/platform/tauri-api.ts";
 import { createDesktopI18n } from "../src/i18n/index.ts";
@@ -737,6 +738,55 @@ test("delayed stage-two completion refreshes the visible requester state", async
   controller.dispose();
 });
 
+test("background refresh preserves each completed-stage eye indicator for requester and receiver", async () => {
+  for (const direction of ["outgoing", "incoming"] as const) {
+    const taskId = `stage-attention-${direction}`;
+    const client = new StageResultAttentionTaskClient();
+    client.seed(stageResultRecord(taskId, direction, 1, 1));
+    client.setUnreadSummary(taskId, direction, 1, false);
+    let scheduled: (() => void) | undefined;
+    const controller = new TaskController({
+      client,
+      tauri: new RecordingTauriInvoker(),
+      notchWindow: { setMode: async () => undefined } as never,
+      onChange: () => undefined,
+      schedule(callback) {
+        scheduled = callback;
+        return callback;
+      },
+      cancel(handle) {
+        if (scheduled === handle) scheduled = undefined;
+      }
+    });
+
+    controller.openInbox();
+    await controller.select(taskId);
+    controller.start();
+    await flushMicrotasks();
+    assert.equal(client.viewedCalls, 0);
+
+    client.seed(stageResultRecord(taskId, direction, 2, 1));
+    client.setUnreadSummary(taskId, direction, 2, true);
+    scheduled?.();
+    await flushMicrotasks();
+
+    assert.equal(
+      client.viewedCalls,
+      0,
+      `${direction} background polling must not acknowledge a newly completed stage`
+    );
+    assert.equal(controller.snapshot.summary.unreadStageResultCount, 1);
+    assert.equal(controller.snapshot.summary.tasks[0]?.hasUnreadStageResult, true);
+    assert.equal(controller.snapshot.selectedTask?.viewedStageResultIndex, 1);
+
+    controller.back();
+    await controller.select(taskId);
+    assert.equal(client.viewedCalls, 1, `${direction} explicit detail entry acknowledges the stage`);
+    assert.equal(controller.snapshot.summary.unreadStageResultCount, 0);
+    controller.dispose();
+  }
+});
+
 test("Task controller backs off repeated read failures and resets after recovery", async () => {
   const client = new RecoveringSummaryTaskClient(3);
   const delays: number[] = [];
@@ -1059,6 +1109,39 @@ class RecordingTaskClient implements TaskClient {
   }
 }
 
+class StageResultAttentionTaskClient extends RecordingTaskClient {
+  viewedCalls = 0;
+
+  setUnreadSummary(
+    taskId: string,
+    direction: "incoming" | "outgoing",
+    stageIndex: number,
+    unread: boolean
+  ): void {
+    this.summary.unreadStageResultCount = unread ? 1 : 0;
+    this.summary.tasks = [{
+      ...taskSummary("input_required"),
+      taskId,
+      direction,
+      executionMode: "long_horizon",
+      currentStageIndex: stageIndex,
+      artifactCount: stageIndex,
+      approval: "consumed",
+      hasUnreadStageResult: unread
+    }];
+  }
+
+  async markStageResultsViewed(): Promise<CollaborationTaskTransportRecord> {
+    this.viewedCalls += 1;
+    const record = await this.get();
+    record.viewedStageResultIndex = latestAvailableLongHorizonStageResultIndex(record);
+    this.seed(record);
+    this.summary.unreadStageResultCount = 0;
+    if (this.summary.tasks[0]) this.summary.tasks[0].hasUnreadStageResult = false;
+    return structuredClone(record);
+  }
+}
+
 class MemoryPreviewTaskClient extends RecordingTaskClient {
   readonly order: string[] = [];
   failPreviewApproval = false;
@@ -1300,6 +1383,55 @@ function longHorizonDetailRecord(taskId: string): CollaborationTaskTransportReco
       updatedAt: record.updatedAt
     }
   };
+  return record;
+}
+
+function stageResultRecord(
+  taskId: string,
+  direction: "incoming" | "outgoing",
+  stageCount: number,
+  viewedStageResultIndex: number
+): CollaborationTaskTransportRecord {
+  const record = longHorizonDetailRecord(taskId);
+  const artifacts = Array.from({ length: stageCount }, (_, index) => {
+    const stageIndex = index + 1;
+    return {
+      schemaVersion: 2 as const,
+      taskId,
+      artifactId: `${taskId}-artifact-${stageIndex}`,
+      parts: [{ kind: "text" as const, text: `Stage ${stageIndex} result` }],
+      createdAt: `2026-08-22T08:${String(stageIndex).padStart(2, "0")}:00.000Z`
+    };
+  });
+  const metadata = artifacts.map((artifact, index) => ({
+    artifactId: artifact.artifactId,
+    stageIndex: index + 1,
+    role: "intermediate" as const,
+    createdAt: artifact.createdAt
+  }));
+  record.direction = direction;
+  record.state = "input_required";
+  record.approval = "consumed";
+  record.artifacts = artifacts;
+  record.viewedStageResultIndex = viewedStageResultIndex;
+  if (direction === "incoming") {
+    record.longHorizon!.currentStageIndex = stageCount;
+    record.longHorizon!.artifacts = metadata;
+  } else {
+    delete record.longHorizon;
+    record.peerArtifactMetadata = metadata;
+    record.peerLongHorizon = {
+      schemaVersion: 1,
+      phase: "input_required",
+      currentStageIndex: stageCount,
+      workspaceRevision: stageCount,
+      completedUnits: stageCount,
+      totalUnits: 16,
+      progressMessage: `Stage ${stageCount} completed`,
+      continuationExpiresAt: record.request.expiresAt,
+      inputRequestId: `${taskId}-input-${stageCount}`
+    };
+  }
   return record;
 }
 

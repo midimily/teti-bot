@@ -27,6 +27,7 @@ switch (mode) {
     break;
 
   case "hang":
+    process.stderr.write("token=must-not-log C:\\Users\\jesse\\AppData\\Local\\Teti\\private.log\n");
     process.on("SIGTERM", () => undefined);
     keepAlive();
     break;

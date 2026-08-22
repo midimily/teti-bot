@@ -46,6 +46,10 @@ import {
   MemoryPeerProtocolCapabilityStore,
   type PeerProtocolCapabilityStore
 } from "../lifecycle-sidecar/runtime/passport/peer-capabilities.ts";
+import {
+  MemoryRemotePassportStore,
+  type RemotePassportStore
+} from "../lifecycle-sidecar/runtime/passport/remote-passports.ts";
 import { MemoryTaskTransportStore } from "../lifecycle-sidecar/runtime/tasks/store.ts";
 import { FileTaskAttachmentStore } from "../lifecycle-sidecar/runtime/tasks/attachments.ts";
 import type { TaskExecutionBridge } from "../lifecycle-sidecar/runtime/tasks/service.ts";
@@ -498,7 +502,7 @@ test("out-of-order schema 4 Passport snapshots keep the newest generation", asyn
   assert.equal(result.connections[0]?.remoteAiStatus?.generatedAt, "2026-07-27T04:00:00.000Z");
 });
 
-test("a dropped schema 4 Passport is retried without legacy fallback", async () => {
+test("a missing schema 4 Passport is recovered through the lightweight refresh handshake", async () => {
   let nowMs = Date.parse("2026-07-27T05:00:00.000Z");
   const now = () => new Date(nowMs);
   const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
@@ -521,12 +525,178 @@ test("a dropped schema 4 Passport is retried without legacy fallback", async () 
 
   nowMs += 10 * 60 * 1_000 + 1;
   await runtimeA.poll();
+  // The unchanged sender emits only a lease. A receiver without the matching
+  // full snapshot responds with an explicit refresh request.
+  await runtimeB.poll();
+  await runtimeA.poll();
   const retrySchemas = relay.peek(accountB.address)
     .map((message) => message.text ? parseApplicationEnvelope(message.text) : null)
     .filter((envelope) => envelope?.type === "teti.ai.status.sync")
     .map((envelope) => (envelope!.payload as { schemaVersion: number }).schemaVersion);
   assert.deepEqual(retrySchemas, [4]);
   assert.equal((await runtimeB.poll()).connections[0]?.remoteAiStatus?.schemaVersion, 4);
+});
+
+test("remote Passport persists across Runtime restart with a receiver-local five-minute validity window", async () => {
+  let nowMs = Date.parse("2026-07-27T05:30:00.000Z");
+  const now = () => new Date(nowMs);
+  const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
+  const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
+  const directory = new StaticDirectory([toIdentity(accountA), toIdentity(accountB)]);
+  const relay = new MemoryChatmailRelay();
+  const connectionsA = new MemoryTetiConnectionStorage();
+  const connectionsB = new MemoryTetiConnectionStorage();
+  const remotePassportsB = new MemoryRemotePassportStore();
+  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), directory, connectionsA, {
+    now,
+    passportSharing: new MemoryPassportSharingStore(resourceSharingPolicy(true)),
+    getLocalAiTools: () => [{ ...localCodexStatus(), observedAt: now().toISOString() }]
+  });
+  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), directory, connectionsB, {
+    now,
+    remotePassportStore: remotePassportsB
+  });
+
+  await confirmPeers(runtimeA, runtimeB, "beta00002");
+  const beforeRestart = (await runtimeB.list()).connections[0]!.remoteAiStatus!;
+  assert.equal(Date.parse(beforeRestart.validUntil!) - Date.parse(beforeRestart.receivedAt), 5 * 60 * 1_000);
+  assert.equal((await remotePassportsB.list()).length, 1);
+
+  nowMs += 30_000;
+  const restarted = await makeRuntime(accountB, relay.adapter(accountB.address), directory, connectionsB, {
+    now,
+    remotePassportStore: remotePassportsB
+  });
+  const restored = (await restarted.poll()).connections[0]!.remoteAiStatus!;
+  assert.equal(restored.generatedAt, beforeRestart.generatedAt);
+  assert.equal(restored.contentHash, beforeRestart.contentHash);
+});
+
+test("an unchanged Passport renews through Presence without resending the full snapshot", async () => {
+  let nowMs = Date.parse("2026-07-27T06:00:00.000Z");
+  const now = () => new Date(nowMs);
+  const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
+  const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
+  const directory = new StaticDirectory([toIdentity(accountA), toIdentity(accountB)]);
+  const relay = new MemoryChatmailRelay();
+  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), directory, undefined, {
+    now,
+    passportSharing: new MemoryPassportSharingStore(resourceSharingPolicy(true)),
+    getLocalAiTools: () => [{ ...localCodexStatus(), observedAt: now().toISOString() }]
+  });
+  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), directory, undefined, { now });
+
+  await confirmPeers(runtimeA, runtimeB, "beta00002");
+  const initial = (await runtimeB.list()).connections[0]!.remoteAiStatus!;
+  nowMs += 60_001;
+  await runtimeA.poll();
+  await runtimeA.poll();
+  const queuedFullSnapshots = relay.peek(accountB.address)
+    .filter((message) => applicationType(message) === "teti.ai.status.sync");
+  assert.equal(queuedFullSnapshots.length, 0);
+  const renewed = (await runtimeB.poll()).connections[0]!.remoteAiStatus!;
+  assert.equal(renewed.generatedAt, initial.generatedAt);
+  assert.ok(Date.parse(renewed.validUntil!) > Date.parse(initial.validUntil!));
+});
+
+test("a mismatched Passport lease cannot renew the persisted snapshot", async () => {
+  let nowMs = Date.parse("2026-07-27T06:15:00.000Z");
+  const now = () => new Date(nowMs);
+  const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
+  const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
+  const directory = new StaticDirectory([toIdentity(accountA), toIdentity(accountB)]);
+  const relay = new MemoryChatmailRelay();
+  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), directory, undefined, {
+    now,
+    passportSharing: new MemoryPassportSharingStore(resourceSharingPolicy(true))
+  });
+  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), directory, undefined, { now });
+
+  const connection = await confirmPeers(runtimeA, runtimeB, "beta00002");
+  const initial = (await runtimeB.list()).connections[0]!.remoteAiStatus!;
+  nowMs += 60_001;
+  relay.pushRaw(accountB.address, accountA.address, serializeApplicationEnvelope(createApplicationEnvelope({
+    type: "teti.presence",
+    messageId: "mismatched-passport-lease",
+    fromTetiId: accountA.id,
+    createdAt: now().toISOString(),
+    payload: {
+      status: "alpha-heartbeat",
+      timestamp: now().toISOString(),
+      collaborationProtocolEpoch: 2,
+      taskProtocolVersions: [7],
+      passportSchemaVersions: [4],
+      passportLease: {
+        schemaVersion: 1,
+        contentHash: "f".repeat(64),
+        checkedAt: now().toISOString(),
+        validForSeconds: 300
+      }
+    }
+  })));
+
+  const afterMismatch = (await runtimeB.poll()).connections.find(
+    (item) => item.requestId === connection.requestId
+  )!.remoteAiStatus!;
+  assert.equal(afterMismatch.validUntil, initial.validUntil);
+  assert.equal(afterMismatch.contentHash, initial.contentHash);
+});
+
+test("a one-minute Codex quota change sends a new full Passport", async () => {
+  let nowMs = Date.parse("2026-07-27T06:30:00.000Z");
+  const now = () => new Date(nowMs);
+  let remainingPercent = 42;
+  const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
+  const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
+  const directory = new StaticDirectory([toIdentity(accountA), toIdentity(accountB)]);
+  const relay = new MemoryChatmailRelay();
+  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), directory, undefined, {
+    now,
+    passportSharing: new MemoryPassportSharingStore(resourceSharingPolicy(true)),
+    getLocalAiTools: () => [{
+      ...localCodexStatus(),
+      quotas: [{ ...localCodexStatus().quotas[0]!, remainingPercent }]
+    }]
+  });
+  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), directory, undefined, { now });
+
+  await confirmPeers(runtimeA, runtimeB, "beta00002");
+  remainingPercent = 31;
+  nowMs += 60_001;
+  await runtimeA.poll();
+  const changed = (await runtimeB.poll()).connections[0]!.remoteAiStatus!;
+  assert.equal(changed.tools[0]?.quotas[0]?.remainingPercent, 31);
+  assert.equal(changed.generatedAt, now().toISOString());
+});
+
+test("Passport delivery failure is logged and retried on the short recovery schedule", async () => {
+  let nowMs = Date.parse("2026-07-27T07:00:00.000Z");
+  const now = () => new Date(nowMs);
+  const diagnostics: Array<{ event: string; diagnostic: Record<string, unknown> }> = [];
+  const accountA = makeAccount("teti_alpha0001", "alpha0001@mail.seep.im", 1);
+  const accountB = makeAccount("teti_beta00002", "beta00002@mail.seep.im", 2);
+  const directory = new StaticDirectory([toIdentity(accountA), toIdentity(accountB)]);
+  const relay = new MemoryChatmailRelay();
+  relay.failNextPassportDeliveriesFrom(accountA.address);
+  const runtimeA = await makeRuntime(accountA, relay.adapter(accountA.address), directory, undefined, {
+    now,
+    passportSharing: new MemoryPassportSharingStore(resourceSharingPolicy(true)),
+    onPassportDiagnostic: (event, diagnostic) => diagnostics.push({ event, diagnostic })
+  });
+  const runtimeB = await makeRuntime(accountB, relay.adapter(accountB.address), directory, undefined, { now });
+
+  await confirmPeers(runtimeA, runtimeB, "beta00002");
+  await flushBackgroundWork();
+  assert.ok(diagnostics.some(({ event, diagnostic }) =>
+    event === "delivery" && diagnostic.result === "failed" && diagnostic.nextRetryMs === 5_000
+  ));
+
+  nowMs += 5_001;
+  await runtimeA.poll();
+  await flushBackgroundWork();
+  assert.ok(diagnostics.some(({ event, diagnostic }) =>
+    event === "delivery" && diagnostic.result === "recovered"
+  ));
 });
 
 test("Runtime restart retains explicit Peer capability and immediately resends schema 4", async () => {
@@ -2389,6 +2559,8 @@ async function makeRuntime(
     getLocalAiTools?: () => AiToolStatusSnapshot[];
     getLocalCallableAgents?: () => CallableAgent[];
     peerProtocolCapabilities?: PeerProtocolCapabilityStore;
+    remotePassportStore?: RemotePassportStore;
+    onPassportDiagnostic?: (event: string, diagnostic: Record<string, unknown>) => void;
     taskTransportStore?: MemoryTaskTransportStore;
     taskAttachmentStore?: FileTaskAttachmentStore;
     workspaceStore?: FileCollaborationWorkspaceStore;
@@ -2614,6 +2786,9 @@ class MemoryChatmailRelay {
   private lastReceivedAtMs = Date.now();
   private deliveryBlocked = false;
   private deliveryWaitCalls = 0;
+  private readonly applicationTypes = new Map<number, string | undefined>();
+  private readonly messageSenders = new Map<number, string>();
+  private readonly passportDeliveryFailures = new Map<string, number>();
   private readonly deferredAttachments: boolean;
   private readonly hideAttachmentTextUntilDone: boolean;
   private readonly initialAttachmentDownloadState: "Available" | "Failure";
@@ -2640,10 +2815,22 @@ class MemoryChatmailRelay {
     return this.deliveryWaitCalls;
   }
 
+  failNextPassportDeliveriesFrom(fromAddress: string, count = 1): void {
+    this.passportDeliveryFailures.set(fromAddress, count);
+  }
+
   async waitForDelivery(messageId: number): Promise<ChatmailMessageStatus> {
     this.deliveryWaitCalls += 1;
     if (this.deliveryBlocked) {
       return new Promise<ChatmailMessageStatus>(() => undefined);
+    }
+    const sender = this.messageSenders.get(messageId);
+    const failures = sender ? this.passportDeliveryFailures.get(sender) ?? 0 : 0;
+    if (sender && failures > 0 && this.applicationTypes.get(messageId) === "teti.ai.status.sync") {
+      this.passportDeliveryFailures.set(sender, failures - 1);
+      const error = new Error("simulated Passport delivery failure") as Error & { code: string };
+      error.code = "CHATMAIL_DELIVERY_FAILED";
+      throw error;
     }
     return { messageId, state: 26 };
   }
@@ -2651,6 +2838,12 @@ class MemoryChatmailRelay {
   send(fromAddress: string, input: SendChatmailMessageInput): ChatmailSentMessage {
     this.recordEvent(fromAddress, "send");
     const messageId = this.nextMessageId++;
+    this.messageSenders.set(messageId, fromAddress);
+    this.applicationTypes.set(messageId, applicationType({
+      messageId,
+      chatId: messageId,
+      text: input.text
+    }));
     const queue = this.queues.get(input.peerAddress) ?? [];
     if (input.attachment) {
       this.attachmentSources.set(messageId, input.attachment.path);

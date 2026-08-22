@@ -2,6 +2,7 @@ import { chmod, copyFile, lstat, mkdtemp, readFile, readdir, realpath, rm } from
 import { tmpdir } from "node:os";
 import { isAbsolute, relative, resolve } from "node:path";
 import { join } from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import {
   CallableAdapterContractError,
   CallableAdapterOutputError,
@@ -23,6 +24,7 @@ import {
   type AgentComputeOffer,
   type AgentConnectorDescriptor,
   type ExecutionAuthority,
+  type ExecutionExit,
   type ExecutionSpec,
   type ExecutionTransportHandle,
   type ExecutionTransport,
@@ -41,6 +43,13 @@ import {
   type CallableAgent
 } from "../../../../../core/callability/types.ts";
 import { ProcessTransport } from "./transports/process.ts";
+import { parseCodexImageRunnerDiagnostic } from "./codex-image-diagnostics.ts";
+import {
+  sanitizeAdapterStderrTail,
+  writeRuntimeDiagnostic,
+  type DiagnosticValue,
+  type RuntimeDiagnosticSink
+} from "../../diagnostics.ts";
 import type { TaskAttachmentStore } from "../tasks/attachments.ts";
 import type { WorkspaceSnapshot } from "../../../../../core/workspace/types.ts";
 import type { TaskImagePart } from "../../../../../core/task/types.ts";
@@ -90,6 +99,7 @@ export interface TetiHostAgentKernelOptions {
   executionRegistry?: ExecutionHandleRegistry;
   memoryProvider?: ChildMemoryProvider;
   onCollaborationActiveChange?: (active: boolean) => void;
+  onDiagnostic?: RuntimeDiagnosticSink;
 }
 
 export class TetiHostAgentError extends Error {
@@ -151,6 +161,7 @@ export class TetiHostAgentKernel implements TetiHostAgent {
   private acceptingTasks = true;
   private shutdownPromise: Promise<void> | null = null;
   private readonly onCollaborationActiveChange: (active: boolean) => void;
+  private readonly onDiagnostic: RuntimeDiagnosticSink;
   private collaborationActive = false;
 
   constructor(options: TetiHostAgentKernelOptions = {}) {
@@ -175,6 +186,7 @@ export class TetiHostAgentKernel implements TetiHostAgent {
     this.executionRegistry = options.executionRegistry;
     this.memoryProvider = options.memoryProvider;
     this.onCollaborationActiveChange = options.onCollaborationActiveChange ?? (() => undefined);
+    this.onDiagnostic = options.onDiagnostic ?? writeRuntimeDiagnostic;
 
     for (const connector of options.connectors ?? []) this.registerConnector(connector);
   }
@@ -524,14 +536,39 @@ export class TetiHostAgentKernel implements TetiHostAgent {
     const descriptor = connector.descriptor;
     control.machine.start();
     const deadlineRemainingMs = Math.max(1, Date.parse(authority.executionDeadlineAt) - this.now().getTime());
+    const effectiveTimeoutMs = Math.min(descriptor.timeoutMs, deadlineRemainingMs);
+    const executionStartedAt = Date.now();
+    let executionStage = "prepare";
+    let executionExit: ExecutionExit | null = null;
+    let runnerStderrTail = "";
+    let output: BoundedProcessOutput | null = null;
+    this.diagnose("callable.adapter-execution", {
+      taskId: request.taskId,
+      connectorId: descriptor.connectorId,
+      timeoutMs: effectiveTimeoutMs,
+      executionStage,
+      state: "started",
+      exitCode: null,
+      stderrTail: ""
+    });
     const timeout = setTimeout(() => {
+      this.diagnose("callable.adapter-execution", {
+        taskId: request.taskId,
+        connectorId: descriptor.connectorId,
+        timeoutMs: effectiveTimeoutMs,
+        executionStage,
+        state: "timeout_requested",
+        exitCode: executionExit?.code ?? null,
+        stderrTail: sanitizeAdapterStderrTail(
+          runnerStderrTail || output?.readStderrTail() || ""
+        )
+      });
       this.requestTermination(control, "timeout", descriptor.connectorId);
-    }, Math.min(descriptor.timeoutMs, deadlineRemainingMs));
+    }, effectiveTimeoutMs);
     let workspacePath: string | null = null;
     let workspaceSnapshot: WorkspaceSnapshot | null = null;
     let workspaceContext: string | null = null;
     let temporaryWorkspace = false;
-    let output: BoundedProcessOutput | null = null;
     let leaseTimer: ReturnType<typeof setInterval> | null = null;
     let connectorContext: {
       taskId: string;
@@ -546,6 +583,7 @@ export class TetiHostAgentKernel implements TetiHostAgent {
 
     try {
       await this.ensurePreparedExecution(request, authority, connector);
+      executionStage = "workspace";
       const workspacePolicy = descriptor.workspacePolicy ?? "snapshot";
       if (workspacePolicy === "snapshot" || workspacePolicy === "bounded_context") {
         if (this.workspaceStore) {
@@ -600,6 +638,7 @@ export class TetiHostAgentKernel implements TetiHostAgent {
           return control.machine.fail("ADAPTER_PREPARE_FAILED");
         }
       }
+      executionStage = "connector-spec";
       const launchOutcome = await Promise.race([
         Promise.resolve(connector.createExecutionSpec(connectorContext)).then(
           (spec) => ({ type: "spec" as const, spec }),
@@ -623,6 +662,7 @@ export class TetiHostAgentKernel implements TetiHostAgent {
         validateExecutionSpec(launchOutcome.spec, connector);
         const transport = this.transports.get(connector.descriptor.transportKind);
         if (!transport) throw new Error("Execution Transport is unavailable.");
+        executionStage = "process-start";
         control.process = transport.start({
           spec: launchOutcome.spec,
           workspacePath
@@ -644,9 +684,32 @@ export class TetiHostAgentKernel implements TetiHostAgent {
       output = new BoundedProcessOutput(
         control.process,
         descriptor.maxOutputBytes,
-        () => this.requestTermination(control, "output_limit", descriptor.connectorId)
+        () => this.requestTermination(control, "output_limit", descriptor.connectorId),
+        descriptor.connectorId === "openai.codex.imagegen"
+          ? (diagnostic) => {
+              executionStage = diagnostic.stage;
+              if (diagnostic.stderrTail) {
+                runnerStderrTail = sanitizeAdapterStderrTail(diagnostic.stderrTail);
+              }
+              this.diagnose("callable.image-runner", {
+                taskId: request.taskId,
+                connectorId: descriptor.connectorId,
+                timeoutMs: effectiveTimeoutMs,
+                executionStage: diagnostic.stage,
+                state: diagnostic.state,
+                elapsedMs: diagnostic.elapsedMs,
+                exitCode: diagnostic.exitCode,
+                failureCode: diagnostic.failureCode,
+                stderrTail: diagnostic.stderrTail
+                  ? sanitizeAdapterStderrTail(diagnostic.stderrTail)
+                  : ""
+              });
+            }
+          : undefined
       );
+      executionStage = "process-input";
       await control.process.writeInput(transportInput);
+      executionStage = "process-execution";
 
       const processOutcome = await Promise.race([
         control.process.completion.then(
@@ -654,17 +717,23 @@ export class TetiHostAgentKernel implements TetiHostAgent {
           () => ({ type: "process_error" as const })
         ),
         control.termination.promise.then(async (reason) => {
-          await control.process!.terminate(descriptor.cancelGraceMs);
-          return { type: "terminated" as const, reason };
+          const exit = await control.process!.terminate(descriptor.cancelGraceMs).then(
+            () => control.process!.completion.catch(() => null),
+            () => null
+          );
+          return { type: "terminated" as const, reason, exit };
         })
       ]);
 
       if (processOutcome.type === "terminated") {
+        executionExit = processOutcome.exit;
         return this.finishTermination(control, processOutcome.reason);
       }
       if (processOutcome.type === "process_error") {
+        executionStage = "process-error";
         return control.machine.fail("ADAPTER_LAUNCH_FAILED");
       }
+      executionExit = processOutcome.exit;
       if (control.terminationReason) {
         return this.finishTermination(control, control.terminationReason);
       }
@@ -691,7 +760,9 @@ export class TetiHostAgentKernel implements TetiHostAgent {
         }
       }
       try {
+        executionStage = "artifact-decode";
         const artifact = connector.decodeArtifact?.(stdout, connectorContext) ?? stdout;
+        executionStage = "artifact-persist";
         const completedArtifact = typeof artifact === "string"
           ? artifact
           : workspacePath
@@ -786,6 +857,21 @@ export class TetiHostAgentKernel implements TetiHostAgent {
         }
       }
       const final = control.machine.snapshot;
+      const stderrTail = sanitizeAdapterStderrTail(
+        runnerStderrTail || output?.readStderrTail() || ""
+      );
+      this.diagnose("callable.adapter-execution", {
+        taskId: request.taskId,
+        connectorId: descriptor.connectorId,
+        timeoutMs: effectiveTimeoutMs,
+        executionStage,
+        state: final.state,
+        safeErrorCode: final.safeErrorCode,
+        elapsedMs: Math.max(0, Date.now() - executionStartedAt),
+        exitCode: executionExit?.code ?? null,
+        exitSignal: executionExit?.signal ?? null,
+        stderrTail
+      });
       await this.executionRegistry?.finish(
         request.taskId,
         authority.executionEpoch,
@@ -880,6 +966,14 @@ export class TetiHostAgentKernel implements TetiHostAgent {
       this.onCollaborationActiveChange(active);
     } catch {
       // Presence policy observation cannot own task execution.
+    }
+  }
+
+  private diagnose(event: string, fields: Record<string, DiagnosticValue>): void {
+    try {
+      this.onDiagnostic(event, fields);
+    } catch {
+      // Diagnostics must never own or interrupt Child Agent execution.
     }
   }
 
@@ -1092,16 +1186,26 @@ class BoundedProcessOutput {
   private readonly maxBytes: number;
   private readonly stdoutListener: (chunk: Buffer | string) => void;
   private readonly stderrListener: (chunk: Buffer | string) => void;
+  private readonly stderrDecoder = new StringDecoder("utf8");
+  private readonly onRunnerDiagnostic?: (
+    diagnostic: NonNullable<ReturnType<typeof parseCodexImageRunnerDiagnostic>>
+  ) => void;
+  private stderrLineBuffer = "";
+  private stderrTail = "";
   private byteLength = 0;
   private exceeded = false;
 
   constructor(
     process: ExecutionTransportHandle,
     maxBytes: number,
-    onLimit: () => void
+    onLimit: () => void,
+    onRunnerDiagnostic?: (
+      diagnostic: NonNullable<ReturnType<typeof parseCodexImageRunnerDiagnostic>>
+    ) => void
   ) {
     this.process = process;
     this.maxBytes = maxBytes;
+    this.onRunnerDiagnostic = onRunnerDiagnostic;
     this.stdoutListener = (chunk) => this.accept(chunk, true, onLimit);
     this.stderrListener = (chunk) => this.accept(chunk, false, onLimit);
     process.stdout.on("data", this.stdoutListener);
@@ -1113,9 +1217,19 @@ class BoundedProcessOutput {
     return new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(this.stdoutChunks));
   }
 
+  readStderrTail(): string {
+    return `${this.stderrTail}${this.stderrLineBuffer}`.slice(-4_096);
+  }
+
   dispose(): void {
     this.process.stdout.off("data", this.stdoutListener);
     this.process.stderr.off("data", this.stderrListener);
+    const remainder = this.stderrDecoder.end();
+    if (remainder) this.acceptStderrText(remainder);
+    if (this.stderrLineBuffer) {
+      this.appendStderrTail(this.stderrLineBuffer);
+      this.stderrLineBuffer = "";
+    }
   }
 
   private accept(chunk: Buffer | string, stdout: boolean, onLimit: () => void): void {
@@ -1128,7 +1242,34 @@ class BoundedProcessOutput {
       onLimit();
       return;
     }
-    if (stdout) this.stdoutChunks.push(buffer);
+    if (stdout) {
+      this.stdoutChunks.push(buffer);
+    } else {
+      this.acceptStderrText(this.stderrDecoder.write(buffer));
+    }
+  }
+
+  private acceptStderrText(text: string): void {
+    this.stderrLineBuffer += text;
+    let newline = this.stderrLineBuffer.indexOf("\n");
+    while (newline >= 0) {
+      const line = this.stderrLineBuffer.slice(0, newline).replace(/\r$/, "");
+      this.stderrLineBuffer = this.stderrLineBuffer.slice(newline + 1);
+      const diagnostic = this.onRunnerDiagnostic
+        ? parseCodexImageRunnerDiagnostic(line)
+        : null;
+      if (diagnostic) this.onRunnerDiagnostic?.(diagnostic);
+      else this.appendStderrTail(line);
+      newline = this.stderrLineBuffer.indexOf("\n");
+    }
+    if (this.stderrLineBuffer.length > 8_192) {
+      this.appendStderrTail(this.stderrLineBuffer.slice(0, -4_096));
+      this.stderrLineBuffer = this.stderrLineBuffer.slice(-4_096);
+    }
+  }
+
+  private appendStderrTail(value: string): void {
+    this.stderrTail = `${this.stderrTail}${this.stderrTail ? " " : ""}${value}`.slice(-4_096);
   }
 }
 

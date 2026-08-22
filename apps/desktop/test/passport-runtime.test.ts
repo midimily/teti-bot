@@ -38,6 +38,11 @@ test("remote Passport state distinguishes unknown, disabled, fresh, and stale wi
   const now = new Date("2026-07-22T00:10:00.000Z");
   assert.equal(mapRemoteAiStatus(undefined, now).state, "unknown");
   assert.equal(mapRemoteAiStatus(remoteStatus("disabled", "2026-07-22T00:20:00.000Z"), now).state, "disabled");
+  assert.equal(
+    mapRemoteAiStatus(remoteStatus("disabled", "2026-07-22T00:10:00.000Z"), now).state,
+    "stale",
+    "an expired last-known opt-out must become waiting-for-refresh, not a permanent sharing claim"
+  );
   assert.equal(mapRemoteAiStatus(remoteStatus("enabled", "2026-07-22T00:20:00.000Z"), now).state, "fresh");
   const stale = mapRemoteAiStatus(remoteStatus("enabled", "2026-07-22T00:10:00.000Z"), now);
   assert.equal(stale.state, "stale");

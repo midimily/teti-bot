@@ -4,6 +4,10 @@ import {
   CodexImageOutputError,
   persistCodexGeneratedImages
 } from "./codex-image-output.ts";
+import {
+  encodeCodexImageRunnerDiagnostic,
+  type CodexImageRunnerStage
+} from "./codex-image-diagnostics.ts";
 import { isSafeAbsoluteLocalPath } from "../../../../../core/application/local-path.ts";
 
 const MAX_INPUT_BYTES = 24 * 1024;
@@ -13,6 +17,8 @@ const MAX_INPUT_BYTES = 24 * 1024;
 const MAX_PROTOCOL_LINE_BYTES = 8 * 1024 * 1024;
 const MAX_IMAGE_RESULTS = 4;
 const DEFAULT_COMPLETION_TIMEOUT_MS = 8 * 60 * 1_000;
+const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
+const MAX_SERVER_STDERR_TAIL_BYTES = 2_048;
 
 const options = parseArguments(process.argv.slice(2));
 const prompt = await readStdin();
@@ -44,11 +50,14 @@ const pending = new Map<number, {
 }>();
 const completedItems: ProjectedCompletedItem[] = [];
 let hasImageResultSignal = false;
+let hasTurnCompletionSignal = false;
 let imageReadySignal: (() => void) | undefined;
 const imageReady = new Promise<void>((resolve) => { imageReadySignal = resolve; });
 let turnCompletion: ((value: unknown) => void) | undefined;
 let protocolFailed: ((error: Error) => void) | undefined;
 const protocolFailure = new Promise<never>((_resolve, reject) => { protocolFailed = reject; });
+let serverExitCode: number | null = null;
+let serverStderrTail: Buffer = Buffer.alloc(0);
 
 const lines = createInterface({ input: server.stdout, crlfDelay: Infinity, terminal: false });
 lines.on("line", (line) => {
@@ -90,6 +99,7 @@ lines.on("line", (line) => {
     }
   }
   if (message.method === "turn/completed" && isRecord(message.params)) {
+    hasTurnCompletionSignal = true;
     // Retain only the fields needed by the Artifact boundary. In particular,
     // imageGeneration.result is never kept after this line handler returns.
     turnCompletion?.(projectTurn(message.params.turn));
@@ -98,7 +108,13 @@ lines.on("line", (line) => {
 
 let stderrBytes = 0;
 server.stderr.on("data", (chunk: Buffer | string) => {
-  stderrBytes += Buffer.byteLength(chunk);
+  const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+  stderrBytes += buffer.byteLength;
+  serverStderrTail = appendBoundedTail(
+    serverStderrTail,
+    buffer,
+    MAX_SERVER_STDERR_TAIL_BYTES
+  );
   if (process.env.TETI_CODEX_IMAGE_DEBUG === "1" && stderrBytes <= MAX_PROTOCOL_LINE_BYTES) {
     process.stderr.write(chunk);
   }
@@ -106,16 +122,18 @@ server.stderr.on("data", (chunk: Buffer | string) => {
 });
 server.once("error", () => protocolFailed?.(runnerError("CODEX_IMAGE_SERVER_FAILED")));
 server.once("close", (code) => {
-  if (code !== 0) {
-    const error = runnerError("CODEX_IMAGE_SERVER_EXITED");
-    for (const waiter of pending.values()) waiter.reject(error);
-    pending.clear();
-    // imageGeneration.savedPath is the authoritative result candidate. Once
-    // observed, Teti can finish stabilizing and validating the local file even
-    // if app-server exits before its final turn notification.
-    if (!hasImageResultSignal) protocolFailed?.(error);
-  }
+  serverExitCode = code;
+  const error = runnerError("CODEX_IMAGE_SERVER_EXITED");
+  for (const waiter of pending.values()) waiter.reject(error);
+  pending.clear();
+  // imageGeneration.savedPath is the authoritative result candidate. Once
+  // observed, Teti can finish stabilizing and validating the local file even
+  // if app-server exits before its final turn notification. A clean early exit
+  // is still a failure: previously it left Windows requests pending until the
+  // outer Adapter timeout.
+  if (!hasImageResultSignal && !hasTurnCompletionSignal) protocolFailed?.(error);
 });
+server.stdin.once("error", () => protocolFailed?.(runnerError("CODEX_IMAGE_SERVER_FAILED")));
 
 const terminate = () => {
   if (!server.killed) server.kill("SIGTERM");
@@ -124,12 +142,12 @@ process.once("SIGTERM", terminate);
 process.once("SIGINT", terminate);
 
 try {
-  await request("initialize", {
-    clientInfo: { name: "teti-image-connector", title: "Teti", version: "0.4.0" },
+  await runStage("initialize", () => requestWithTimeout("initialize", {
+    clientInfo: { name: "teti-image-connector", title: "Teti", version: "0.5.3" },
     capabilities: { experimentalApi: true }
-  });
+  }, "CODEX_IMAGE_INITIALIZE_TIMEOUT"));
   notify("initialized", {});
-  const thread = await request("thread/start", {
+  const thread = await runStage("thread/start", () => requestWithTimeout("thread/start", {
     approvalPolicy: "never",
     approvalsReviewer: "user",
     baseInstructions: [
@@ -155,10 +173,10 @@ try {
         unified_exec: false
       }
     }
-  });
+  }, "CODEX_IMAGE_THREAD_START_TIMEOUT"));
   const threadId = readThreadId(thread);
   const completed = new Promise<unknown>((resolve) => { turnCompletion = resolve; });
-  await request("turn/start", {
+  await runStage("turn/start", () => requestWithTimeout("turn/start", {
     threadId,
     approvalPolicy: "never",
     cwd: options.workspace,
@@ -171,22 +189,28 @@ try {
         text: `$imagegen\n${prompt}\nReturn an actual edited/generated image based on the supplied image references.`
       }
     ]
-  });
-  const turn = await Promise.race<unknown>([
-    completed,
-    imageReady.then(() => null),
-    protocolFailure,
-    rejectAfter(completionTimeoutMs())
-  ]);
-  const result = collectResult([...completedItems, ...readTurnItems(turn)]);
-  const copied = await persistCodexGeneratedImages({
-    workspacePath: options.workspace,
-    savedPaths: result.savedPaths
+  }, "CODEX_IMAGE_TURN_START_TIMEOUT"));
+  const output = await runStage("image-result", async () => {
+    const turn = await withTimeout(
+      Promise.race<unknown>([
+        completed,
+        imageReady.then(() => null),
+        protocolFailure
+      ]),
+      completionTimeoutMs(),
+      "CODEX_IMAGE_COMPLETION_TIMEOUT"
+    );
+    const result = collectResult([...completedItems, ...readTurnItems(turn)]);
+    const copied = await persistCodexGeneratedImages({
+      workspacePath: options.workspace,
+      savedPaths: result.savedPaths
+    });
+    return { result, copied };
   });
   process.stdout.write(JSON.stringify({
     schemaVersion: 1,
-    text: result.text || "图片编辑已完成。",
-    images: copied
+    text: output.result.text || "图片编辑已完成。",
+    images: output.copied
   }));
   terminate();
 } catch (error) {
@@ -205,6 +229,14 @@ function request(method: string, params: unknown): Promise<unknown> {
     server.stdin.write(`${JSON.stringify({ id, method, params })}\n`, "utf8");
   });
   return Promise.race([response, protocolFailure]);
+}
+
+function requestWithTimeout(
+  method: string,
+  params: unknown,
+  timeoutCode: string
+): Promise<unknown> {
+  return withTimeout(request(method, params), requestTimeoutMs(), timeoutCode);
 }
 
 function notify(method: string, params: unknown): void {
@@ -321,11 +353,65 @@ function completionTimeoutMs(): number {
     : DEFAULT_COMPLETION_TIMEOUT_MS;
 }
 
-function rejectAfter(milliseconds: number): Promise<never> {
-  return new Promise((_resolve, reject) => {
-    const timer = setTimeout(() => reject(runnerError("CODEX_IMAGE_COMPLETION_TIMEOUT")), milliseconds);
+function requestTimeoutMs(): number {
+  const configured = Number(process.env.TETI_CODEX_IMAGE_REQUEST_TIMEOUT_MS);
+  return Number.isSafeInteger(configured) && configured >= 10 && configured <= DEFAULT_REQUEST_TIMEOUT_MS
+    ? configured
+    : DEFAULT_REQUEST_TIMEOUT_MS;
+}
+
+function withTimeout<T>(promise: Promise<T>, milliseconds: number, code: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(runnerError(code)), milliseconds);
     timer.unref();
   });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
+
+async function runStage<T>(stage: CodexImageRunnerStage, action: () => Promise<T>): Promise<T> {
+  const startedAt = Date.now();
+  emitStageDiagnostic(stage, "started", 0);
+  try {
+    const result = await action();
+    emitStageDiagnostic(stage, "completed", Date.now() - startedAt);
+    return result;
+  } catch (error) {
+    emitStageDiagnostic(stage, "failed", Date.now() - startedAt, safeFailureCode(error));
+    throw error;
+  }
+}
+
+function emitStageDiagnostic(
+  stage: CodexImageRunnerStage,
+  state: "started" | "completed" | "failed",
+  elapsedMs: number,
+  failureCode?: string
+): void {
+  const stderrTail = state === "failed" ? decodeServerStderrTail() : "";
+  process.stderr.write(`${encodeCodexImageRunnerDiagnostic({
+    schemaVersion: 1,
+    stage,
+    state,
+    elapsedMs,
+    exitCode: serverExitCode,
+    ...(failureCode ? { failureCode } : {}),
+    ...(stderrTail ? { stderrTail } : {})
+  })}\n`);
+}
+
+function appendBoundedTail(current: Buffer, chunk: Buffer, maximumBytes: number): Buffer {
+  if (chunk.byteLength >= maximumBytes) return chunk.subarray(chunk.byteLength - maximumBytes);
+  const combined = Buffer.concat([current, chunk]);
+  return combined.byteLength <= maximumBytes
+    ? combined
+    : combined.subarray(combined.byteLength - maximumBytes);
+}
+
+function decodeServerStderrTail(): string {
+  return new TextDecoder("utf-8").decode(serverStderrTail).slice(-2_048);
 }
 
 function runnerError(code: string): Error & { code: string } {

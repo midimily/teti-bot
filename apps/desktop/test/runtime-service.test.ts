@@ -228,6 +228,7 @@ test("peer Presence publishes atomically and transport failures never fabricate 
   let generation = 1;
   const peerIds = ["teti_peer00001", "teti_peer00002", "teti_peer00003"];
   const firstReads = new Map(peerIds.map((id) => [id, deferred<TetiNetworkPresenceReadResponse>()]));
+  const passportRefreshes: Array<{ requestId: string; reason?: string }> = [];
   const presenceController = {
     start() {},
     async stop() {},
@@ -251,7 +252,7 @@ test("peer Presence publishes atomically and transport failures never fabricate 
     dependencies: {
       async loadTetiAccount() { return createAccount(); },
       async synchronizeNetworkIdentity() { return createAccount(); },
-      async getPeerConnectionService() { return confirmedPeerService(peerIds); },
+      async getPeerConnectionService() { return confirmedPeerService(peerIds, passportRefreshes); },
       passportSharingStore: new MemoryPassportSharingStore(),
       codexUsageService: new FakeCodexUsageService(),
       presenceController
@@ -283,6 +284,7 @@ test("peer Presence publishes atomically and transport failures never fabricate 
     }));
     await drain();
     assert.deepEqual(await peerPresenceStates(runtime), ["offline", "online", "unavailable"]);
+    assert.deepEqual(passportRefreshes, [{ requestId: "req-presence-2", reason: "peer_online" }]);
 
     generation = 2;
     nowMs += 5_000;
@@ -607,7 +609,10 @@ test("Runtime shutdown owns the local Callable Adapter Kernel without exposing r
   assert.equal(kernelShutdownCalls, 1);
 });
 
-function confirmedPeerService(peerIds: readonly string[]): PeerConnectionService {
+function confirmedPeerService(
+  peerIds: readonly string[],
+  passportRefreshes?: Array<{ requestId: string; reason?: string }>
+): PeerConnectionService {
   let sharing = resourceSharingPolicy(false);
   const connections: PeerConnectionDto[] = peerIds.map((remoteTetiId, index) => ({
     requestId: `req-presence-${index + 1}`,
@@ -634,6 +639,9 @@ function confirmedPeerService(peerIds: readonly string[]): PeerConnectionService
     async poll() { return result(); },
     async accept() { return result(); },
     async reject() { return result(); },
+    async requestPassportRefresh(requestId, reason) {
+      passportRefreshes?.push({ requestId, reason });
+    },
     async getPassportSharing() { return { ...sharing }; },
     async setPassportSharing(policy) {
       sharing = { ...policy };

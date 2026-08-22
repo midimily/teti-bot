@@ -16,6 +16,10 @@ import {
   CodexImageOutputError,
   persistCodexGeneratedImages
 } from "../lifecycle-sidecar/runtime/callable/codex-image-output.ts";
+import {
+  parseCodexImageRunnerDiagnostic,
+  type CodexImageRunnerDiagnostic
+} from "../lifecycle-sidecar/runtime/callable/codex-image-diagnostics.ts";
 import { TetiHostAgentKernel } from "../lifecycle-sidecar/runtime/callable/kernel.ts";
 import { FileTaskAttachmentStore } from "../lifecycle-sidecar/runtime/tasks/attachments.ts";
 
@@ -131,6 +135,86 @@ macTest("Codex image runner projects savedPath from a result larger than two MiB
       true
     );
     assert.equal((await readFile(manifest.images[0]!.path)).subarray(0, 8).toString("hex"), "89504e470d0a1a0a");
+    const diagnostics = runnerDiagnostics(result.stderr);
+    assert.deepEqual(
+      diagnostics.filter((entry) => entry.state === "completed").map((entry) => entry.stage),
+      ["initialize", "thread/start", "turn/start", "image-result"]
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+macTest("Codex image runner bounds every app-server handshake stage", async () => {
+  const root = await mkdtemp(join(tmpdir(), "teti-codex-image-handshake-timeout-"));
+  try {
+    const workspacePath = join(root, "workspace");
+    const fakeCodexPath = join(root, "codex");
+    await mkdir(workspacePath, { recursive: true });
+    await copyFile(fakeServerFixture, fakeCodexPath);
+    await chmod(fakeCodexPath, 0o755);
+
+    const result = await run(process.execPath, [
+      "--experimental-strip-types",
+      runnerPath,
+      "--codex",
+      fakeCodexPath,
+      "--workspace",
+      workspacePath
+    ], {
+      ...process.env,
+      TETI_FAKE_CODEX_IMAGE_PATH: validImagePath,
+      TETI_FAKE_CODEX_HANG_STAGE: "initialize",
+      TETI_FAKE_CODEX_STDERR: "token=must-not-log C:\\Users\\jesse\\private.log",
+      TETI_CODEX_IMAGE_REQUEST_TIMEOUT_MS: "25"
+    }, "create an image");
+
+    assert.equal(result.code, 2, result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout), {
+      schemaVersion: 1,
+      error: { code: "CODEX_IMAGE_INITIALIZE_TIMEOUT" }
+    });
+    const failed = runnerDiagnostics(result.stderr).find((entry) => entry.state === "failed");
+    assert.equal(failed?.stage, "initialize");
+    assert.equal(failed?.failureCode, "CODEX_IMAGE_INITIALIZE_TIMEOUT");
+    assert.equal(failed?.exitCode, null);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+macTest("Codex image runner fails fast when app-server exits cleanly before initialize", async () => {
+  const root = await mkdtemp(join(tmpdir(), "teti-codex-image-clean-early-exit-"));
+  try {
+    const workspacePath = join(root, "workspace");
+    const fakeCodexPath = join(root, "codex");
+    await mkdir(workspacePath, { recursive: true });
+    await copyFile(fakeServerFixture, fakeCodexPath);
+    await chmod(fakeCodexPath, 0o755);
+
+    const startedAt = Date.now();
+    const result = await run(process.execPath, [
+      "--experimental-strip-types",
+      runnerPath,
+      "--codex",
+      fakeCodexPath,
+      "--workspace",
+      workspacePath
+    ], {
+      ...process.env,
+      TETI_FAKE_CODEX_IMAGE_PATH: validImagePath,
+      TETI_FAKE_CODEX_EXIT_STAGE: "initialize"
+    }, "create an image");
+
+    assert.equal(result.code, 2, result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout), {
+      schemaVersion: 1,
+      error: { code: "CODEX_IMAGE_SERVER_EXITED" }
+    });
+    assert.ok(Date.now() - startedAt < 5_000);
+    const failed = runnerDiagnostics(result.stderr).find((entry) => entry.state === "failed");
+    assert.equal(failed?.stage, "initialize");
+    assert.equal(failed?.exitCode, 0);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -209,10 +293,12 @@ macTest("real Codex image runner completes through Host Agent and Artifact Store
     classifyFailure: (stdout) => productionConnector.classifyFailure(stdout)
   };
   const artifactStore = new FileTaskAttachmentStore(join(root, "artifacts"));
+  const diagnostics: Array<{ event: string; fields: Record<string, unknown> }> = [];
   const hostAgent = new TetiHostAgentKernel({
     connectors: [connector],
     workspaceRoot,
-    artifactImageStore: artifactStore
+    artifactImageStore: artifactStore,
+    onDiagnostic: (event, fields) => diagnostics.push({ event, fields: structuredClone(fields) })
   });
 
   try {
@@ -240,6 +326,13 @@ macTest("real Codex image runner completes through Host Agent and Artifact Store
     });
     assert.ok(storedPath);
     assert.equal((await readFile(storedPath)).subarray(0, 8).toString("hex"), "89504e470d0a1a0a");
+    assert.deepEqual(
+      diagnostics
+        .filter((entry) => entry.event === "callable.image-runner"
+          && entry.fields.state === "completed")
+        .map((entry) => entry.fields.executionStage),
+      ["initialize", "thread/start", "turn/start", "image-result"]
+    );
   } finally {
     await hostAgent.shutdown();
     await rm(root, { recursive: true, force: true });
@@ -267,4 +360,11 @@ function run(
     child.once("close", (code) => resolve({ code, stdout, stderr }));
     child.stdin.end(stdin);
   });
+}
+
+function runnerDiagnostics(stderr: string): CodexImageRunnerDiagnostic[] {
+  return stderr
+    .split(/\r?\n/)
+    .map(parseCodexImageRunnerDiagnostic)
+    .filter((entry): entry is CodexImageRunnerDiagnostic => entry !== null);
 }

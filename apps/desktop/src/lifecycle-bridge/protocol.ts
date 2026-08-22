@@ -42,6 +42,7 @@ export type LifecycleMethod =
   | "connection.request"
   | "connection.accept"
   | "connection.reject"
+  | "connection.passport.refresh"
   | "task.send"
   | "task.list"
   | "task.summary"
@@ -99,6 +100,7 @@ export const LIFECYCLE_METHODS: readonly LifecycleMethod[] = [
   "connection.request",
   "connection.accept",
   "connection.reject",
+  "connection.passport.refresh",
   "task.send",
   "task.list",
   "task.summary",
@@ -370,6 +372,7 @@ export const LIFECYCLE_TIMEOUT_MS: Record<LifecycleMethod, number> = {
   "connection.request": 30_000,
   "connection.accept": 30_000,
   "connection.reject": 30_000,
+  "connection.passport.refresh": 5_000,
   "task.send": 30_000,
   "task.list": 2_000,
   "task.summary": 2_000,

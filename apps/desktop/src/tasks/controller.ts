@@ -884,22 +884,26 @@ export class TaskController {
       ]);
       if (summaryResult.ok) this.snapshotValue.summary = summaryResult.summary;
       if (taskId && detailResult?.ok && this.isVisibleDetail(taskId)) {
-        const viewedRecord = await this.markStageResultsViewedIfNeeded(detailResult.record);
-        this.snapshotValue.selectedTask = viewedRecord;
+        // A periodic refresh may reveal a newly completed collaboration stage,
+        // but it is not a user acknowledgement. Keep the stage unread so both
+        // requester and receiver retain the yellow eye indicator until they
+        // deliberately enter the Task again.
+        const refreshedRecord = detailResult.record;
+        this.snapshotValue.selectedTask = refreshedRecord;
         this.snapshotValue.selectedExecution = detailResult.execution;
         this.snapshotValue.selectedStructuredMemory = detailResult.structuredMemory;
         this.snapshotValue.selectedImagePaths = await this.resolveSelectedImagePaths(
-          viewedRecord
+          refreshedRecord
         );
         const previewChildAgentId = this.snapshotValue.structuredMemoryPreview?.childAgentId;
         const nextMemoryPreviewKey = structuredMemoryActionKey(
-          viewedRecord,
+          refreshedRecord,
           previewChildAgentId
         );
         if (nextMemoryPreviewKey && nextMemoryPreviewKey !== this.structuredMemoryPreviewKey) {
           this.snapshotValue.structuredMemoryExcludedIds = [];
           const preview = await this.readStructuredMemoryPreview(
-            viewedRecord,
+            refreshedRecord,
             previewChildAgentId
           );
           this.snapshotValue.structuredMemoryPreview = preview;
@@ -909,9 +913,6 @@ export class TaskController {
           this.snapshotValue.structuredMemoryPreview = null;
           this.snapshotValue.structuredMemoryUseNextExecution = false;
           this.structuredMemoryPreviewKey = null;
-        }
-        if (viewedRecord !== detailResult.record) {
-          this.snapshotValue.summary = await this.client.summaries();
         }
       }
       if (summaryResult.ok && (!taskId || detailResult?.ok)) {

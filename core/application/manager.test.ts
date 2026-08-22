@@ -225,6 +225,45 @@ test("Presence accepts explicit Passport capability and rejects malformed versio
   }
 });
 
+test("Presence validates Passport leases and explicit refresh requests", () => {
+  const base = {
+    version: 2 as const,
+    type: "teti.presence" as const,
+    messageId: "passport-lease",
+    fromTetiId: "teti_remote001",
+    createdAt: fixedNow,
+    payload: {
+      status: "online",
+      timestamp: fixedNow,
+      collaborationProtocolEpoch: 2,
+      taskProtocolVersions: [7],
+      passportSchemaVersions: [4],
+      passportLease: {
+        schemaVersion: 1,
+        contentHash: "a".repeat(64),
+        checkedAt: fixedNow,
+        validForSeconds: 300
+      },
+      passportRefreshRequestedAt: fixedNow
+    }
+  };
+  assert.doesNotThrow(() => validateApplicationEnvelope(base));
+  assert.throws(() => validateApplicationEnvelope({
+    ...base,
+    payload: {
+      ...base.payload,
+      passportLease: { ...base.payload.passportLease, contentHash: "unsafe" }
+    }
+  }), /Passport lease/);
+  assert.throws(() => validateApplicationEnvelope({
+    ...base,
+    payload: {
+      ...base.payload,
+      passportLease: { ...base.payload.passportLease, validForSeconds: 600 }
+    }
+  }), /Passport lease/);
+});
+
 test("application protocol rejects oversized raw JSON and envelope extension fields", () => {
   const oversized = JSON.stringify({
     version: 2,

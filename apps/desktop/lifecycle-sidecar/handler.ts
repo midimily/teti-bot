@@ -252,6 +252,16 @@ async function dispatchLifecycleRequest(
     case "connection.reject":
       return (await dependencies.getPeerConnectionService()).reject(validateRequestId(request.params?.requestId));
 
+    case "connection.passport.refresh": {
+      const service = await dependencies.getPeerConnectionService();
+      if (!service.requestPassportRefresh) throw new Error("Peer Passport refresh is unavailable.");
+      await service.requestPassportRefresh(
+        validateRequestId(request.params?.requestId),
+        "details_opened"
+      );
+      return true;
+    }
+
     case "task.send": {
       const service = await dependencies.getPeerConnectionService();
       if (!service.sendTask) throw new Error("Task transport is unavailable.");
@@ -1021,6 +1031,7 @@ function fallbackCodeForMethod(method: LifecycleRequest["method"]) {
     case "connection.request":
     case "connection.accept":
     case "connection.reject":
+    case "connection.passport.refresh":
       return "CONNECTION_REQUEST_FAILED";
     case "task.send":
     case "task.list":

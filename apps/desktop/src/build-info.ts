@@ -21,5 +21,8 @@ export const TETI_BUILD_INFO: Readonly<TetiBuildInfo> = Object.freeze({
   appVersion: injectedVersion,
   buildTimestamp: injectedTimestamp,
   buildType: injectedBuildType,
-  localDevelopmentNetworkSwitchEnabled: injectedBuildType === "development"
+  // Temporarily keep the local Network environment out of both internal test
+  // builds and prerelease packages. The Runtime also consumes this flag, so a
+  // persisted local-development preference cannot remain active while hidden.
+  localDevelopmentNetworkSwitchEnabled: false
 });

@@ -34,7 +34,7 @@ import type {
   PeerConnectionResult,
   PublicTetiIdentity
 } from "../../src/lifecycle-bridge/protocol.ts";
-import type { PeerConnectionService } from "../connections.ts";
+import type { PassportRefreshReason, PeerConnectionService } from "../connections.ts";
 import type { PassportSharingStore } from "./passport/sharing.ts";
 import {
   TetiRuntimeHost,
@@ -87,7 +87,7 @@ export const TETI_RUNTIME_INTERVALS = {
   peerProfileRefreshMs: 15 * 60 * 1_000,
   peerPresenceRefreshMs: 15_000,
   chatmailPollMs: 3_000,
-  codexRefreshMs: 10 * 60 * 1_000
+  codexRefreshMs: 60_000
 } as const;
 
 export const TETI_RUNTIME_SHUTDOWN_TIMEOUT_MS = 2_500;
@@ -387,6 +387,7 @@ export class TetiRuntime {
         run: async () => {
           const state = await this.dependencies.codexUsageService.refreshNow();
           this.notifyNetworkProfileStateChange("resource", state);
+          this.host.runNow(TETI_RUNTIME_JOB_IDS.chatmailPoll);
         }
       }
     );
@@ -756,10 +757,26 @@ export class TetiRuntime {
         )] as const;
       }
     }));
+    const newlyOnline = observed
+      .filter(([tetiId, presence]) =>
+        presence.state === "online" && this.peerPresence.get(tetiId)?.state !== "online"
+      )
+      .map(([tetiId]) => tetiId);
     // Publish one complete refresh generation. Passport reads must never see a
     // partially updated list merely because peer requests settled at different
     // times.
     for (const [tetiId, presence] of observed) this.peerPresence.set(tetiId, presence);
+    if (newlyOnline.length > 0) {
+      const service = await this.rawPeerService();
+      const requestIds = new Map((this.peerConnections ?? []).map(
+        (connection) => [connection.remoteTetiId, connection.requestId] as const
+      ));
+      await Promise.allSettled(newlyOnline.map(async (tetiId) => {
+        const requestId = requestIds.get(tetiId);
+        if (requestId) await service.requestPassportRefresh?.(requestId, "peer_online");
+      }));
+      this.host.runNow(TETI_RUNTIME_JOB_IDS.chatmailPoll);
+    }
   }
 
   private async readPeerResult(): Promise<PeerConnectionResult> {
@@ -806,6 +823,16 @@ export class TetiRuntime {
 
   async rejectPeer(requestId: string): Promise<PeerConnectionResult> {
     return this.captureUserPeerOperation((service) => service.reject(requestId));
+  }
+
+  async requestPeerPassportRefresh(
+    requestId: string,
+    reason: PassportRefreshReason = "manual"
+  ): Promise<void> {
+    const service = await this.rawPeerService();
+    if (!service.requestPassportRefresh) throw new Error("Peer Passport refresh is unavailable.");
+    await service.requestPassportRefresh(requestId, reason);
+    this.host.runNow(TETI_RUNTIME_JOB_IDS.chatmailPoll);
   }
 
   async sendTask(input: SendCollaborationTaskInput): Promise<CollaborationTaskTransportRecord> {
@@ -1077,6 +1104,13 @@ class RuntimePeerConnectionFacade implements PeerConnectionService {
 
   reject(requestId: string): Promise<PeerConnectionResult> {
     return this.runtime.rejectPeer(requestId);
+  }
+
+  requestPassportRefresh(
+    requestId: string,
+    reason?: PassportRefreshReason
+  ): Promise<void> {
+    return this.runtime.requestPeerPassportRefresh(requestId, reason);
   }
 
   sendTask(input: SendCollaborationTaskInput): Promise<CollaborationTaskTransportRecord> {

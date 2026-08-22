@@ -106,7 +106,15 @@ function validatePayload(type: TetiApplicationMessageType, payload: Record<strin
   if (type === "teti.presence") {
     rejectUnknownKeys(
       payload,
-      ["status", "timestamp", "collaborationProtocolEpoch", "taskProtocolVersions", "passportSchemaVersions"],
+      [
+        "status",
+        "timestamp",
+        "collaborationProtocolEpoch",
+        "taskProtocolVersions",
+        "passportSchemaVersions",
+        "passportLease",
+        "passportRefreshRequestedAt"
+      ],
       "Presence payload"
     );
     requireBoundedString(payload.status, "status", 64);
@@ -129,6 +137,26 @@ function validatePayload(type: TetiApplicationMessageType, payload: Record<strin
       }
     } catch {
       throw new TetiApplicationProtocolError("Presence Passport schema versions are invalid.");
+    }
+    if (payload.passportLease !== undefined) {
+      if (!isRecord(payload.passportLease)) {
+        throw new TetiApplicationProtocolError("Presence Passport lease is invalid.");
+      }
+      rejectUnknownKeys(
+        payload.passportLease,
+        ["schemaVersion", "contentHash", "checkedAt", "validForSeconds"],
+        "Presence Passport lease"
+      );
+      if (payload.passportLease.schemaVersion !== 1
+        || typeof payload.passportLease.contentHash !== "string"
+        || !/^[a-f0-9]{64}$/.test(payload.passportLease.contentHash)
+        || payload.passportLease.validForSeconds !== 300) {
+        throw new TetiApplicationProtocolError("Presence Passport lease is invalid.");
+      }
+      requireTimestamp(payload.passportLease.checkedAt, "passportLease.checkedAt");
+    }
+    if (payload.passportRefreshRequestedAt !== undefined) {
+      requireTimestamp(payload.passportRefreshRequestedAt, "passportRefreshRequestedAt");
     }
     return;
   }

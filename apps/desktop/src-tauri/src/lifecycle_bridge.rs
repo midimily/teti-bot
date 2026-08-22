@@ -788,6 +788,7 @@ pub fn timeout_for_method(method: &str) -> Duration {
         "network.identity.retry" => 30_000,
         "connection.resolve" => 15_000,
         "connection.request" | "connection.accept" | "connection.reject" => 30_000,
+        "connection.passport.refresh" => 5_000,
         "task.send" => 30_000,
         "task.list"
         | "task.summary"
@@ -841,6 +842,7 @@ fn is_allowed_method(method: &str) -> bool {
             | "connection.request"
             | "connection.accept"
             | "connection.reject"
+            | "connection.passport.refresh"
             | "task.send"
             | "task.list"
             | "task.summary"
