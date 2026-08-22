@@ -170,7 +170,7 @@ test("Process Transport routes Windows cancellation through the tree terminator"
   });
   assert.ok(execution.pid);
   await execution.terminate(500);
-  assert.deepEqual(calls, [{ pid: execution.pid!, force: false }]);
+  assert.deepEqual(calls, [{ pid: execution.pid!, force: true }]);
 });
 
 function errorCode(error: unknown): string | undefined {

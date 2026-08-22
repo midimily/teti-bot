@@ -137,8 +137,12 @@ class ManagedProcessExecution implements ExecutionTransportHandle {
     if (this.platform === "win32") {
       const pid = this.child.pid;
       if (!pid) throw new ProcessTreeTerminationError();
-      await this.windowsTreeKiller(pid, false).catch(() => undefined);
-      if (await settlesWithin(this.completion, graceMs)) return;
+      // A hidden Windows console tree has no reliable equivalent to sending
+      // SIGTERM to a POSIX process group. A non-forced taskkill can let the
+      // root exit before all descendants do; once that happens, the root PID
+      // can no longer be used to discover and force the remaining tree.
+      // Terminate the complete tree atomically while taskkill can still walk
+      // the parent/child relationships.
       await this.windowsTreeKiller(pid, true).catch(() => {
         throw new ProcessTreeTerminationError();
       });
